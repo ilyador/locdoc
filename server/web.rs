@@ -7,6 +7,34 @@ const APP_TITLE: &str = "Locdoc — Local Markdown, together.";
 const APP_DESCRIPTION: &str =
     "Write, comment, and work together on Markdown files that stay on your computer.";
 
+pub(super) async fn observe_crawlers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let telegram = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("TelegramBot"));
+    let request = telegram.then(|| {
+        (
+            req.method().clone(),
+            if req.uri().path().ends_with("/preview.png") {
+                "image"
+            } else {
+                "page"
+            },
+            std::time::Instant::now(),
+        )
+    });
+    let response = next.run(req).await;
+    if let Some((method, kind, started)) = request {
+        // Never log capability URLs, IP addresses, titles or document text.
+        tracing::info!(%method, kind, status = response.status().as_u16(), elapsed_ms = started.elapsed().as_millis(), "Telegram crawler response");
+    }
+    response
+}
+
 fn shared_doc(s: &Store, token: &str, selected: Option<&str>) -> Result<Option<Document>> {
     if let Ok(folder) = folders::grant(s, token) {
         folders::document(s, &folder, selected)
