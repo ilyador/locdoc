@@ -797,15 +797,16 @@ button:hover {
   padding: 0 !important;
   min-height: calc(var(--doc-line-height) * 1em);
 }
-.cm-line.md-list {
+.md-list > .cm-line {
   padding-inline-start: var(--list-indent) !important;
-  text-indent: calc(-1 * var(--list-indent));
 }
 .md-list-prefix {
   display: inline-block;
   width: var(--list-indent);
+  margin-inline-start: calc(-1 * var(--list-indent));
   text-indent: 0;
   white-space: pre;
+  font-variant-numeric: tabular-nums;
 }
 .cm-focused .cm-cursor,
 .cm-cursor {
@@ -918,6 +919,9 @@ button:hover {
   background: color-mix(in srgb, var(--syntax-teal) 5%, var(--surface));
   padding-left: 14px !important;
   border-left: 1px solid var(--syntax-teal);
+}
+.md-list > .cm-line.md-quote {
+  padding-inline-start: calc(14px + var(--list-indent)) !important;
 }
 .md-link {
   color: var(--syntax-teal);

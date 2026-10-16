@@ -907,6 +907,173 @@ test("task checkboxes update Markdown, respect permission changes, and ignore co
   ydoc.destroy();
 });
 
+test("wrapped list prefixes preserve nested markers, task controls and native source editing", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc();
+  const text = ydoc.getText("content");
+  const source = [
+    "Intro",
+    "- Bulleted content that can wrap onto several display lines",
+    "  - Nested bullet content that can wrap onto several display lines",
+    "",
+    "10. Ordered content that can wrap onto several display lines",
+    "\t- Tabbed nested content that can wrap onto several display lines",
+    "",
+    "- [ ] Task content that can wrap onto several display lines",
+    "  - [x] Nested task content that can wrap onto several display lines",
+    "",
+    "- - Same-line nested content that can wrap onto several display lines",
+    "",
+    "---",
+    "",
+    "```md",
+    "- [ ] Literal code",
+    "```",
+  ].join("\n");
+  text.insert(0, source);
+  const awareness = new Awareness(ydoc);
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="wrapped-lists"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  const lines = [...page.container.querySelectorAll<HTMLElement>(".md-list")];
+  assert.equal(lines.length, 7);
+  assert.deepEqual(
+    lines.map((line) => line.style.getPropertyValue("--list-indent")),
+    ["2ch", "4ch", "4ch", "6ch", "calc(1ch + 28px)", "calc(3ch + 28px)", "4ch"],
+  );
+  for (const line of lines)
+    assert.equal(line.querySelectorAll(".md-list-prefix").length, 1);
+  const nestedTask = screen.getByRole("checkbox", {
+    name: "Nested task content that can wrap onto several display lines",
+  });
+  assert.ok(
+    nestedTask.closest(".md-list-prefix")?.textContent?.startsWith("  "),
+  );
+  assert.equal(
+    page.container.querySelectorAll(".md-code-line .md-list-prefix").length,
+    0,
+  );
+  assert.equal(text.toString(), source);
+  fireEvent.click(nestedTask.closest("label"));
+  assert.equal(
+    text.toString(),
+    source.replace("  - [x] Nested task", "  - [ ] Nested task"),
+  );
+
+  const view = EditorView.findFromDOM(
+    page.container.querySelector(".cm-editor")!,
+  )!;
+  const bullet = source.indexOf("- Bulleted");
+  const markerText =
+    lines[0].querySelector(".md-list-prefix")!.firstChild!.firstChild!;
+  assert.equal(view.posAtDOM(markerText, 0), bullet);
+  act(() =>
+    view.dispatch({
+      changes: { from: bullet, to: bullet + 1, insert: "10." },
+      selection: { anchor: bullet + 3 },
+    }),
+  );
+  assert.ok(text.toString().startsWith("Intro\n10. Bulleted"));
+  assert.equal(
+    page.container
+      .querySelector<HTMLElement>(".md-list")!
+      .style.getPropertyValue("--list-indent"),
+    "4ch",
+  );
+  assert.equal(view.state.selection.main.head, bullet + 3);
+  page.unmount();
+  awareness.destroy();
+  ydoc.destroy();
+});
+
+test("expanded comments retain list indentation across fragments without indenting the conversation or next line", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { Awareness } = await import("y-protocols/awareness");
+  for (const suffix of [
+    " A deliberately long continuation that wraps several times",
+    "",
+  ]) {
+    const ydoc = new Y.Doc();
+    const text = ydoc.getText("content");
+    const source =
+      "- Another[[comment(alex): A note inside a wrapped item.]]" +
+      suffix +
+      "\n\nA separate paragraph";
+    text.insert(0, source);
+    const awareness = new Awareness(ydoc);
+    const thread = {
+      ...comment,
+      anchor: {
+        start: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(text, 2),
+        ),
+        end: Y.relativePositionToJSON(
+          Y.createRelativePositionFromTypeIndex(text, 9, -1),
+        ),
+      },
+    };
+    const props = {
+      ydoc,
+      provider: { awareness } as any,
+      editable: true,
+      id: "list-comment",
+      onChange() {},
+      onComment() {},
+      onUpload() {},
+      comments: [thread],
+    };
+    const page = render(
+      <MarkdownEditor
+        {...props}
+        activeComment="c1"
+        conversation={<textarea aria-label="List comment reply" />}
+      />,
+    );
+    const input = await screen.findByLabelText("List comment reply");
+    const host = input.closest(".inline-comment-host")!;
+    const wrapper = page.container.querySelector<HTMLElement>(".md-list")!;
+    assert.equal(wrapper.style.getPropertyValue("--list-indent"), "2ch");
+    if (suffix) {
+      assert.equal(host.parentElement, wrapper);
+      assert.equal(host.previousElementSibling?.textContent, "- Another");
+      assert.equal(host.nextElementSibling?.textContent, suffix);
+      assert.ok(host.nextElementSibling?.classList.contains("cm-line"));
+      assert.equal(wrapper.querySelectorAll(":scope > .cm-line").length, 2);
+      assert.equal(wrapper.querySelectorAll(".md-list-prefix").length, 1);
+    } else {
+      assert.equal(
+        host.parentElement,
+        page.container.querySelector(".cm-content"),
+      );
+      assert.equal(wrapper.querySelectorAll(":scope > .cm-line").length, 1);
+    }
+    const paragraph = [...page.container.querySelectorAll(".cm-line")].find(
+      (line) => line.textContent === "A separate paragraph",
+    )!;
+    assert.equal(paragraph.closest(".md-list"), null);
+    assert.equal(text.toString(), source);
+    page.rerender(<MarkdownEditor {...props} activeComment={null} />);
+    assert.equal(
+      page.container.querySelectorAll(".md-list > .cm-line").length,
+      1,
+    );
+    assert.equal(text.toString(), source);
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
 test("link insertion retains its collaborative selection while a picker is open", async () => {
   const { MarkdownEditor } = await import("../src/editor.tsx");
   const { Awareness } = await import("y-protocols/awareness");

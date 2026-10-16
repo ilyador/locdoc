@@ -24,15 +24,21 @@ import {
 import { markdownLink, resolveDocumentLink } from "./document-links";
 import type { Entry } from "./model";
 import type { Comment } from "./model";
-import { EditorState, StateField, Compartment, Prec } from "@codemirror/state";
+import {
+  EditorState,
+  StateField,
+  Compartment,
+  Prec,
+  countColumn,
+} from "@codemirror/state";
 import {
   EditorView,
   keymap,
   Decoration,
+  BlockWrapper,
   WidgetType,
   drawSelection,
   placeholder,
-  type DecorationSet,
 } from "@codemirror/view";
 import { defaultKeymap, indentWithTab } from "@codemirror/commands";
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
@@ -258,8 +264,9 @@ function livePreview(
   path = "",
   entries: Entry[] = [],
 ) {
-  function build(state: EditorState): DecorationSet {
+  function build(state: EditorState) {
     const decorations: ReturnType<Decoration["range"]>[] = [];
+    const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
     const active = (state.readOnly ? [] : state.selection.ranges).map((r) => ({
       from: state.doc.lineAt(r.from).from,
       to: state.doc.lineAt(r.to).to,
@@ -268,6 +275,7 @@ function livePreview(
       !active.some((r) => from <= r.to && to >= r.from);
     const codeLines = new Set<number>();
     const tableLines = new Set<number>();
+    const listPrefixes = new Map<number, { content: number; indent: string }>();
     syntaxTree(state).iterate({
       enter(n) {
         const { name, from, to } = n;
@@ -328,6 +336,21 @@ function livePreview(
             Decoration.line({ class: "md-quote" }).range(line.from),
           );
         }
+        if (name === "ListItem") {
+          const mark = n.node.getChild("ListMark");
+          if (mark) {
+            const line = state.doc.lineAt(from);
+            const task = n.node.getChild("Task")?.getChild("TaskMarker");
+            const end = task?.to ?? mark.to;
+            const spaces =
+              state.sliceDoc(end, line.to).match(/^[\t ]*/)?.[0] ?? "";
+            const content = end + spaces.length;
+            const indent = task
+              ? `calc(${countColumn(state.sliceDoc(line.from, mark.from) + spaces, state.tabSize)}ch + 28px)`
+              : `${countColumn(state.sliceDoc(line.from, content), state.tabSize)}ch`;
+            listPrefixes.set(line.from, { content, indent });
+          }
+        }
         if (
           [
             "HeaderMark",
@@ -347,7 +370,7 @@ function livePreview(
         }
         if (name === "TaskMarker") {
           const line = state.doc.lineAt(from);
-          const marker = line.text.match(/^(\s*(?:[-*+]|\d+[.)])\s+)\[[ xX]\]/);
+          const marker = n.node.parent?.parent?.getChild("ListMark");
           const checked =
             state.sliceDoc(from + 1, from + 2).toLowerCase() === "x";
           decorations.push(
@@ -356,7 +379,7 @@ function livePreview(
             }).range(line.from),
           );
           if (marker)
-            decorations.push(Decoration.replace({}).range(line.from, from));
+            decorations.push(Decoration.replace({}).range(marker.from, from));
           decorations.push(
             Decoration.replace({
               widget: new TaskWidget(
@@ -410,6 +433,19 @@ function livePreview(
         }
       },
     });
+    for (const [from, { content, indent }] of listPrefixes) {
+      // A conversation can split one source line into several display blocks.
+      // Share its indent across text fragments while leaving the host full-width.
+      wrappers.push(
+        BlockWrapper.create({
+          tagName: "div",
+          attributes: { class: "md-list", style: `--list-indent: ${indent}` },
+        }).range(from, state.doc.lineAt(from).to),
+      );
+      decorations.push(
+        Decoration.mark({ class: "md-list-prefix" }).range(from, content),
+      );
+    }
     for (let i = 1; i <= state.doc.lines; i++) {
       const line = state.doc.line(i);
       if (codeLines.has(i) || tableLines.has(i)) continue;
@@ -435,16 +471,22 @@ function livePreview(
           Decoration.line({ class: "md-rule" }).range(line.from),
         );
     }
-    return Decoration.set(decorations, true);
+    return {
+      decorations: Decoration.set(decorations, true),
+      wrappers: BlockWrapper.set(wrappers, true),
+    };
   }
-  return StateField.define<DecorationSet>({
+  return StateField.define<ReturnType<typeof build>>({
     create: build,
     update(value, tr) {
       return tr.docChanged || tr.selection || tr.reconfigured
         ? build(tr.state)
         : value;
     },
-    provide: (f) => EditorView.decorations.from(f),
+    provide: (f) => [
+      EditorView.decorations.from(f, (value) => value.decorations),
+      EditorView.blockWrappers.from(f, (value) => value.wrappers),
+    ],
   });
 }
 
