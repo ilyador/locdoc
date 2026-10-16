@@ -1215,7 +1215,7 @@ test("word count measures reading content instead of Markdown control syntax", (
     assert.equal(countMarkdownWords(source), expected, source);
 });
 
-test("idle native viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
+test("fixed viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport");
   const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");
   const standalone = Object.getOwnPropertyDescriptor(navigator, "standalone");
@@ -1226,14 +1226,12 @@ test("idle native viewport and footer visibility survive keyboard resize, rotati
     for (const profile of [
       {
         full: 844,
-        small: 751,
         top: 59,
         bottom: 34,
         visible: 751,
-        native: false,
       },
-      { full: 874, small: 812, top: 0, bottom: 0, visible: 812, native: true },
-      { full: 844, small: 844, top: 0, bottom: 0, visible: 844, native: false },
+      { full: 812, top: 0, bottom: 0, visible: 812 },
+      { full: 844, top: 0, bottom: 0, visible: 844 },
     ]) {
       window.innerWidth = 390;
       const viewport = Object.assign(new window.EventTarget(), {
@@ -1250,14 +1248,7 @@ test("idle native viewport and footer visibility survive keyboard resize, rotati
       });
       HTMLElement.prototype.getBoundingClientRect = function () {
         if (!this.hasAttribute("data-viewport-gauge")) return rect.call(this);
-        return new DOMRect(
-          0,
-          0,
-          0,
-          this.getAttribute("data-viewport-gauge") === "small"
-            ? profile.small
-            : profile.full,
-        );
+        return new DOMRect(0, 0, 0, profile.full);
       };
       window.getComputedStyle = function (element, pseudo) {
         return element.hasAttribute("data-viewport-gauge")
@@ -1272,7 +1263,6 @@ test("idle native viewport and footer visibility survive keyboard resize, rotati
       const stop = protectTouchViewport(document),
         root = document.documentElement;
       try {
-        assert.equal(root.hasAttribute("data-native-viewport"), profile.native);
         assert.ok(!root.hasAttribute("data-keyboard-open"));
         input.focus();
         assert.ok(!root.hasAttribute("data-keyboard-open"));
@@ -1280,19 +1270,18 @@ test("idle native viewport and footer visibility survive keyboard resize, rotati
         viewport.dispatchEvent(new window.Event("resize"));
         assert.ok(root.hasAttribute("data-keyboard-open"));
         // Chrome may resize CSS units too; that must not become the idle height.
-        profile.full = profile.small = 430;
+        profile.full = 430;
         viewport.height = 430;
         viewport.dispatchEvent(new window.Event("resize"));
         assert.ok(root.hasAttribute("data-keyboard-open"));
-        assert.equal(root.hasAttribute("data-native-viewport"), profile.native);
         // Rotating with an open content-resizing keyboard still hides the footer.
         window.innerWidth = 844;
-        profile.full = profile.small = 250;
+        profile.full = 250;
         profile.top = profile.bottom = 0;
         viewport.height = 250;
         window.dispatchEvent(new window.Event("resize"));
         assert.ok(root.hasAttribute("data-keyboard-open"));
-        profile.full = profile.small = 390;
+        profile.full = 390;
         viewport.height = 390;
         viewport.dispatchEvent(new window.Event("resize"));
         assert.ok(document.activeElement === input);
@@ -1305,7 +1294,6 @@ test("idle native viewport and footer visibility survive keyboard resize, rotati
       }
       assert.equal(document.querySelector("[data-viewport-gauge]"), null);
       assert.ok(!root.hasAttribute("data-keyboard-open"));
-      assert.ok(!root.hasAttribute("data-native-viewport"));
     }
   } finally {
     window.innerWidth = width;

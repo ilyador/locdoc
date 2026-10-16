@@ -49,7 +49,6 @@
   --format-control-height: 36px;
   --footer-height: 36px;
   --safe-top: env(safe-area-inset-top, 0px);
-  --app-layout-height: 100dvh;
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
 }
@@ -67,10 +66,8 @@ body,
 }
 #root {
   position: fixed;
-  top: var(--app-viewport-top, 0px);
-  left: 0;
-  right: 0;
-  height: var(--app-viewport-height, var(--app-layout-height));
+  inset: var(--app-viewport-top, 0px) 0 0;
+  height: var(--app-viewport-height, auto);
 }
 body {
   margin: 0;
@@ -2312,19 +2309,6 @@ button:hover {
 
 .file-tree nav .tree-item > .doc-meta {
   margin-top: 3px;
-}
-
-/* WebKit standalone visualViewport and small viewport units omit safe areas. */
-:root[data-standalone] {
-  --app-layout-height: 100vh;
-}
-:root[data-standalone][data-native-viewport] {
-  --app-layout-height: 100svh;
-}
-@media (display-mode: standalone), (display-mode: fullscreen) {
-  :root {
-    --app-layout-height: 100vh;
-  }
 }
 
 /* Keep folder sharing in the same quiet row, with a separate touch target. */

@@ -11,21 +11,17 @@ export function protectTouchViewport(target: Document) {
       "(display-mode: standalone), (display-mode: fullscreen)",
     ).matches;
   const previousStandalone = root.hasAttribute("data-standalone");
-  const previousNative = root.hasAttribute("data-native-viewport");
   const previousKeyboard = root.hasAttribute("data-keyboard-open");
   root.toggleAttribute("data-standalone", standalone);
-  // In installed WebKit apps visualViewport.height can exclude native safe
-  // areas even with no keyboard. Measure the full CSS viewport independently.
+  // Use the same fixed viewport as the shell. vh/svh guesses can include or
+  // exclude native chrome differently after an iOS appearance change.
   const gauge = target.createElement("div");
   gauge.setAttribute("data-viewport-gauge", "");
   gauge.setAttribute("aria-hidden", "true");
-  gauge.style.cssText = `position:fixed;top:0;left:0;width:0;height:${standalone ? "100vh" : "100dvh"};padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box;visibility:hidden;pointer-events:none;`;
+  gauge.style.cssText =
+    "position:fixed;inset:0;pointer-events:none;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box;";
   (target.body || root).appendChild(gauge);
-  const smallGauge = gauge.cloneNode() as HTMLElement;
-  smallGauge.setAttribute("data-viewport-gauge", "small");
-  smallGauge.style.height = "100svh";
-  (target.body || root).appendChild(smallGauge);
-  let idle: { width: number; usable: number; native: boolean } | null = null;
+  let idle: { width: number; usable: number } | null = null;
   let keyboardOpen = false;
   let rotatedKeyboardHeight: number | null = null;
   const isEditing = () => {
@@ -46,7 +42,6 @@ export function protectTouchViewport(target: Document) {
     if (!win) return;
     const editing = isEditing();
     const full = gauge.getBoundingClientRect().height || win.innerHeight;
-    const small = smallGauge.getBoundingClientRect().height || full;
     const safe = win.getComputedStyle(gauge);
     const safeHeight =
       (parseFloat(safe.paddingTop) || 0) +
@@ -54,13 +49,10 @@ export function protectTouchViewport(target: Document) {
     const visible = viewport?.height ?? win.innerHeight;
     const widthChanged = !!idle && idle.width !== win.innerWidth;
     // Cache the idle baseline before an IME can resize viewport CSS units.
-    // A native opaque status bar leaves extra space beyond the safe insets.
     if (!idle || !editing || widthChanged || visible > idle.usable + 1) {
-      const native = standalone && full - small > safeHeight + 1;
       idle = {
         width: win.innerWidth,
-        native,
-        usable: native ? small : standalone ? full - safeHeight : full,
+        usable: standalone ? full - safeHeight : full,
       };
     }
     if (
@@ -74,7 +66,6 @@ export function protectTouchViewport(target: Document) {
       !!viewport &&
       editing &&
       (idle.usable - visible > 1 || rotatedKeyboardHeight !== null);
-    root.toggleAttribute("data-native-viewport", idle.native);
     root.toggleAttribute("data-keyboard-open", keyboardOpen);
     if (standalone) {
       if (!keyboardOpen) {
@@ -116,9 +107,7 @@ export function protectTouchViewport(target: Document) {
     target.removeEventListener("focusin", fitViewport);
     target.removeEventListener("focusout", fitViewport);
     gauge.remove();
-    smallGauge.remove();
     root.toggleAttribute("data-standalone", previousStandalone);
-    root.toggleAttribute("data-native-viewport", previousNative);
     root.toggleAttribute("data-keyboard-open", previousKeyboard);
     viewport?.removeEventListener("resize", fitViewport);
     viewport?.removeEventListener("scroll", fitViewport);
