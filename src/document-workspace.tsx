@@ -123,9 +123,23 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const busy = pending > 0;
   const [toast, setToast] = useState("");
   const error = documentError || workspace.error;
-  const footerStatus = doc || id ? status : "Local workspace";
+  const currentFooterStatus = doc || id ? status : "Local workspace";
+  const [footerStatus, setFooterStatus] = useState(currentFooterStatus);
+  useEffect(() => {
+    if (currentFooterStatus === footerStatus) return;
+    if (
+      currentFooterStatus.startsWith("Offline") ||
+      currentFooterStatus === "Unable to open document"
+    ) {
+      setFooterStatus(currentFooterStatus);
+      return;
+    }
+    const timer = setTimeout(() => setFooterStatus(currentFooterStatus), 2000);
+    return () => clearTimeout(timer);
+  }, [currentFooterStatus, footerStatus]);
   const statusWarning =
-    status.startsWith("Offline") || status === "Unable to open document";
+    footerStatus.startsWith("Offline") ||
+    footerStatus === "Unable to open document";
   const [newPath, setNewPath] = useState("");
   const [createKind, setCreateKind] = useState("file");
   const [apiKey, setApiKey] = useState("");
