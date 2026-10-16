@@ -498,27 +498,6 @@ button:hover {
   gap: 14px;
   flex-shrink: 0;
 }
-.save-state {
-  font-size: var(--ui-meta-size);
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-.save-state svg {
-  color: #5b7b92;
-}
-.save-state.offline {
-  color: #9b6827;
-}
-.pulse-dot {
-  display: inline-block;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--muted);
-  animation: pulse 1s ease-in-out infinite;
-}
 .presence {
   display: flex;
   padding-left: 4px;
@@ -757,6 +736,16 @@ button:hover {
 }
 .statusbar > div:first-child {
   gap: 6px;
+}
+.document-status > svg {
+  flex-shrink: 0;
+}
+.document-status > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.document-status.has-warning {
+  color: var(--syntax-amber);
 }
 .footer-metrics {
   grid-column: -2;
@@ -1782,9 +1771,6 @@ button:hover {
   .formatbar {
     padding: 0 17px;
   }
-  .save-state span {
-    display: none;
-  }
   .document-canvas {
     padding: 24px 34px 25px;
   }
@@ -1925,9 +1911,6 @@ button:hover {
   .comments-toggle {
     width: 40px;
   }
-  .save-state {
-    display: none;
-  }
   .formatbar {
     min-height: var(--toolbar-height);
     padding: 0 10px;
@@ -2049,15 +2032,9 @@ button:hover {
   padding: 0 10px;
   gap: 6px;
 }
-.mobile-save-status {
-  display: none;
-}
-@media (max-width: 760px) {
-  .footer-connection {
+@media (max-width: 360px) {
+  .reading-time {
     display: none;
-  }
-  .mobile-save-status {
-    display: inline;
   }
 }
 

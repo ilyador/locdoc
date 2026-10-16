@@ -39,6 +39,7 @@ import {
   WarningCircle,
   PencilSimple,
   CheckCircle,
+  Clock,
 } from "@phosphor-icons/react";
 import * as Y from "yjs";
 import { api, send } from "./api";
@@ -122,6 +123,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const busy = pending > 0;
   const [toast, setToast] = useState("");
   const error = documentError || workspace.error;
+  const footerStatus = doc || id ? status : "Local workspace";
+  const statusWarning =
+    status.startsWith("Offline") || status === "Unable to open document";
   const [newPath, setNewPath] = useState("");
   const [createKind, setCreateKind] = useState("file");
   const [apiKey, setApiKey] = useState("");
@@ -669,23 +673,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               <span className="crumb-current">{filename}</span>
             </div>
             <div className="top-actions">
-              <div
-                className={`save-state ${status.startsWith("Offline") || error ? "offline" : ""}`}
-                title={status}
-              >
-                {error ? (
-                  <WarningCircle size={15} />
-                ) : status === "Saved to disk" ? (
-                  <CheckCircle size={15} />
-                ) : status.startsWith("Offline") ? (
-                  <WarningCircle size={15} />
-                ) : (
-                  <span className="pulse-dot" />
-                )}
-                <span>
-                  {status === "Saved to disk" ? "All changes saved" : status}
-                </span>
-              </div>
               {doc && (
                 <>
                   <div className="presence">
@@ -995,26 +982,24 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             </div>
           )}
           <footer className="statusbar">
-            <div>
-              <span
-                className={`status-dot ${status.startsWith("Offline") ? "warn" : ""}`}
-              />
-              <span className="footer-connection">
-                {doc
-                  ? sharedToken
-                    ? "Live collaboration"
-                    : "Local file connected"
-                  : "Your local Markdown workspace"}
-              </span>
-              <span className="mobile-save-status" role="status">
-                {doc
-                  ? status.startsWith("Offline")
-                    ? "Offline"
-                    : status === "Saved to disk"
-                      ? "Saved to disk"
-                      : status
-                  : "Local workspace"}
-              </span>
+            <div
+              className={`document-status ${statusWarning ? "has-warning" : ""}`}
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              aria-label={footerStatus}
+              title={footerStatus}
+            >
+              {statusWarning ? (
+                <WarningCircle size={15} aria-hidden="true" />
+              ) : footerStatus === "Saved to disk" ? (
+                <CheckCircle size={15} aria-hidden="true" />
+              ) : !doc && !id ? (
+                <FileText size={15} aria-hidden="true" />
+              ) : (
+                <Clock size={15} aria-hidden="true" />
+              )}
+              <span>{footerStatus}</span>
             </div>
             {doc && (
               <div className="footer-metrics">
@@ -1022,7 +1007,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   {wordCount.toLocaleString()}{" "}
                   {wordCount === 1 ? "word" : "words"}
                 </span>
-                <span>{Math.max(1, Math.ceil(wordCount / 220))} min read</span>
+                <span className="reading-time">
+                  {Math.max(1, Math.ceil(wordCount / 220))} min read
+                </span>
                 <span
                   className="attachment-usage"
                   title="Attachment storage, including uploaded files awaiting insertion"
