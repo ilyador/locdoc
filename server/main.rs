@@ -3,6 +3,7 @@ mod disk;
 mod documents;
 mod folders;
 mod links;
+mod social;
 mod web;
 use disk::DiskFile;
 
@@ -1910,7 +1911,7 @@ async fn guard(
         return denied().into_response();
     }
     let path = req.uri().path();
-    if path.starts_with("/api/") || path.starts_with("/ws/") {
+    if path.starts_with("/api/") || path.starts_with("/ws/") || path.starts_with("/s/") {
         let peer = req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1932,7 +1933,7 @@ async fn guard(
             ("login", 15)
         } else if path == "/api/fonts" && req.method() == axum::http::Method::POST {
             ("fonts", 6)
-        } else if path.ends_with("/link-preview") {
+        } else if path.ends_with("/link-preview") || path.starts_with("/s/") {
             ("previews", 30)
         } else if path.ends_with("/upload") {
             ("uploads", 40)
@@ -1977,6 +1978,7 @@ fn router(s: App) -> Router {
  .route("/d/{id}/",get(web::shell))
  .route("/s/{token}",get(web::shell))
  .route("/s/{token}/",get(web::shell))
+ .route("/s/{token}/preview.png",get(web::preview_image))
  .fallback_service(ServeDir::new("dist"))
  .layer(DefaultBodyLimit::max(64*1024))
  .layer(axum::middleware::from_fn(|req:axum::extract::Request,next:axum::middleware::Next|async move{let cacheable=req.uri().path().starts_with("/assets/");let mut response=next.run(req).await;let ok=response.status().is_success();let h=response.headers_mut();h.insert("cache-control",if cacheable&&ok{"public, max-age=31536000, immutable"}else{"no-store"}.parse().unwrap());h.insert("x-content-type-options","nosniff".parse().unwrap());h.insert("referrer-policy","no-referrer".parse().unwrap());h.insert("x-frame-options","SAMEORIGIN".parse().unwrap());h.insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'".parse().unwrap());response}))
