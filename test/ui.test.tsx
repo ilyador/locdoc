@@ -1041,13 +1041,13 @@ test("standalone safe-area height differences cannot shorten the shell or surviv
       document.documentElement.hasAttribute("data-standalone"),
       true,
     );
-    assert.equal(style.getPropertyValue("--app-viewport-height"), "");
+    assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     assert.ok(!document.documentElement.hasAttribute("data-keyboard-open"));
     input.focus();
-    assert.equal(style.getPropertyValue("--app-viewport-height"), "");
+    assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     viewport.height = 750.5;
     viewport.dispatchEvent(new window.Event("resize"));
-    assert.equal(style.getPropertyValue("--app-viewport-height"), "");
+    assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     viewport.height = 466;
     viewport.offsetTop = 12;
     viewport.dispatchEvent(new window.Event("resize"));
@@ -1062,14 +1062,14 @@ test("standalone safe-area height differences cannot shorten the shell or surviv
       document.activeElement === input,
       "Reply opens a focused writing field",
     );
-    assert.equal(style.getPropertyValue("--app-viewport-height"), "");
+    assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     assert.ok(!document.documentElement.hasAttribute("data-keyboard-open"));
     assert.equal(style.getPropertyValue("--app-viewport-top"), "");
     // Moving focus away must also release a keyboard override immediately.
     viewport.height = 466;
     viewport.dispatchEvent(new window.Event("resize"));
     input.blur();
-    assert.equal(style.getPropertyValue("--app-viewport-height"), "");
+    assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     stop();
     stop = undefined;
     assert.equal(document.querySelector("[data-viewport-gauge]"), null);
@@ -1215,7 +1215,7 @@ test("word count measures reading content instead of Markdown control syntax", (
     assert.equal(countMarkdownWords(source), expected, source);
 });
 
-test("fixed viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
+test("measured viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport");
   const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");
   const standalone = Object.getOwnPropertyDescriptor(navigator, "standalone");
@@ -1263,6 +1263,10 @@ test("fixed viewport and footer visibility survive keyboard resize, rotation and
       const stop = protectTouchViewport(document),
         root = document.documentElement;
       try {
+        assert.equal(
+          root.style.getPropertyValue("--app-viewport-height"),
+          `${profile.full}px`,
+        );
         assert.ok(!root.hasAttribute("data-keyboard-open"));
         input.focus();
         assert.ok(!root.hasAttribute("data-keyboard-open"));
@@ -1286,7 +1290,10 @@ test("fixed viewport and footer visibility survive keyboard resize, rotation and
         viewport.dispatchEvent(new window.Event("resize"));
         assert.ok(document.activeElement === input);
         assert.ok(!root.hasAttribute("data-keyboard-open"));
-        assert.equal(root.style.getPropertyValue("--app-viewport-height"), "");
+        assert.equal(
+          root.style.getPropertyValue("--app-viewport-height"),
+          "390px",
+        );
         input.blur();
       } finally {
         stop();

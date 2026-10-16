@@ -13,8 +13,9 @@ export function protectTouchViewport(target: Document) {
   const previousStandalone = root.hasAttribute("data-standalone");
   const previousKeyboard = root.hasAttribute("data-keyboard-open");
   root.toggleAttribute("data-standalone", standalone);
-  // Use the same fixed viewport as the shell. vh/svh guesses can include or
-  // exclude native chrome differently after an iOS appearance change.
+  // Measure the full viewport without a painted fixed app ancestor, which can
+  // influence iOS's native status-bar treatment. Explicit pixels also avoid
+  // WebKit subtracting safe areas from an absolutely positioned shell's insets.
   const gauge = target.createElement("div");
   gauge.setAttribute("data-viewport-gauge", "");
   gauge.setAttribute("aria-hidden", "true");
@@ -67,12 +68,10 @@ export function protectTouchViewport(target: Document) {
       editing &&
       (idle.usable - visible > 1 || rotatedKeyboardHeight !== null);
     root.toggleAttribute("data-keyboard-open", keyboardOpen);
-    if (standalone) {
-      if (!keyboardOpen) {
-        root.style.removeProperty("--app-viewport-height");
-        root.style.removeProperty("--app-viewport-top");
-        return;
-      }
+    if (standalone && !keyboardOpen) {
+      root.style.setProperty("--app-viewport-height", `${full}px`);
+      root.style.removeProperty("--app-viewport-top");
+      return;
     }
     root.style.setProperty(
       "--app-viewport-height",

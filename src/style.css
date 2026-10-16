@@ -65,9 +65,10 @@ body,
   overscroll-behavior: none;
 }
 #root {
-  position: fixed;
-  inset: var(--app-viewport-top, 0px) 0 0;
-  height: var(--app-viewport-height, auto);
+  position: absolute;
+  top: var(--app-viewport-top, 0px);
+  left: 0;
+  height: var(--app-viewport-height, 100%);
 }
 body {
   margin: 0;
@@ -795,6 +796,16 @@ button:hover {
 .cm-line {
   padding: 0 !important;
   min-height: calc(var(--doc-line-height) * 1em);
+}
+.cm-line.md-list {
+  padding-inline-start: var(--list-indent) !important;
+  text-indent: calc(-1 * var(--list-indent));
+}
+.md-list-prefix {
+  display: inline-block;
+  width: var(--list-indent);
+  text-indent: 0;
+  white-space: pre;
 }
 .cm-focused .cm-cursor,
 .cm-cursor {
