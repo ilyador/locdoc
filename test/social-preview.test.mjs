@@ -114,7 +114,24 @@ test("social crawlers receive app-only metadata with absolute URLs on every app 
     const response = await fetch(base + path);
     assert.equal(response.status, 200, path);
     assert.match(response.headers.get("content-type"), /text\/html/);
+    // Keep small crawler pages intact through compression proxies: encoding an
+    // empty HEAD body can otherwise advertise a bogus 13/20-byte page size.
+    assert.equal(
+      response.headers.get("cache-control"),
+      "no-store, no-transform",
+    );
     const html = await response.text();
+    const head = await fetch(base + path, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(
+      head.headers.get("content-length"),
+      String(Buffer.byteLength(html)),
+    );
+    assert.equal(
+      head.headers.get("cache-control"),
+      response.headers.get("cache-control"),
+    );
+    assert.equal(await head.text(), "");
     const dom = new JSDOM(html);
     const meta = (key) =>
       dom.window.document.querySelector(
@@ -155,6 +172,8 @@ test("shared previews use real headings and prose, update with the file, and den
   });
   const path = localPath(share.shareUrl);
   const first = await metadata(path);
+  assert.equal(first.url, share.shareUrl);
+  assert.equal((await metadata(path + "/")).url, share.shareUrl);
   assert.equal(first.title, '"Travel" & plans · Locdoc');
   assert.equal(first.text, "A short opening with a link.");
   assert.ok(

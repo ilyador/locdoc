@@ -51,7 +51,12 @@ pub(super) async fn shell(
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("doc", &doc.id)
             .finish();
-        page_url = format!("{}/s/{token}?{query}", s.public_url);
+        // Preserve the shared URL. Only an explicitly selected folder document
+        // needs a query; inventing one gives crawlers a second page to resolve.
+        page_url = format!("{}/s/{token}", s.public_url);
+        if selection.doc.is_some() {
+            page_url.push_str(&format!("?{query}"));
+        }
         (
             format!("{} · Locdoc", value.title),
             value.description.clone(),
