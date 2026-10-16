@@ -1,0 +1,92 @@
+[
+  {
+    "name": "requested author and sequential replies",
+    "source": "Text\n[[comment(alex): this is my comment]]\n[[comment(ana): this is a response]]",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "this is my comment"
+        },
+        {
+          "name": "ana",
+          "body": "this is a response"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "blank line starts a new thread",
+    "source": "[[comment(alex): one]]\n\n[[comment(ana): two]]",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "one"
+        }
+      ],
+      [
+        {
+          "name": "ana",
+          "body": "two"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "escaped delimiters and multiline body",
+    "source": "Note [[comment(Ana\\) B): line one\\nline two \\]\\] \\\\home]] after",
+    "threads": [
+      [
+        {
+          "name": "Ana) B",
+          "body": "line one\nline two ]] \\home"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "literal code examples stay literal",
+    "source": "`[[comment(alex): inline literal]]`\n\n```md\n[[comment(ana): fenced literal]]\n```\n\n    [[comment(alex): indented literal]]",
+    "threads": []
+  },
+  {
+    "name": "escaped prefix and malformed input stay text",
+    "source": "\\[[comment(alex): literal]]\n[[comment(): missing name]]\n[[comment(ana): ]]\n[[comment(ana): unfinished",
+    "threads": []
+  },
+  {
+    "name": "body Markdown is inert",
+    "source": "[[comment(alex): **bold** `code` <script>bad()</script> ![x](secret.png)]]",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "**bold** `code` <script>bad()</script> ![x](secret.png)"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "unicode authors and prose",
+    "source": "😀 Café[[comment(Илья): Привет 世界]] après",
+    "threads": [
+      [
+        {
+          "name": "Илья",
+          "body": "Привет 世界"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "HTML attributes and comments stay literal",
+    "source": "<span title=\"[[comment(ana): literal]]\">hi</span>\n\n<!-- [[comment(alex): hidden literal]] -->",
+    "threads": []
+  },
+  {
+    "name": "comment syntax inside link destinations and labels stays literal",
+    "source": "[label[[comment(ana): literal]]](https://example.test)\n\n[text](https://example.test/[[comment(ana):literal]])",
+    "threads": []
+  }
+]

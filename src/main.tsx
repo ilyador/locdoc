@@ -1,0 +1,27 @@
+import { createRoot } from "react-dom/client";
+import { App } from "./app";
+import "@fontsource-variable/dm-sans";
+import "@fontsource-variable/dm-sans/wght-italic.css";
+import "@fontsource/jetbrains-mono/latin-400.css";
+import "@fontsource/jetbrains-mono/latin-600.css";
+import "@fontsource/jetbrains-mono/latin-400-italic.css";
+import "@fontsource/jetbrains-mono/latin-600-italic.css";
+import "@fontsource/jetbrains-mono/latin-700-italic.css";
+import "@fontsource/jetbrains-mono/latin-700.css";
+import "@fontsource/ibm-plex-sans/latin-400.css";
+import "@fontsource/ibm-plex-sans/latin-500.css";
+import "@fontsource/ibm-plex-sans/latin-600.css";
+import "@fontsource/ibm-plex-sans/latin-700.css";
+import "@fontsource/ibm-plex-sans/latin-400-italic.css";
+import "@fontsource/ibm-plex-sans/latin-600-italic.css";
+import "@fontsource/ibm-plex-sans/latin-700-italic.css";
+import "@fontsource/bebas-neue/latin-400.css";
+import "@fontsource/lora/400.css";
+import "@fontsource/lora/600.css";
+import "@fontsource/lora/700.css";
+import "@fontsource/lora/400-italic.css";
+import "@fontsource/lora/600-italic.css";
+import "@fontsource/lora/700-italic.css";
+import "./style.css";
+
+createRoot(document.getElementById("root")!).render(<App />);

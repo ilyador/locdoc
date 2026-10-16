@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" fill="none">
+  <!-- Generated from locdoc-v2.svg by npm run icons:build. -->
+  <path fill="#28475d" d="M0 0h512v512H0z"/>
+  <g transform="translate(256 256) scale(.94) translate(-256 -256)">
+    <path d="M154 148h140l60 60v180a28 28 0 0 1-28 28H154a28 28 0 0 1-28-28V176a28 28 0 0 1 28-28Z" fill="#acd2ec"/>
+  <path d="M194 108h116l84 84v164a28 28 0 0 1-28 28H194a28 28 0 0 1-28-28V136a28 28 0 0 1 28-28Z" fill="#fff"/>
+  <path d="M310 108v56a28 28 0 0 0 28 28h56l-84-84Z" fill="#dcebf5"/>
+  <path d="M218 204h38v104h78v20l-18 18h-98V204Z" fill="#28475d"/>
+  </g>
+</svg>

@@ -1,0 +1,58 @@
+{
+  "name": "locdoc",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "cargo run",
+    "start": "node --env-file-if-exists=.env scripts/start.mjs",
+    "build": "vite build && cargo build --release",
+    "test": "cargo test && cargo build && node --test test/*.test.mjs && tsx --test test/*.test.tsx",
+    "owner": "node --env-file-if-exists=.env scripts/owner.mjs",
+    "check": "tsc --noEmit && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
+    "build:web": "vite build",
+    "fonts:update": "node scripts/update-font-catalog.mjs",
+    "icons:build": "node scripts/build-icons.mjs",
+    "verify": "npm run check && npm test && vite build --outDir .locdoc/verified-web",
+    "install:service": "node scripts/install-service.mjs"
+  },
+  "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-markdown": "6.5.2",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/search": "6.7.2",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.14",
+    "@fontsource-variable/dm-sans": "5.3.0",
+    "@fontsource/bebas-neue": "5.3.0",
+    "@fontsource/ibm-plex-sans": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@fontsource/lora": "5.3.0",
+    "@lezer/highlight": "1.2.5",
+    "@lezer/markdown": "1.8.0",
+    "@phosphor-icons/react": "2.1.10",
+    "lib0": "0.2.119",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "y-codemirror.next": "0.3.6",
+    "y-protocols": "1.0.7",
+    "y-websocket": "3.1.0",
+    "yjs": "13.6.33"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "fake-indexeddb": "6.2.5",
+    "jsdom": "30.1.3",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "ws": "8.22.0"
+  }
+}

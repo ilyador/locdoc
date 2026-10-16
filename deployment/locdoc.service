@@ -1,0 +1,18 @@
+# Prefer npm run install:service: it fills in the actual checkout path.
+[Unit]
+Description=Locdoc local Markdown workspace
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/locdoc
+ExecStart=%h/locdoc/target/release/locdoc
+EnvironmentFile=-%h/locdoc/.env
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGINT
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
