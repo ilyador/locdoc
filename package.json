@@ -16,6 +16,7 @@
     "build:web": "vite build",
     "fonts:update": "node scripts/update-font-catalog.mjs",
     "icons:build": "node scripts/build-icons.mjs",
+    "social:build": "node scripts/build-social.mjs",
     "verify": "npm run check && npm test && vite build --outDir .locdoc/verified-web",
     "install:service": "node scripts/install-service.mjs"
   },

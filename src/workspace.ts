@@ -71,14 +71,6 @@ export function useWorkspace() {
       current.current = next;
       setInitialDocument(null);
       setId(next);
-      if (next)
-        history.replaceState(
-          null,
-          "",
-          sharedToken
-            ? `/s/${encodeURIComponent(sharedToken)}?doc=${encodeURIComponent(next)}`
-            : `/d/${encodeURIComponent(next)}`,
-        );
       return true;
     },
     [],
@@ -161,6 +153,14 @@ export function useWorkspace() {
     document.head.appendChild(fonts);
     return () => fonts.remove();
   }, [loadTree]);
+  useEffect(() => {
+    if (!id || (sharedToken && !config?.folder)) return;
+    const url = sharedToken
+      ? `/s/${encodeURIComponent(sharedToken)}?doc=${encodeURIComponent(id)}`
+      : `/d/${encodeURIComponent(id)}`;
+    if (location.pathname + location.search !== url)
+      history.replaceState(null, "", url + location.hash);
+  }, [id, config?.folder]);
   useEffect(() => {
     if (name) localStorage.setItem("locdoc.name", name);
     if (config && !config.owner && !needsName && normalizePresence({ name }))

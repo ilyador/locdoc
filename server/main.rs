@@ -3,6 +3,7 @@ mod disk;
 mod documents;
 mod folders;
 mod links;
+mod web;
 use disk::DiskFile;
 
 use axum::{
@@ -32,7 +33,7 @@ use std::{
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
-use tower_http::services::{ServeDir, ServeFile};
+use tower_http::services::ServeDir;
 use yrs::{
     Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
     sync::{Awareness, DefaultProtocol, Message, Protocol, SyncMessage},
@@ -1970,7 +1971,13 @@ async fn guard(
 fn router(s: App) -> Router {
     Router::new().route("/api/open/{token}",get(open_shared)).route("/api/docs/{id}/versions",get(versions)).route("/api/docs/{id}/versions/{revision}",get(version)).route("/api/docs/{id}/versions/{revision}/restore",post(restore)).route("/api/ticket",post(issue_ticket)).route("/api/redeem",post(redeem)).route("/api/config",get(config)).route("/api/login",post(login)).route("/api/logout",post(logout)).route("/api/folders/share",get(folders::read).post(folders::share)).route("/api/tree",get(tree)).route("/api/files",post(create)).route("/api/shared/{token}",get(shared)).route("/api/docs/{id}",get(document).patch(rename)).route("/api/docs/{id}/share",post(share)).route("/api/docs/{id}/link-preview",get(links::preview)).route("/api/docs/{id}/comments",get(comments::list).post(comments::add)).route("/api/docs/{id}/comments/{cid}",patch(comments::edit)).route("/api/docs/{id}/upload",post(upload).layer(DefaultBodyLimit::max(21*MB))).route("/api/docs/{id}/media",get(media)).route("/api/fonts",get(font_list).post(install_font)).route("/api/fonts.css",get(font_css)).route("/ws/{id}",get(websocket))
  .nest_service("/fonts",ServeDir::new(s.data.join("fonts")))
- .fallback_service(ServeDir::new("dist").not_found_service(ServeFile::new("dist/index.html")))
+ .route("/",get(web::shell))
+ .route("/index.html",get(web::shell))
+ .route("/d/{id}",get(web::shell))
+ .route("/d/{id}/",get(web::shell))
+ .route("/s/{token}",get(web::shell))
+ .route("/s/{token}/",get(web::shell))
+ .fallback_service(ServeDir::new("dist"))
  .layer(DefaultBodyLimit::max(64*1024))
  .layer(axum::middleware::from_fn(|req:axum::extract::Request,next:axum::middleware::Next|async move{let cacheable=req.uri().path().starts_with("/assets/");let mut response=next.run(req).await;let ok=response.status().is_success();let h=response.headers_mut();h.insert("cache-control",if cacheable&&ok{"public, max-age=31536000, immutable"}else{"no-store"}.parse().unwrap());h.insert("x-content-type-options","nosniff".parse().unwrap());h.insert("referrer-policy","no-referrer".parse().unwrap());h.insert("x-frame-options","SAMEORIGIN".parse().unwrap());h.insert("content-security-policy","default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; object-src 'none'".parse().unwrap());response}))
  .layer(axum::middleware::from_fn_with_state(s.clone(),guard))

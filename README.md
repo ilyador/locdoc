@@ -139,4 +139,6 @@ Before updating, back up state and stop the service. Pull changes, run `npm ci`,
 
 Architecture stays small: one Axum process, one SQLite database, ordinary Markdown files. `server/documents.rs` owns file identity; `server/folders.rs` owns folder capabilities; `server/disk.rs` owns file leases; `server/comments.rs` owns source comments; `server/links.rs` owns safe previews. The browser keeps document state below a keyed React boundary, so late async results cannot overwrite a different open document.
 
+Social sharing cards use the app icon and product description, without document titles or content. Rust serves their metadata before JavaScript runs, using `LOCDOC_PUBLIC_URL` for absolute URLs. The included 1200×630 image is ready to use; `npm run social:build` regenerates it with ImageMagick and the bundled fonts.
+
 The Origami Hash icon, alternate Shell Cat draft and generation prompts are in `design/icon-options/`. `npm run icons:build` regenerates the icons with ImageMagick. `npm run fonts:update` refreshes the font catalog before a web build. Bundled fonts retain their upstream licenses in the dependency packages.

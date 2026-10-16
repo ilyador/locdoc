@@ -594,6 +594,73 @@ test("rename owns a fresh input independent of the create form", () => {
   assert.equal(input.value, "");
 });
 
+test("opening the root restores the selected document URL without adding a history entry", async () => {
+  const fetchBefore = globalThis.fetch;
+  const previousUrl = location.href;
+  const remembered = localStorage.getItem("locdoc.document");
+  globalThis.fetch = async (input) =>
+    String(input) === "/api/config"
+      ? response({ owner: true, root: "/tmp/fixture", guest: "test" })
+      : response({
+          entries: [
+            { id: "a", path: "a.md", kind: "file" },
+            { id: "b", path: "b.md", kind: "file" },
+          ],
+        });
+  try {
+    for (const saved of ["b", null]) {
+      history.replaceState(null, "", "/");
+      if (saved) localStorage.setItem("locdoc.document", saved);
+      else localStorage.removeItem("locdoc.document");
+      const length = history.length;
+      const hook = renderHook(() => useWorkspace());
+      try {
+        await waitFor(() => {
+          assert.equal(hook.result.current.id, saved || "a");
+          assert.equal(location.pathname, `/d/${saved || "a"}`);
+          assert.equal(hook.result.current.entries.length, 2);
+        });
+        assert.equal(history.length, length);
+      } finally {
+        hook.unmount();
+      }
+    }
+  } finally {
+    globalThis.fetch = fetchBefore;
+    history.replaceState(null, "", previousUrl);
+    if (remembered) localStorage.setItem("locdoc.document", remembered);
+    else localStorage.removeItem("locdoc.document");
+  }
+});
+
+test("root URL restoration preserves an owner ticket until bootstrap redeems it", async () => {
+  const fetchBefore = globalThis.fetch;
+  const previousUrl = location.href;
+  const remembered = localStorage.getItem("locdoc.document");
+  let redeemed;
+  globalThis.fetch = async (input, init) => {
+    if (String(input) === "/api/redeem") {
+      redeemed = JSON.parse(String(init.body)).ticket;
+      return new Promise<Response>(() => {});
+    }
+    return response({});
+  };
+  history.replaceState(null, "", "/#ticket=owner-opening-ticket");
+  localStorage.setItem("locdoc.document", "b");
+  const hook = renderHook(() => useWorkspace());
+  try {
+    await waitFor(() => assert.equal(redeemed, "owner-opening-ticket"));
+    assert.equal(location.pathname, "/d/b");
+    assert.equal(location.hash, "");
+  } finally {
+    hook.unmount();
+    globalThis.fetch = fetchBefore;
+    history.replaceState(null, "", previousUrl);
+    if (remembered) localStorage.setItem("locdoc.document", remembered);
+    else localStorage.removeItem("locdoc.document");
+  }
+});
+
 test("the latest navigation wins while drafts finish storing", async () => {
   localStorage.setItem("locdoc.document", "a");
   const { result } = renderHook(() => useWorkspace());
