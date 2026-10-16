@@ -42,12 +42,16 @@ test("user service installation handles another checkout and refuses accidental 
     assert.ok(source.includes(checkout.replaceAll("%", "%%")));
     assert.ok(source.includes('EnvironmentFile=-"'));
     assert.ok(!source.includes("/home/") && !source.includes("dedyn.io"));
+    const runtime = join(root, "runtime");
+    await mkdir(runtime, { mode: 0o700 });
     const validation = spawnSync(
       "systemd-analyze",
       ["--user", "verify", unit],
-      { encoding: "utf8" },
+      { encoding: "utf8", env: { ...process.env, XDG_RUNTIME_DIR: runtime } },
     );
-    assert.equal(validation.status, 0, validation.stderr);
+    // Foreground use also works on Linux distributions without systemd.
+    if (validation.error?.code !== "ENOENT")
+      assert.equal(validation.status, 0, validation.stderr);
     assert.equal(install().status, 1);
     assert.equal(install("--replace").status, 0);
   } finally {
