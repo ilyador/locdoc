@@ -5,12 +5,13 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use resvg::{tiny_skia, usvg};
 use std::{collections::VecDeque, sync::LazyLock};
 
-const REGULAR: &[u8] = include_bytes!("../assets/social/Body-Regular.ttf");
-const SEMIBOLD: &[u8] = include_bytes!("../assets/social/Body-SemiBold.ttf");
+const REGULAR: &[u8] = include_bytes!("../assets/social/Mono-Regular.ttf");
+const SEMIBOLD: &[u8] = include_bytes!("../assets/social/Mono-SemiBold.ttf");
+const LABEL: &[u8] = include_bytes!("../assets/social/Body-Regular.ttf");
 const WORDMARK: &[u8] = include_bytes!("../assets/social/Wordmark.ttf");
 static FONTS: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
     let mut db = usvg::fontdb::Database::new();
-    for data in [REGULAR, SEMIBOLD, WORDMARK] {
+    for data in [REGULAR, SEMIBOLD, LABEL, WORDMARK] {
         db.load_font_data(data.to_vec());
     }
     Arc::new(db)
@@ -25,6 +26,7 @@ static WAITING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 pub(super) struct Preview {
     pub title: String,
     pub description: String,
+    filename: String,
     blocks: Vec<Block>,
 }
 
@@ -195,6 +197,13 @@ impl Preview {
         Self {
             title,
             description,
+            filename: clean(
+                &Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                80,
+            ),
             blocks,
         }
     }
@@ -202,8 +211,8 @@ impl Preview {
         // Include the layout revision and structure: a list and a paragraph can
         // have identical metadata while requiring different preview images.
         hash(&format!(
-            "card-2\0{}\0{}\0{:?}",
-            self.title, self.description, self.blocks
+            "card-3\0{}\0{}\0{}\0{:?}",
+            self.title, self.description, self.filename, self.blocks
         ))
     }
 }
@@ -279,22 +288,24 @@ fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize)
 }
 
 fn svg(value: &Preview) -> String {
-    let title = wrap(&value.title, SEMIBOLD, 88., 1072., 2);
+    let title = wrap(&value.title, SEMIBOLD, 92., 1056., 2);
+    let filename = wrap(&value.filename, LABEL, 31., 296., 1).join("");
     let mut svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><defs><linearGradient id="paper" x2="100%" y2="0%"><stop stop-color="#f4f4f2"/><stop offset="1" stop-color="#e7f0f7"/></linearGradient><clipPath id="icon"><rect x="836" y="266" width="300" height="300" rx="40"/></clipPath></defs><rect width="1200" height="630" fill="url(#paper)"/><image x="836" y="266" width="300" height="300" clip-path="url(#icon)" href="data:image/png;base64,{}"/><text x="64" y="590" font-family="Locdoc Social Display" font-size="76" fill="#173349">LOCDOC.</text>"##,
-        *ICON
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><defs><clipPath id="icon"><rect x="72" y="477" width="104" height="104" rx="14"/></clipPath></defs><rect width="1200" height="630" fill="#fcfcfa"/><rect width="1200" height="16" fill="#ff634c"/><path d="M72 445h1056" stroke="#cbd3d6"/><image x="72" y="477" width="104" height="104" clip-path="url(#icon)" href="data:image/png;base64,{}"/><text x="204" y="559" font-family="Locdoc Social Display" font-size="62" fill="#263f50">LOCDOC.</text><text x="832" y="551" font-family="Locdoc Social Sans" font-size="31" fill="#66737d">{}</text>"##,
+        *ICON,
+        escape(&filename)
     );
     for (i, line) in title.iter().enumerate() {
-        svg.push_str(&format!(r##"<text x="64" y="{}" font-family="Locdoc Social Sans" font-weight="600" font-size="88" fill="#173349">{}</text>"##, 144 + i * 96, escape(line)));
+        svg.push_str(&format!(r##"<text x="72" y="{}" font-family="Locdoc Social Mono" font-weight="600" font-size="92" fill="#252b31">{}</text>"##, 145 + i * 100, escape(line)));
     }
-    let mut y = 224. + title.len().saturating_sub(1) as f32 * 96.;
+    let mut y = 229. + title.len().saturating_sub(1) as f32 * 100.;
     for (index, block) in value.blocks.iter().enumerate() {
-        if y > 496. {
+        if y > 400. {
             break;
         }
         if matches!(block.kind, Kind::Rule) {
             svg.push_str(&format!(
-                r##"<path d="M64 {}h700" stroke="#c4cbd3"/>"##,
+                r##"<path d="M72 {}h1056" stroke="#cbd3d6"/>"##,
                 y - 20.
             ));
             y += 32.;
@@ -302,51 +313,54 @@ fn svg(value: &Preview) -> String {
         }
         let heading = matches!(block.kind, Kind::Heading);
         let (size, step, font, weight) = if heading {
-            (52., 64., SEMIBOLD, 600)
+            (44., 56., SEMIBOLD, 600)
         } else {
-            (44., 56., REGULAR, 400)
+            (39., 53., REGULAR, 400)
         };
+        let color = if heading { "#ad431d" } else { "#353d45" };
         let indent = block.depth.min(3) as f32 * 32. + if block.quote { 24. } else { 0. };
         let marker = match block.kind {
             Kind::Number(n) => n.to_string().len() as f32 * 26. + 18.,
             Kind::Bullet | Kind::Task(_) => 40.,
             _ => 0.,
         };
-        let x = 64. + indent + marker;
-        let available = ((496. - y) / step) as usize + 1;
-        let mut lines = wrap(&block.text, font, size, 700. - indent - marker, available);
+        let x = 72. + indent + marker;
+        let available = ((400. - y) / step) as usize + 1;
+        let mut lines = wrap(&block.text, font, size, 1056. - indent - marker, available);
         let gap = if matches!(block.kind, Kind::Bullet | Kind::Number(_) | Kind::Task(_)) {
-            8.
+            0.
+        } else if heading {
+            6.
         } else {
             16.
         };
         if index + 1 < value.blocks.len()
-            && y + lines.len() as f32 * step + gap > 496.
+            && y + lines.len() as f32 * step + gap > 400.
             && let Some(last) = lines.last_mut()
             && !last.ends_with('…')
         {
             last.push('…');
-            *last = wrap(last, font, size, 700. - indent - marker, 1).remove(0);
+            *last = wrap(last, font, size, 1056. - indent - marker, 1).remove(0);
         }
         match block.kind {
-            Kind::Bullet => svg.push_str(&format!(r##"<circle cx="{}" cy="{}" r="5" fill="#173349"/>"##, x - 27., y - 14.)),
-            Kind::Number(n) => svg.push_str(&format!(r##"<text x="{}" y="{y}" text-anchor="end" font-family="Locdoc Social Sans" font-size="44" fill="#173349">{n}.</text>"##, x - 14.)),
+            Kind::Bullet => svg.push_str(&format!(r##"<circle cx="{}" cy="{}" r="4" fill="#353d45"/>"##, x - 27., y - 12.)),
+            Kind::Number(n) => svg.push_str(&format!(r##"<text x="{}" y="{y}" text-anchor="end" font-family="Locdoc Social Mono" font-size="39" fill="#353d45">{n}.</text>"##, x - 14.)),
             Kind::Task(checked) => {
-                svg.push_str(&format!(r##"<rect x="{}" y="{}" width="26" height="26" rx="4" fill="none" stroke="#315f7a" stroke-width="2"/>"##, x - 40., y - 29.));
-                if checked { svg.push_str(&format!(r##"<path d="M{} {}l6 6 12-14" fill="none" stroke="#315f7a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>"##, x - 36., y - 16.)); }
+                svg.push_str(&format!(r##"<rect x="{}" y="{}" width="26" height="26" rx="4" fill="none" stroke="#353d45" stroke-width="2"/>"##, x - 40., y - 27.));
+                if checked { svg.push_str(&format!(r##"<path d="M{} {}l6 6 12-14" fill="none" stroke="#353d45" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>"##, x - 36., y - 14.)); }
             }
             _ => {}
         }
         if block.quote {
             svg.push_str(&format!(
-                r##"<path d="M{} {}v{}" stroke="#315f7a"/>"##,
-                64. + indent - 22.,
+                r##"<path d="M{} {}v{}" stroke="#cbd3d6"/>"##,
+                72. + indent - 22.,
                 y - size * 0.8,
                 lines.len() as f32 * step
             ));
         }
         for line in lines {
-            svg.push_str(&format!(r##"<text x="{x}" y="{y}" font-family="Locdoc Social Sans" font-weight="{weight}" font-size="{size}" fill="#173349">{}</text>"##, escape(&line)));
+            svg.push_str(&format!(r##"<text x="{x}" y="{y}" font-family="Locdoc Social Mono" font-weight="{weight}" font-size="{size}" fill="{color}">{}</text>"##, escape(&line)));
             y += step;
         }
         y += gap;
@@ -431,7 +445,7 @@ mod tests {
             ),
             "note.md",
         );
-        let lines = wrap(&value.title, SEMIBOLD, 88., 1072., 2);
+        let lines = wrap(&value.title, SEMIBOLD, 92., 1056., 2);
         assert_eq!(lines.len(), 2);
         assert!(lines[1].ends_with('…'));
         let png = render(&value).unwrap();
@@ -468,9 +482,27 @@ mod tests {
         assert!(matches!(value.blocks[6].kind, Kind::Task(false)));
         assert!(value.blocks[7].quote);
         assert_eq!(
-            wrap("First line\nSecond line", REGULAR, 44., 780., 5),
+            wrap("First line\nSecond line", REGULAR, 39., 1056., 5),
             ["First line", "Second line"]
         );
+    }
+
+    #[test]
+    fn footer_uses_only_the_basename_and_renames_refresh_the_preview() {
+        let first = Preview::new(
+            "# Same title\n\nSame text",
+            "private-folder/First & <draft>.md",
+        );
+        let renamed = Preview::new("# Same title\n\nSame text", "private-folder/Renamed.md");
+        assert_eq!(first.filename, "First & <draft>.md");
+        let markup = svg(&first);
+        assert!(!markup.contains("private-folder"));
+        assert!(markup.contains("First &amp; &lt;draft&gt;.md"));
+        assert_ne!(first.fingerprint(), renamed.fingerprint());
+        let long = Preview::new("# Title", &format!("{}.md", "Long filename ".repeat(20)));
+        let label = wrap(&long.filename, LABEL, 31., 296., 1);
+        assert_eq!(label.len(), 1);
+        assert!(label[0].ends_with('…'));
     }
 
     #[test]

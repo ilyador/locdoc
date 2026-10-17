@@ -99,7 +99,7 @@ pub(super) async fn shell(
         (
             APP_TITLE.into(),
             APP_DESCRIPTION.into(),
-            format!("{}/social/locdoc-v2.png", s.public_url),
+            format!("{}/social/locdoc-v3.png", s.public_url),
             "Locdoc’s Origami Hash icon. Local Markdown. Shared ideas.".into(),
         )
     };
