@@ -28,6 +28,8 @@
   --syntax-violet: #5658b9;
   --syntax-amber: #946800;
   --syntax-mark: #cb156f;
+  --fountain-speaker: #566f8b;
+  --fountain-parenthetical: #806b88;
   --ui-font: "IBM Plex Sans", "Segoe UI", sans-serif;
   --ui-body-size: 0.9375rem;
   --ui-control-size: 0.875rem;
@@ -781,6 +783,7 @@ button:hover {
 }
 .fountain-character > .cm-line {
   padding-inline-start: 33.333% !important;
+  color: var(--fountain-speaker);
   font-weight: var(--weight-semibold);
 }
 .fountain-dialogue > .cm-line,
@@ -789,7 +792,7 @@ button:hover {
 }
 .fountain-parenthetical > .cm-line {
   padding-inline: 25% 31.667% !important;
-  color: var(--secondary);
+  color: var(--fountain-parenthetical);
 }
 .fountain-transition > .cm-line {
   text-align: right;
@@ -1835,6 +1838,8 @@ button:hover {
   --syntax-violet: #a9a2e5;
   --syntax-amber: #d6b76b;
   --syntax-mark: #e892ba;
+  --fountain-speaker: #9eb3ca;
+  --fountain-parenthetical: #b8a5c0;
   color-scheme: dark;
 }
 .app[data-theme="dark"] {
