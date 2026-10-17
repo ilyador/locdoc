@@ -279,6 +279,7 @@ function livePreview(
       !active.some((r) => from <= r.to && to >= r.from);
     const codeLines = new Set<number>();
     const tableLines = new Set<number>();
+    const blockEnds = new Set<number>();
     const listPrefixes = new Map<number, { content: number; indent: string }>();
     syntaxTree(state).iterate({
       enter(n) {
@@ -313,15 +314,8 @@ function livePreview(
             pos = line.to + 1;
           }
         }
-        if (
-          name === "ListItem" ||
-          (name === "Paragraph" && n.node.parent?.name !== "ListItem")
-        )
-          decorations.push(
-            Decoration.line({ class: "md-block-end" }).range(
-              state.doc.lineAt(Math.max(from, to - 1)).from,
-            ),
-          );
+        if (name === "ListItem" || name === "Paragraph" || name === "Task")
+          blockEnds.add(state.doc.lineAt(Math.max(from, to - 1)).from);
         const heading = name.match(/^ATXHeading(\d)$/);
         if (heading)
           decorations.push(
@@ -446,6 +440,8 @@ function livePreview(
         }
       },
     });
+    for (const from of blockEnds)
+      decorations.push(Decoration.line({ class: "md-block-end" }).range(from));
     for (const [from, { content, indent }] of listPrefixes) {
       // A conversation can split one source line into several display blocks.
       // Share its indent across text fragments while leaving the host full-width.

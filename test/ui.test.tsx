@@ -1637,6 +1637,60 @@ test("Markdown block gaps follow paragraph and list-item ends, leaving headings 
   ydoc.destroy();
 });
 
+test("Markdown gaps cover nested, ordered, task and multi-paragraph list items without doubling", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    awareness = new Awareness(ydoc);
+  const source =
+    "- Parent\n  continuation\n  - Child\n    - Deep\n  - Sibling\n- Next\n\n1. Ordered parent\n   1. Ordered child\n\n- [ ] Task parent\n  - [x] Task child\n\n- First paragraph\n\n  Second paragraph";
+  ydoc.getText("content").insert(0, source);
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="nested-gaps"
+      path="nested.md"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  try {
+    const ends = [...page.container.querySelectorAll(".md-block-end")];
+    const expected = [
+      "continuation",
+      "Child",
+      "Deep",
+      "Sibling",
+      "Next",
+      "Ordered parent",
+      "Ordered child",
+      "Task parent",
+      "Task child",
+      "First paragraph",
+      "Second paragraph",
+    ];
+    assert.equal(ends.length, expected.length);
+    expected.forEach((text, index) =>
+      assert.ok(ends[index].textContent!.trim().endsWith(text), text),
+    );
+    assert.ok(
+      ends.every(
+        (el) =>
+          el.className.split(/\s+/).filter((c) => c === "md-block-end")
+            .length === 1,
+      ),
+    );
+    assert.equal(ydoc.getText("content").toString(), source);
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
 test("Fountain previews stay editable, preserve comments and survive format/permission changes", async () => {
   const { MarkdownEditor } = await import("../src/editor.tsx");
   const { EditorView } = await import("@codemirror/view");
