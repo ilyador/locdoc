@@ -1708,6 +1708,61 @@ test("Markdown gaps cover nested, ordered, task and multi-paragraph list items w
   }
 });
 
+test("double-bracket notes keep uniform styling beside the caret in both formats and real Markdown links remain links", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { Awareness } = await import("y-protocols/awareness");
+  for (const path of ["notes.md", "notes.fountain"]) {
+    const ydoc = new Y.Doc(),
+      awareness = new Awareness(ydoc);
+    const source = "[[a note]]\n\n[Real link](https://example.com/)\n";
+    ydoc.getText("content").insert(0, source);
+    const page = render(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        editable
+        id="brackets"
+        path={path}
+        onChange={() => {}}
+        onComment={() => {}}
+        onUpload={() => {}}
+      />,
+    );
+    try {
+      const view = EditorView.findFromDOM(
+        page.container.querySelector(".cm-editor")!,
+      )!;
+      for (const position of [1, 2]) {
+        act(() => {
+          view.focus();
+          view.dispatch({ selection: { anchor: position } });
+        });
+        assert.equal(
+          page.container.querySelectorAll(
+            ".cm-matchingBracket, .cm-nonmatchingBracket",
+          ).length,
+          0,
+        );
+        const note = page.container.querySelector(
+          path.endsWith(".md") ? ".md-literal-brackets" : ".fountain-note-ink",
+        );
+        assert.equal(note?.textContent, "[[a note]]");
+      }
+      if (path.endsWith(".md"))
+        assert.equal(
+          page.container.querySelector("a.md-link")?.getAttribute("href"),
+          "https://example.com/",
+        );
+      assert.equal(ydoc.getText("content").toString(), source);
+    } finally {
+      page.unmount();
+      awareness.destroy();
+      ydoc.destroy();
+    }
+  }
+});
+
 test("Fountain previews stay editable, preserve comments and survive format/permission changes", async () => {
   const { MarkdownEditor } = await import("../src/editor.tsx");
   const { EditorView } = await import("@codemirror/view");

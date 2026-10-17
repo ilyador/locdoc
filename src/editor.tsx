@@ -51,7 +51,6 @@ import {
   syntaxTree,
   syntaxHighlighting,
   HighlightStyle,
-  bracketMatching,
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { createMarkdownTable, parseMarkdownTable } from "./markdown-table";
@@ -422,7 +421,22 @@ function livePreview(
           )
             return;
           const destination = name === "URL" ? n.node : n.node.getChild("URL");
-          if (!destination) return;
+          if (!destination) {
+            // Markdown parses the inner [text] of [[text]] as a shortcut
+            // link. Keep this literal bracketed prose in one consistent ink.
+            if (
+              name === "Link" &&
+              state.sliceDoc(Math.max(0, from - 1), from) === "[" &&
+              state.sliceDoc(to, to + 1) === "]"
+            )
+              decorations.push(
+                Decoration.mark({ class: "md-literal-brackets" }).range(
+                  from - 1,
+                  to + 1,
+                ),
+              );
+            return;
+          }
           const raw = state
             .sliceDoc(destination.from, destination.to)
             .replace(/^<|>$/g, "");
@@ -904,7 +918,6 @@ export const MarkdownEditor = forwardRef<
           ),
           EditorView.lineWrapping,
           drawSelection(),
-          bracketMatching(),
           highlightSelectionMatches(),
           layer.extension,
           access.current.of([

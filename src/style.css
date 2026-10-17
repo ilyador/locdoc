@@ -538,11 +538,6 @@ button:hover {
 .button.primary:hover {
   background: var(--primary-hover);
 }
-.button.quiet {
-  border: 1px solid var(--line);
-  background: var(--surface);
-}
-.button.quiet:hover,
 .button.quiet.pressed {
   background: var(--subtle);
 }
@@ -558,10 +553,12 @@ button:hover {
 }
 .formatbar {
   display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 15px;
-  padding: 0 27px;
+  gap: 8px 15px;
+  padding: 6px 27px;
   min-height: var(--toolbar-height);
   border-bottom: 1px solid var(--line);
   background: var(--surface);
@@ -575,6 +572,7 @@ button:hover {
 }
 .format-left {
   gap: 13px;
+  max-width: 100%;
 }
 .toolbar-divider {
   display: inline-block;
@@ -583,34 +581,43 @@ button:hover {
   background: var(--line);
   margin: 0 4px;
 }
+.button.quiet,
+.font-button,
+.text-size-control,
+.fountain-element-select {
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-regular);
+  color: var(--secondary);
+  line-height: 1.25;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 6px;
+}
+.button.quiet:hover,
+.font-button:hover,
+.text-size-control:hover,
+.fountain-element-select:hover {
+  background: var(--subtle);
+}
 .font-button,
 .text-size-control,
 .fountain-element-select {
   display: flex;
   align-items: center;
   height: var(--format-control-height);
-  font-size: var(--ui-control-size);
-  font-weight: var(--weight-regular);
-  color: var(--secondary);
-  line-height: 1;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  border-radius: 6px;
-}
-.font-button:hover,
-.text-size-control:hover,
-.fountain-element-select:hover {
-  background: var(--subtle);
 }
 .font-button {
   gap: 7px;
-  padding: 0 10px;
-  max-width: 165px;
+  padding: 6px 10px;
+  height: auto;
+  min-height: var(--format-control-height);
+  min-width: 0;
+  max-width: 100%;
 }
 .font-button span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: start;
 }
 .font-button svg {
   flex-shrink: 0;
@@ -1038,6 +1045,10 @@ button:hover {
   color: var(--syntax-teal);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.cm-content .md-literal-brackets,
+.cm-content .md-literal-brackets * {
+  color: inherit;
 }
 .md-rule {
   color: transparent;
@@ -1893,16 +1904,13 @@ button:hover {
     gap: 9px;
   }
   .formatbar {
-    padding: 0 17px;
+    padding: 6px 17px;
   }
   .document-canvas {
     padding: 24px 34px 25px;
   }
   .format-left {
     gap: 6px;
-  }
-  .font-button {
-    max-width: 125px;
   }
   .format-tools {
     gap: 0;
@@ -1938,14 +1946,8 @@ button:hover {
     display: none;
   }
   .formatbar {
-    padding: 0 12px;
-    gap: 5px;
-  }
-  .font-button span {
-    display: none;
-  }
-  .font-button {
-    gap: 3px;
+    padding: 6px 12px;
+    gap: 8px 5px;
   }
   .format-tools .toolbar-extra {
     display: none;
@@ -2037,7 +2039,7 @@ button:hover {
   }
   .formatbar {
     min-height: var(--toolbar-height);
-    padding: 0 10px;
+    padding: 6px 10px;
   }
   .format-left {
     gap: 3px;
@@ -2046,7 +2048,7 @@ button:hover {
     display: none;
   }
   .font-button {
-    padding: 0 9px;
+    padding: 6px 9px;
     min-width: 44px;
   }
   .format-tools .icon-button {
