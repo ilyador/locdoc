@@ -23,6 +23,7 @@ import {
   LinkSimple,
   TextB,
   TextItalic,
+  TextUnderline,
   TextH,
   ListBullets,
   ListChecks,
@@ -58,7 +59,14 @@ import { VersionHistory } from "./version-history";
 import { RenameDocument } from "./rename-document";
 import { CommentThread, CommentComposer } from "./comments";
 import { IconButton, Avatar } from "./ui";
-import { countMarkdownWords } from "./word-count";
+import { countDocumentWords } from "./word-count";
+import {
+  documentFormat,
+  documentName,
+  documentPath,
+  type DocumentFormat,
+} from "./document-format";
+import type { FountainForce } from "./fountain";
 import { useComments } from "./use-comments";
 import { NamePrompt } from "./name-prompt";
 declare global {
@@ -141,6 +149,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     footerStatus.startsWith("Offline") ||
     footerStatus === "Unable to open document";
   const [newPath, setNewPath] = useState("");
+  const [createFormat, setCreateFormat] = useState<DocumentFormat>("markdown");
   const [createKind, setCreateKind] = useState("file");
   const [apiKey, setApiKey] = useState("");
   const editor = useRef<EditorHandle>(null);
@@ -334,7 +343,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const createFile = () =>
     action(async () => {
       let path = newPath.trim();
-      if (createKind === "file" && !path.endsWith(".md")) path += ".md";
+      if (createKind === "file") path = documentPath(path, createFormat);
       const result = await api(
         "/api/files",
         send("POST", { path, kind: createKind }),
@@ -377,7 +386,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       await mutateComment(cid, data);
     });
   const download = () => {
-    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const blob = new Blob([content], {
+      type:
+        documentFormat(doc?.path) === "fountain"
+          ? "text/plain;charset=utf-8"
+          : "text/markdown;charset=utf-8",
+    });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = doc?.path.split("/").pop() || "document.md";
@@ -397,9 +411,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       else next.add(path);
       return next;
     });
-  const filename =
-    doc?.path.split("/").pop()?.replace(/\.md$/, "") || "Your workspace";
-  const wordCount = useMemo(() => countMarkdownWords(content), [content]);
+  const filename = doc ? documentName(doc.path) : "Your workspace";
+  const fountain = documentFormat(doc?.path) === "fountain";
+  const wordCount = useMemo(
+    () => countDocumentWords(content, doc?.path || ""),
+    [content, doc?.path],
+  );
   const currentComment =
     conversation?.kind === "thread"
       ? comments.find((c) => c.id === conversation.id)
@@ -791,13 +808,40 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               <div className="format-tools">
                 {doc.edit && (
                   <>
-                    <IconButton
-                      label="Heading"
-                      className="toolbar-secondary"
-                      onClick={() => editor.current?.wrap("## ")}
-                    >
-                      <TextH />
-                    </IconButton>
+                    {fountain && (
+                      <select
+                        className="fountain-element-select"
+                        aria-label="Screenplay element"
+                        value=""
+                        onChange={(event) =>
+                          editor.current?.formatFountain(
+                            event.target.value as FountainForce,
+                          )
+                        }
+                      >
+                        <option value="" disabled>
+                          Element
+                        </option>
+                        <option value="scene">Scene heading</option>
+                        <option value="action">Action</option>
+                        <option value="character">Character</option>
+                        <option value="parenthetical">Parenthetical</option>
+                        <option value="transition">Transition</option>
+                        <option value="centered">Centered</option>
+                        <option value="lyric">Lyrics</option>
+                      </select>
+                    )}
+                    {!fountain && (
+                      <>
+                        <IconButton
+                          label="Heading"
+                          className="toolbar-secondary"
+                          onClick={() => editor.current?.wrap("## ")}
+                        >
+                          <TextH />
+                        </IconButton>
+                      </>
+                    )}
                     <IconButton
                       label="Bold"
                       onClick={() => editor.current?.wrap("**", "**")}
@@ -811,54 +855,67 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     >
                       <TextItalic />
                     </IconButton>
-                    <span className="toolbar-divider" />
-                    <IconButton
-                      label="Bulleted list"
-                      className="toolbar-secondary"
-                      onClick={() => editor.current?.wrap("- ")}
-                    >
-                      <ListBullets />
-                    </IconButton>
-                    <IconButton
-                      label="Todo list"
-                      className="toolbar-secondary"
-                      onClick={() => editor.current?.toggleTasks()}
-                    >
-                      <ListChecks />
-                    </IconButton>
-                    <IconButton
-                      label="Insert link (Ctrl K)"
-                      className="toolbar-link"
-                      onClick={startLink}
-                    >
-                      <LinkSimple />
-                    </IconButton>
-                    <IconButton
-                      label="Blockquote"
-                      className="toolbar-extra"
-                      onClick={() => editor.current?.wrap("> ")}
-                    >
-                      <Quotes />
-                    </IconButton>
-                    <IconButton
-                      label="Inline code"
-                      className="toolbar-extra"
-                      onClick={() => editor.current?.wrap("`", "`")}
-                    >
-                      <Code />
-                    </IconButton>
-                    <IconButton
-                      label="Insert local image or video"
-                      disabled={busy}
-                      onClick={() => fileInput.current?.click()}
-                    >
-                      <Image />
-                    </IconButton>
-                    <TablePicker
-                      onInsert={(rows, columns) =>
-                        editor.current?.insertTable(rows, columns)
-                      }
-                    />
+                    {fountain && (
+                      <IconButton
+                        className="toolbar-secondary"
+                        label="Underline"
+                        onClick={() => editor.current?.wrap("_", "_")}
+                      >
+                        <TextUnderline />
+                      </IconButton>
+                    )}
+                    {!fountain && (
+                      <>
+                        <span className="toolbar-divider" />
+                        <IconButton
+                          label="Bulleted list"
+                          className="toolbar-secondary"
+                          onClick={() => editor.current?.wrap("- ")}
+                        >
+                          <ListBullets />
+                        </IconButton>
+                        <IconButton
+                          label="Todo list"
+                          className="toolbar-secondary"
+                          onClick={() => editor.current?.toggleTasks()}
+                        >
+                          <ListChecks />
+                        </IconButton>
+                        <IconButton
+                          label="Insert link (Ctrl K)"
+                          className="toolbar-link"
+                          onClick={startLink}
+                        >
+                          <LinkSimple />
+                        </IconButton>
+                        <IconButton
+                          label="Blockquote"
+                          className="toolbar-extra"
+                          onClick={() => editor.current?.wrap("> ")}
+                        >
+                          <Quotes />
+                        </IconButton>
+                        <IconButton
+                          label="Inline code"
+                          className="toolbar-extra"
+                          onClick={() => editor.current?.wrap("`", "`")}
+                        >
+                          <Code />
+                        </IconButton>
+                        <IconButton
+                          label="Insert local image or video"
+                          disabled={busy}
+                          onClick={() => fileInput.current?.click()}
+                        >
+                          <Image />
+                        </IconButton>
+                        <TablePicker
+                          onInsert={(rows, columns) =>
+                            editor.current?.insertTable(rows, columns)
+                          }
+                        />
+                      </>
+                    )}
                   </>
                 )}
                 <IconButton
@@ -929,7 +986,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   ? "Documents added here will appear automatically."
                   : sharedToken
                     ? "Ask the owner for a current sharing link."
-                    : "Create a document or open a Markdown file from the sidebar. Your words stay on your computer."}
+                    : "Create a document or open a Markdown or Fountain file from the sidebar. Your words stay on your computer."}
               </p>
               {config.owner && (
                 <button
@@ -968,10 +1025,17 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         path={doc.path}
                         entries={entries}
                         onLink={setLinkTarget}
-                        onInsertLink={startLink}
+                        onInsertLink={fountain ? undefined : startLink}
                         onChange={setContent}
                         onComment={startComment}
-                        onUpload={upload}
+                        onUpload={
+                          fountain
+                            ? () =>
+                                tell(
+                                  "Use a Markdown document for images and videos.",
+                                )
+                            : upload
+                        }
                         comments={comments}
                         activeComment={currentComment?.id}
                         commentDraft={selection}
@@ -1030,7 +1094,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 >
                   {(doc.usage / 1e6).toFixed(1)} / 50 MB
                 </span>
-                <span className="markdown-tag">Markdown</span>
+                <span className="markdown-tag">
+                  {fountain ? "Fountain" : "Markdown"}
+                </span>
               </div>
             )}
           </footer>
@@ -1137,8 +1203,39 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 <p className="dialog-description">
                   {createKind === "folder"
                     ? "Create a real folder in your document directory."
-                    : "A plain Markdown file, ready to write in any editor."}
+                    : "A plain text file, ready to write in any editor."}
                 </p>
+                {createKind === "file" && (
+                  <>
+                    <label className="field-label" htmlFor="new-format">
+                      File type
+                    </label>
+                    <select
+                      id="new-format"
+                      className="text-input"
+                      value={
+                        /\.(md|fountain)$/i.test(newPath)
+                          ? documentFormat(newPath)
+                          : createFormat
+                      }
+                      onChange={(event) => {
+                        const format = event.target.value as DocumentFormat;
+                        setCreateFormat(format);
+                        setNewPath((value) =>
+                          value
+                            ? value.replace(/\.(md|fountain)$/i, "") +
+                              (format === "fountain" ? ".fountain" : ".md")
+                            : value,
+                        );
+                      }}
+                    >
+                      <option value="markdown">Markdown (.md)</option>
+                      <option value="fountain">
+                        Fountain screenplay (.fountain)
+                      </option>
+                    </select>
+                  </>
+                )}
                 <label className="field-label" htmlFor="new-path">
                   {createKind === "folder" ? "Folder path" : "Document path"}
                 </label>
@@ -1149,7 +1246,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   placeholder={
                     createKind === "folder"
                       ? "Projects / Research"
-                      : "Projects/My next idea.md"
+                      : createFormat === "fountain"
+                        ? "Projects/My screenplay.fountain"
+                        : "Projects/My next idea.md"
                   }
                   value={newPath}
                   onChange={(e) => setNewPath(e.target.value)}
@@ -1283,7 +1382,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             {panel === "document" && doc && (
               <>
                 <p className="dialog-description">{doc.path}</p>
-                {doc.edit && (
+                {doc.edit && !fountain && (
                   <>
                     <button className="menu-action" onClick={startLink}>
                       <LinkSimple />
@@ -1310,7 +1409,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   }}
                 >
                   <DownloadSimple />
-                  Download Markdown
+                  Download {fountain ? "Fountain" : "Markdown"}
                 </button>
                 {doc.owner && (
                   <button

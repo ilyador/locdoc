@@ -157,7 +157,7 @@ export function DocumentSidebar({
             ? "No matching documents."
             : scope === "shared"
               ? "Shared documents will appear here."
-              : "Create a document, or add a .md file to your docs folder."}
+              : "Create a document, or add a .md or .fountain file to your docs folder."}
         </div>
       )}
     </div>

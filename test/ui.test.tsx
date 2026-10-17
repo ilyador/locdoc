@@ -1449,6 +1449,110 @@ test("word count measures reading content instead of Markdown control syntax", (
     assert.equal(countMarkdownWords(source), expected, source);
 });
 
+test("Fountain previews stay editable, preserve comments and survive format/permission changes", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    awareness = new Awareness(ydoc);
+  const source =
+    "Title: A Signal\n\nINT. STUDIO - DAY\n\n@Morgan[[comment(Example): Keep this record]]\nA **quiet** signal.\n\nLEE ^\n    (softly)  [[comment(Example): Keep the pause]]\nI hear it.\n\nA lamp glows with _warmth_.";
+  ydoc.getText("content").insert(0, source);
+  const ref = React.createRef<any>();
+  const props = {
+    ydoc,
+    provider: { awareness } as any,
+    id: "fountain",
+    onChange() {},
+    onComment() {},
+    onUpload() {},
+    ref,
+  };
+  const page = render(
+    <MarkdownEditor {...props} path="Signal.fountain" editable />,
+  );
+  assert.ok(page.getByRole("textbox", { name: "Fountain screenplay" }));
+  assert.equal(
+    page.container.querySelectorAll(".fountain-dual-marker").length,
+    1,
+  );
+  assert.ok(page.container.querySelector(".fountain-scene"));
+  assert.ok(page.container.querySelector(".fountain-underline"));
+  assert.equal(ydoc.getText("content").toString(), source);
+  const view = EditorView.findFromDOM(
+    page.container.querySelector(".cm-editor")!,
+  )!;
+  await act(async () => {
+    view.focus();
+    view.dispatch({ selection: { anchor: source.indexOf("@Morgan") + 3 } });
+  });
+  assert.ok(
+    page.container
+      .querySelector(".fountain-character")!
+      .textContent!.includes("@Morgan"),
+  );
+  const beforeComment = sourceComments(ydoc.getText("content").toString())[0];
+  const commentPosition = Y.createRelativePositionFromTypeIndex(
+    ydoc.getText("content"),
+    beforeComment.from + 10,
+  );
+  await act(async () => {
+    ref.current.formatFountain("centered");
+  });
+  assert.equal(
+    sourceComments(ydoc.getText("content").toString())[0].messages[0].body,
+    "Keep this record",
+  );
+  assert.ok(
+    ydoc
+      .getText("content")
+      .toString()
+      .includes("> Morgan <[[comment(Example): Keep this record]]"),
+  );
+  assert.equal(
+    Y.createAbsolutePositionFromRelativePosition(commentPosition, ydoc)!.index,
+    sourceComments(ydoc.getText("content").toString())[0].from + 10,
+  );
+  const pause = sourceComments(ydoc.getText("content").toString())[1];
+  const pausePosition = Y.createRelativePositionFromTypeIndex(
+    ydoc.getText("content"),
+    pause.from + 10,
+  );
+  await act(async () => {
+    view.dispatch({
+      selection: {
+        anchor: ydoc.getText("content").toString().indexOf("softly"),
+      },
+    });
+    ref.current.formatFountain("action");
+  });
+  assert.ok(
+    ydoc
+      .getText("content")
+      .toString()
+      .includes("    !softly  [[comment(Example): Keep the pause]]"),
+  );
+  assert.equal(
+    Y.createAbsolutePositionFromRelativePosition(pausePosition, ydoc)!.index,
+    sourceComments(ydoc.getText("content").toString())[1].from + 10,
+  );
+  const text = ydoc.getText("content").toString();
+  page.rerender(
+    <MarkdownEditor {...props} path="Signal.fountain" editable={false} />,
+  );
+  await act(async () => {
+    ref.current.formatFountain("action");
+  });
+  assert.equal(ydoc.getText("content").toString(), text);
+  page.rerender(<MarkdownEditor {...props} path="Signal.md" editable />);
+  assert.ok(page.getByRole("textbox", { name: "Markdown document" }));
+  assert.equal(page.container.querySelectorAll(".fountain-line").length, 0);
+  assert.equal(ydoc.getText("content").toString(), text);
+  page.unmount();
+  awareness.destroy();
+  ydoc.destroy();
+});
+
 test("measured viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport");
   const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");

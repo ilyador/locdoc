@@ -22,6 +22,9 @@ import {
   sourceComments,
 } from "./comment-syntax";
 import { markdownLink, resolveDocumentLink } from "./document-links";
+import { documentFormat } from "./document-format";
+import { fountainPreview } from "./fountain-preview";
+import { parseFountain, type FountainForce } from "./fountain";
 import type { Entry } from "./model";
 import type { Comment } from "./model";
 import {
@@ -66,6 +69,7 @@ export type LinkTarget = {
   rect: { left: number; bottom: number };
 };
 export type EditorHandle = {
+  formatFountain: (kind: FountainForce) => void;
   insertLink: (url: string, label: string, anchor: Anchor | null) => void;
   toggleTasks: () => void;
   insert: (text: string) => void;
@@ -490,6 +494,37 @@ function livePreview(
   });
 }
 
+function documentPreview(
+  id: string,
+  token?: string,
+  path = "",
+  entries: Entry[] = [],
+) {
+  const fountain = documentFormat(path) === "fountain";
+  return [
+    fountain
+      ? fountainPreview()
+      : [
+          markdown({ base: markdownLanguage, extensions: [commentMarkdown] }),
+          syntaxHighlighting(writingHighlight),
+          livePreview(id, token, path, entries),
+        ],
+    EditorView.editorAttributes.of({
+      class: fountain ? "fountain-editor" : "",
+    }),
+    placeholder(
+      fountain
+        ? "INT. A NEW SCENE - DAY"
+        : "Start writing. Use Markdown to make it yours.",
+    ),
+    EditorView.contentAttributes.of({
+      "aria-label": fountain ? "Fountain screenplay" : "Markdown document",
+      spellcheck: "true",
+      "data-gramm": "false",
+    }),
+  ];
+}
+
 export const MarkdownEditor = forwardRef<
   EditorHandle,
   {
@@ -558,6 +593,60 @@ export const MarkdownEditor = forwardRef<
   useImperativeHandle(
     ref,
     () => ({
+      formatFountain(kind) {
+        const v = view.current;
+        if (!v || !editable || documentFormat(path) !== "fountain") return;
+        const current = v.state.doc.lineAt(v.state.selection.main.head);
+        const line = parseFountain(v.state.doc.toString()).lines[
+          current.number - 1
+        ];
+        const prefix = {
+          scene: ".",
+          action: "!",
+          character: "@",
+          transition: "> ",
+          centered: "> ",
+          lyric: "~",
+          parenthetical: "(",
+        }[kind];
+        const suffix =
+          kind === "centered" ? " <" : kind === "parenthetical" ? ")" : "";
+        const existingParenthetical = line.kind === "parenthetical";
+        const contentStart = current.from + line.text.search(/\S|$/);
+        const from =
+          line.prefix?.from ??
+          (existingParenthetical ? contentStart : current.from);
+        const to =
+          line.prefix?.to ??
+          (existingParenthetical ? contentStart + 1 : current.from);
+        const end = existingParenthetical
+          ? current.from + line.text.trimEnd().length
+          : (visibleTextRanges(v.state, current.from, current.to).at(-1)?.to ??
+            current.to);
+        const tail =
+          line.suffix?.from ??
+          (existingParenthetical && v.state.sliceDoc(end - 1, end) === ")"
+            ? end - 1
+            : end);
+        const head = visibleTextRanges(v.state, from, to);
+        const foot = visibleTextRanges(v.state, tail, end);
+        const changes = v.state.changes([
+          ...head.map((part, i) => ({
+            ...part,
+            insert: i === 0 ? prefix : "",
+          })),
+          ...foot.map((part, i) => ({
+            ...part,
+            insert: i === 0 ? suffix : "",
+          })),
+        ]);
+        v.dispatch({
+          changes,
+          selection: { anchor: changes.mapPos(from, -1) + prefix.length },
+          scrollIntoView: true,
+        });
+        v.focus();
+      },
       insertLink(url, label, anchor) {
         const v = view.current;
         if (!v || !editable || !anchor) return;
@@ -758,7 +847,7 @@ export const MarkdownEditor = forwardRef<
         if (view.current) commentExtension.current?.reveal(view.current, id);
       },
     }),
-    [ydoc, editable],
+    [ydoc, editable, path],
   );
   useLayoutEffect(() => {
     const text = ydoc.getText("content");
@@ -772,7 +861,6 @@ export const MarkdownEditor = forwardRef<
       state: EditorState.create({
         doc: text.toString(),
         extensions: [
-          markdown({ base: markdownLanguage, extensions: [commentMarkdown] }),
           sourceCommentLayer,
           Prec.highest(
             EditorView.domEventHandlers({
@@ -789,13 +877,12 @@ export const MarkdownEditor = forwardRef<
           drawSelection(),
           bracketMatching(),
           highlightSelectionMatches(),
-          syntaxHighlighting(writingHighlight),
           layer.extension,
           access.current.of([
             EditorState.readOnly.of(!editable),
             EditorView.editable.of(editable),
           ]),
-          preview.current.of(livePreview(id, token, path, entries)),
+          preview.current.of(documentPreview(id, token, path, entries)),
           yCollab(text, provider.awareness, { undoManager: undo }),
           keymap.of([
             {
@@ -808,8 +895,10 @@ export const MarkdownEditor = forwardRef<
             {
               key: "Mod-k",
               run: () => {
-                if (!v.state.readOnly) callbacks.current.onInsertLink?.();
-                return !v.state.readOnly;
+                if (v.state.readOnly || !callbacks.current.onInsertLink)
+                  return false;
+                callbacks.current.onInsertLink();
+                return true;
               },
             },
             ...yUndoManagerKeymap.map((binding) => ({
@@ -825,12 +914,6 @@ export const MarkdownEditor = forwardRef<
             ...searchKeymap,
             indentWithTab,
           ]),
-          placeholder("Start writing. Use Markdown to make it yours."),
-          EditorView.contentAttributes.of({
-            "aria-label": "Markdown document",
-            spellcheck: "true",
-            "data-gramm": "false",
-          }),
           EditorView.updateListener.of((u) => {
             if (u.docChanged)
               callbacks.current.onChange(u.state.doc.toString());
@@ -949,13 +1032,15 @@ export const MarkdownEditor = forwardRef<
     observer.observe(commentHost);
     return () => observer.disconnect();
   }, [commentHost]);
+  const previewEntries =
+    documentFormat(path) === "fountain" ? undefined : entries;
   useEffect(() => {
     view.current?.dispatch({
       effects: preview.current.reconfigure(
-        livePreview(id, token, path, entries),
+        documentPreview(id, token, path, previewEntries),
       ),
     });
-  }, [id, token, path, entries]);
+  }, [id, token, path, previewEntries]);
   useEffect(() => {
     view.current?.dispatch({
       effects: access.current.reconfigure([

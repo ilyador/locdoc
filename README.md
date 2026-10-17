@@ -1,9 +1,10 @@
 # Locdoc
 
-A small, self-hosted Markdown editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
+A small, self-hosted Markdown and Fountain editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
 
-- Real nested folders and ordinary UTF-8 `.md` files.
+- Real nested folders and ordinary UTF-8 `.md` and `.fountain` files.
 - Autosave, live Markdown formatting, task lists, tables, local images and videos.
+- Live Fountain screenplay formatting: scene headings, dialogue, parentheticals, transitions, title pages, notes, and dual dialogue.
 - Collaborative editing with visible cursors and inline comments.
 - Document and folder links with **view & comment** or **edit & comment** access.
 - Searchable document links, link previews, local fonts, automatic dark mode, and mobile layouts.
@@ -74,6 +75,21 @@ journalctl --user -u locdoc -n 50
 ```
 
 To start before login, your administrator can optionally enable user lingering. For development use `npm run dev` (export environment variables first).
+
+## Fountain screenplays
+
+Choose **Fountain screenplay** when creating a document, or place a `.fountain`
+file in your documents folder. Locdoc formats it as you type, using the
+[Fountain syntax](https://fountain.io/syntax/). The current line reveals its
+formatting markers while you edit; the file on disk stays plain text.
+
+Type `INT.`, `EXT.`, uppercase character names, dialogue and parentheticals
+naturally. The **Element** menu can force a scene heading, action, character,
+transition, centered text or lyrics. `_underscores_` underline text. Dual
+dialogue uses `^` after the second character cue; this marker stays visible while
+both speeches remain in normal editing flow. Comments, shared folders, simultaneous editing,
+desktop file sync and raw-file downloads use the same system as Markdown.
+
 
 ## Public sharing
 

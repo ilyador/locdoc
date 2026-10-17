@@ -898,7 +898,7 @@ fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
                 url: None,
             });
             scan(s, &p, entries)?;
-        } else if p.extension().is_some_and(|x| x == "md") {
+        } else if documents::format(&rel).is_some() {
             let d = s.index_document(&rel)?;
             entries.push(Entry {
                 path: rel,
@@ -1773,7 +1773,7 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                 continue;
             }
             for p in event.paths {
-                if p.extension().is_some_and(|x| x == "md")
+                if documents::format(&p.to_string_lossy()).is_some()
                     && let Ok(rel) = p.strip_prefix(&s.root)
                 {
                     let rel = rel.to_string_lossy().to_string();

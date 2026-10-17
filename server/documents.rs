@@ -3,6 +3,25 @@
 //! explicit creation always gets a fresh, private identity.
 use super::*;
 
+#[derive(PartialEq)]
+pub(super) enum Format {
+    Markdown,
+    Fountain,
+}
+
+pub(super) fn format(path: &str) -> Option<Format> {
+    match Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "md" => Some(Format::Markdown),
+        "fountain" => Some(Format::Fountain),
+        _ => None,
+    }
+}
+
 pub(super) fn relative_path(input: &str, hidden: bool) -> Result<String> {
     let path = Path::new(input);
     if path.is_absolute() || input.contains('\\') {
@@ -143,7 +162,7 @@ impl Store {
     pub(super) fn index_document(&self, input: &str) -> Result<Document> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
-        if !path.ends_with(".md") || !self.safe(&path, false)?.is_file() {
+        if format(&path).is_none() || !self.safe(&path, false)?.is_file() {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,
                 "Document not found.".into(),
@@ -175,8 +194,8 @@ impl Store {
         use std::io::Write;
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
-        if !path.ends_with(".md") {
-            return Err(bad("Document names must end with .md."));
+        if format(&path).is_none() {
+            return Err(bad("Document names must end with .md or .fountain."));
         }
         let full = self.safe(&path, false)?;
         fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
@@ -196,7 +215,12 @@ impl Store {
                 .file_stem()
                 .ok_or_else(|| bad("Invalid filename."))?
                 .to_string_lossy();
-            file.write_all(format!("# {title}\n\n").as_bytes())?;
+            let initial = if format(&path) == Some(Format::Fountain) {
+                format!("Title: {title}\n\n")
+            } else {
+                format!("# {title}\n\n")
+            };
+            file.write_all(initial.as_bytes())?;
             file.sync_all()?;
             let id = uuid::Uuid::new_v4().to_string();
             let mut db = self.db.lock().unwrap();
@@ -235,8 +259,8 @@ impl Store {
         if path == d.path {
             return Ok(());
         }
-        if !path.ends_with(".md") {
-            return Err(bad("Document names must end with .md."));
+        if format(&path).is_none() {
+            return Err(bad("Document names must end with .md or .fountain."));
         }
         if Path::new(&path).parent() != Path::new(&d.path).parent() {
             return Err(bad(

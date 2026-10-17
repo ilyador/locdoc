@@ -1,4 +1,6 @@
 import { commentParser, commentReadingText } from "./comment-syntax";
+import { documentFormat } from "./document-format";
+import { parseFountain } from "./fountain";
 
 const hidden = new Set([
   "LocdocComment",
@@ -16,6 +18,20 @@ const hidden = new Set([
   "CodeInfo",
 ]);
 const words = new Intl.Segmenter(undefined, { granularity: "word" });
+
+export function countDocumentWords(source: string, path: string) {
+  if (documentFormat(path) !== "fountain") return countMarkdownWords(source);
+  const text = parseFountain(source)
+    .lines.filter(
+      (line) =>
+        !["note", "omitted", "section", "synopsis", "break", "blank"].includes(
+          line.kind,
+        ),
+    )
+    .map((line) => line.text)
+    .join(" ");
+  return [...words.segment(text)].filter((word) => word.isWordLike).length;
+}
 
 // Count reading content, not Markdown punctuation, destinations or media paths.
 export function countMarkdownWords(markdown: string) {

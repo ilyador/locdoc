@@ -67,11 +67,16 @@ fn flush(text: &mut String, kind: &Kind, depth: usize, quote: bool, blocks: &mut
 
 impl Preview {
     pub fn new(source: &str, path: &str) -> Self {
-        let reading = comments::reading_source(source);
-        let end = reading
+        let source = comments::reading_source(source);
+        let end = source
             .char_indices()
             .nth(32_000)
-            .map_or(reading.len(), |(i, _)| i);
+            .map_or(source.len(), |(i, _)| i);
+        let reading = if documents::format(path) == Some(documents::Format::Fountain) {
+            fountain_excerpt(&source[..end], path)
+        } else {
+            source[..end].to_owned()
+        };
         let mut title = String::new();
         let mut text = String::new();
         let mut blocks = Vec::new();
@@ -82,7 +87,7 @@ impl Preview {
         let mut hidden = 0;
         let options = Options::all()
             .difference(Options::ENABLE_WIKILINKS | Options::ENABLE_SMART_PUNCTUATION);
-        for event in Parser::new_ext(&reading[..end], options) {
+        for event in Parser::new_ext(&reading, options) {
             match event {
                 Event::Start(Tag::CodeBlock(_) | Tag::Image { .. } | Tag::MetadataBlock(_)) => {
                     hidden += 1
@@ -215,6 +220,88 @@ impl Preview {
             self.title, self.description, self.filename, self.blocks
         ))
     }
+}
+
+// Social cards use a short reading excerpt, not a second screenplay layout
+// engine. Keep title-page contact fields and non-printing notes out of metadata.
+fn fountain_excerpt(source: &str, path: &str) -> String {
+    static NOTES: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?s)/\*.*?(?:\*/|$)|\[\[.*?(?:\]\]|$)").unwrap());
+    let source = NOTES.replace_all(source, " ");
+    let mut title = String::new();
+    let mut body = String::new();
+    let mut header = source
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| {
+            line.split_once(':').is_some_and(|(key, _)| {
+                matches!(
+                    key.trim().to_ascii_lowercase().as_str(),
+                    "title"
+                        | "credit"
+                        | "author"
+                        | "authors"
+                        | "source"
+                        | "contact"
+                        | "draft date"
+                        | "copyright"
+                        | "notes"
+                )
+            })
+        });
+    let mut title_field = false;
+    let mut header_started = false;
+    for line in source.lines() {
+        if header {
+            if line.trim().is_empty() {
+                if header_started {
+                    header = false;
+                }
+                continue;
+            }
+            header_started = true;
+            if let Some((key, value)) = line
+                .split_once(':')
+                .filter(|(key, _)| !key.starts_with(char::is_whitespace))
+            {
+                title_field = key.trim().eq_ignore_ascii_case("title");
+                if title_field {
+                    title.push_str(value.trim());
+                }
+                continue;
+            }
+            if line.starts_with(char::is_whitespace) {
+                if title_field {
+                    title.push(' ');
+                    title.push_str(line.trim());
+                }
+                continue;
+            }
+            header = false;
+        }
+        let text = line.trim();
+        if text.starts_with('#') || text.starts_with('=') {
+            continue;
+        }
+        let text = if text.starts_with('.') && !text.starts_with("..") {
+            body.push_str("\n## ");
+            &text[1..]
+        } else if text.starts_with(['!', '@', '~', '>']) {
+            text[1..].trim().trim_end_matches('<').trim_end()
+        } else {
+            text
+        };
+        body.push_str(text);
+        body.push('\n');
+    }
+    if title.is_empty() {
+        title = Path::new(path)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+    }
+    format!("# {}\n\n{body}", clean(&title, 140))
 }
 
 fn clean(value: &str, limit: usize) -> String {
@@ -425,6 +512,28 @@ pub(super) async fn image(value: Preview) -> Result<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fountain_cards_use_the_title_and_exclude_contact_notes_and_boneyards() {
+        let value = Preview::new(
+            "Title: Signal\nAuthor: Private author\nContact:\n    private@example.invalid\n\nINT. STUDIO - DAY\n\n@Morgan\nA quiet signal.\n\n[[Hidden note]]\n\n/* Hidden scene */",
+            "Scripts/Signal.fountain",
+        );
+        assert_eq!(value.title, "Signal");
+        assert!(value.description.contains("A quiet signal."));
+        for hidden in [
+            "Private author",
+            "private@example.invalid",
+            "Hidden note",
+            "Hidden scene",
+            "@Morgan",
+        ] {
+            assert!(!value.description.contains(hidden));
+        }
+        assert_eq!(
+            Preview::new("INT. ROOM - DAY\n\nA room.", "Script.fountain").title,
+            "Script"
+        );
+    }
     #[test]
     fn preview_extracts_visible_markdown_and_never_hidden_comments_or_destinations() {
         let value = Preview::new(

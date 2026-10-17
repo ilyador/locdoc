@@ -761,6 +761,101 @@ button:hover {
   width: 100%;
   min-height: 350px;
 }
+.fountain-line {
+  min-width: 0;
+}
+.fountain-line > .cm-line {
+  box-sizing: border-box;
+}
+.fountain-blank > .cm-line {
+  min-height: 0.8em !important;
+  line-height: 0.8 !important;
+}
+.fountain-scene > .cm-line {
+  color: var(--syntax-heading);
+  font-weight: var(--weight-bold);
+  text-transform: uppercase;
+}
+.fountain-character > .cm-line {
+  padding-inline-start: 33.333% !important;
+  font-weight: var(--weight-semibold);
+}
+.fountain-dialogue > .cm-line,
+.fountain-lyric > .cm-line {
+  padding-inline: 16.667% 25% !important;
+}
+.fountain-parenthetical > .cm-line {
+  padding-inline: 25% 31.667% !important;
+  color: var(--secondary);
+}
+.fountain-transition > .cm-line {
+  text-align: right;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+.fountain-centered > .cm-line,
+.fountain-title > .cm-line,
+.fountain-credit > .cm-line {
+  text-align: center;
+}
+.fountain-title > .cm-line {
+  font-size: 1.25em;
+  font-weight: var(--weight-semibold);
+}
+.fountain-metadata > .cm-line {
+  color: var(--secondary);
+}
+.fountain-section > .cm-line {
+  color: var(--syntax-heading);
+  font-weight: var(--weight-semibold);
+}
+.fountain-synopsis > .cm-line,
+.fountain-note-ink,
+.fountain-omitted-ink {
+  color: var(--muted);
+  font-style: italic;
+}
+.fountain-lyric > .cm-line {
+  font-style: italic;
+}
+.fountain-underline {
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+.fountain-break {
+  position: relative;
+  min-height: 1.5em;
+}
+.fountain-break::after {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  border-top: 1px solid var(--line);
+  pointer-events: none;
+}
+.fountain-break-source {
+  color: var(--muted);
+}
+.fountain-dual-marker {
+  color: var(--muted);
+}
+.fountain-element-select {
+  max-width: 116px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--secondary);
+  font: inherit;
+  font-size: var(--ui-control-size);
+}
+@media (max-width: 600px) {
+  .fountain-element-select {
+    width: 96px;
+  }
+}
 .cm-editor {
   font-family: inherit;
   font-size: inherit;

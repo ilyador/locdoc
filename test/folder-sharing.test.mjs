@@ -84,6 +84,69 @@ function connect(document, token) {
   peers.push(peer);
   return peer;
 }
+
+test("Fountain files share the same discovery, concurrent editing and desktop sync", async () => {
+  const created = await request("/api/files", {
+    method: "POST",
+    body: { kind: "file", path: "Scripts/Signal.fountain" },
+  });
+  assert.equal(
+    await readFile(join(dir, "docs/Scripts/Signal.fountain"), "utf8"),
+    "Title: Signal\n\n",
+  );
+  await writeFile(
+    join(dir, "docs/Scripts/Other.FOUNTAIN"),
+    "INT. ROOM - DAY\n\nA quiet room.",
+  );
+  const tree = await request("/api/tree");
+  assert.ok(tree.entries.some((e) => e.path === "Scripts/Other.FOUNTAIN"));
+  const grant = await share("Scripts", "edit");
+  const snapshot = await request(
+    `/api/docs/${created.id}?token=${grant.token}`,
+    { owner: false },
+  );
+  const a = connect(snapshot, grant.token),
+    b = connect(snapshot, grant.token);
+  await until(() => a.provider.synced && b.provider.synced);
+  a.text.insert(a.text.length, "INT. STUDIO - DAY\n\n");
+  b.text.insert(b.text.length, "A signal arrives.\n");
+  await until(
+    () =>
+      a.text.toString() === b.text.toString() &&
+      a.text.toString().includes("STUDIO") &&
+      a.text.toString().includes("signal arrives"),
+  );
+  await until(
+    async () =>
+      (await readFile(join(dir, "docs/Scripts/Signal.fountain"), "utf8")) ===
+      a.text.toString(),
+  );
+  await writeFile(
+    join(dir, "docs/Scripts/Signal.fountain"),
+    a.text.toString() + "\nMORGAN\nDesktop dialogue.\n",
+  );
+  await until(
+    () =>
+      a.text.toString().includes("Desktop dialogue") &&
+      a.text.toString() === b.text.toString(),
+  );
+  await request(`/api/docs/${created.id}`, {
+    method: "PATCH",
+    body: { path: "Scripts/Renamed.FOUNTAIN" },
+  });
+  const renamed = await request(
+    `/api/docs/${created.id}?token=${grant.token}`,
+    { owner: false },
+  );
+  assert.equal(renamed.path, "Renamed.FOUNTAIN");
+  assert.ok(
+    (
+      await readFile(join(dir, "docs/Scripts/Renamed.FOUNTAIN"), "utf8")
+    ).includes("Desktop dialogue"),
+  );
+  a.provider.destroy();
+  b.provider.destroy();
+});
 before(async () => {
   dir = await mkdtemp(join(tmpdir(), "locdoc-folder-test-"));
   await mkdir(join(dir, "state"));

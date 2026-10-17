@@ -1,7 +1,8 @@
 import type { Entry } from "./model";
+import { documentName } from "./document-format.ts";
 
 export function documentTitle(entry: Entry) {
-  return entry.title || entry.path.split("/").pop()!.replace(/\.md$/i, "");
+  return entry.title || documentName(entry.path);
 }
 
 export function webLink(raw: string): string | null {
@@ -33,7 +34,7 @@ export function resolveDocumentLink(
   try {
     const decoded = decodeURIComponent(raw.replace(/^<|>$/g, ""));
     if (
-      !decoded.endsWith(".md") ||
+      !/\.(md|fountain)$/i.test(decoded) ||
       decoded.startsWith("/") ||
       decoded.includes("\\")
     )
