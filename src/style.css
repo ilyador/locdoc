@@ -641,6 +641,7 @@ button:hover {
   font-variant-numeric: tabular-nums;
 }
 .formatting-menu {
+  display: none;
   padding-block-end: 12px;
   margin-block-end: 8px;
   border-bottom: 1px solid var(--line);
@@ -663,6 +664,9 @@ button:hover {
 .formatting-menu .table-picker {
   display: block;
   grid-column: 1 / -1;
+}
+.formatting-menu :is(.toolbar-secondary, .toolbar-extra, .toolbar-media) {
+  display: none;
 }
 .formatting-menu .table-picker-panel {
   position: static;
@@ -1022,6 +1026,12 @@ button:hover {
   .formatbar .toolbar-extra {
     display: none;
   }
+  .formatting-menu {
+    display: block;
+  }
+  .formatting-menu .toolbar-extra {
+    display: flex;
+  }
 }
 @container workspace (max-width: 760px) {
   .formatbar {
@@ -1030,6 +1040,9 @@ button:hover {
   }
   .formatbar .toolbar-secondary {
     display: none;
+  }
+  .formatting-menu .toolbar-secondary {
+    display: flex;
   }
 }
 @container workspace (max-width: 600px) {
@@ -1043,16 +1056,24 @@ button:hover {
     gap: 4px;
   }
   .formatbar .text-size-control .icon-button {
-    width: 26px;
+    width: 24px;
   }
   .formatbar .text-size-control output {
-    min-width: 24px;
+    min-width: 22px;
   }
   .formatbar .fountain-element-field {
-    flex-basis: 92px;
-    width: 92px;
+    flex-basis: 86px;
+    width: 86px;
+  }
+  .formatbar .fountain-element-field select {
+    padding-inline: 8px 24px;
   }
   .formatbar .toolbar-divider {
+    display: none;
+  }
+}
+@container workspace (max-width: 374px) {
+  .formatbar[data-format="fountain"] .text-size-control {
     display: none;
   }
 }
@@ -1062,6 +1083,15 @@ button:hover {
   }
   .format-tools {
     gap: 2px;
+  }
+  .formatbar .toolbar-media {
+    display: none;
+  }
+  .formatting-menu .toolbar-media {
+    display: flex;
+  }
+  .formatting-menu .formatting-table {
+    display: block;
   }
 }
 .cm-editor {

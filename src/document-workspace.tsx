@@ -1083,335 +1083,344 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               </div>
             )}
           </footer>
-        </main>
-        <input
-          ref={fileInput}
-          className="visually-hidden"
-          type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp,image/avif,video/mp4,video/webm,video/quicktime"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) upload(f);
-            e.target.value = "";
-          }}
-        />
-        <dialog
-          ref={dialog}
-          aria-labelledby="panel-title"
-          className="dialog"
-          onCancel={() => setPanel(null)}
-          onClick={(e) => {
-            if (e.target === dialog.current) setPanel(null);
-          }}
-        >
-          <div className="dialog-content">
-            <div className="dialog-heading">
-              <h2 id="panel-title">
-                {
+          <input
+            ref={fileInput}
+            className="visually-hidden"
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp,image/avif,video/mp4,video/webm,video/quicktime"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) upload(f);
+              e.target.value = "";
+            }}
+          />
+          <dialog
+            ref={dialog}
+            aria-labelledby="panel-title"
+            className="dialog"
+            onCancel={() => setPanel(null)}
+            onClick={(e) => {
+              if (e.target === dialog.current) setPanel(null);
+            }}
+          >
+            <div className="dialog-content">
+              <div className="dialog-heading">
+                <h2 id="panel-title">
                   {
-                    share: "Share document",
-                    "folder-share": "Share folder",
-                    create:
-                      createKind === "folder" ? "New folder" : "New document",
-                    login: "Open your workspace",
-                    settings: "Your workspace",
-                    document: "Document options",
-                    history: "Version history",
-                    link: "Insert link",
-                  }[panel || ""]
-                }
-              </h2>
-              <IconButton label="Close dialog" onClick={() => setPanel(null)}>
-                <X size={18} />
-              </IconButton>
-            </div>
-            {panel === "link" && doc?.edit && (
-              <LinkPicker
-                entries={entries}
-                selection={linkSelection?.quote || ""}
-                onInsert={(url, label) => {
-                  editor.current?.insertLink(
-                    url,
-                    label,
-                    linkSelection?.anchor || null,
-                  );
-                  setPanel(null);
-                  requestAnimationFrame(() => editor.current?.focus());
-                }}
-              />
-            )}
-            {panel === "share" && doc && (
-              <>
-                <p className="dialog-description">
-                  Share “{filename}” with a link.
-                </p>
-                <ShareControls value={doc} name={name} onChange={updateShare} />
-                {doc.owner && doc.path.includes("/") && (
-                  <button
-                    className="text-button"
-                    onClick={() => {
-                      setShareFolderPath(
-                        doc.path.split("/").slice(0, -1).join("/"),
-                      );
-                      setPanel("folder-share");
-                    }}
-                  >
-                    <Folder size={16} />
-                    Share containing folder
-                  </button>
-                )}
-                {doc.path.includes("/") && (
-                  <p className="field-help">
-                    Folder links grant access separately.
+                    {
+                      share: "Share document",
+                      "folder-share": "Share folder",
+                      create:
+                        createKind === "folder" ? "New folder" : "New document",
+                      login: "Open your workspace",
+                      settings: "Your workspace",
+                      document: "Document options",
+                      history: "Version history",
+                      link: "Insert link",
+                    }[panel || ""]
+                  }
+                </h2>
+                <IconButton label="Close dialog" onClick={() => setPanel(null)}>
+                  <X size={18} />
+                </IconButton>
+              </div>
+              {panel === "link" && doc?.edit && (
+                <LinkPicker
+                  entries={entries}
+                  selection={linkSelection?.quote || ""}
+                  onInsert={(url, label) => {
+                    editor.current?.insertLink(
+                      url,
+                      label,
+                      linkSelection?.anchor || null,
+                    );
+                    setPanel(null);
+                    requestAnimationFrame(() => editor.current?.focus());
+                  }}
+                />
+              )}
+              {panel === "share" && doc && (
+                <>
+                  <p className="dialog-description">
+                    Share “{filename}” with a link.
                   </p>
-                )}
-              </>
-            )}
-            {panel === "folder-share" && config?.owner && shareFolderPath && (
-              <FolderShare
-                key={shareFolderPath}
-                path={shareFolderPath}
-                name={name}
-                onChanged={loadTree}
-              />
-            )}
-            {panel === "create" && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  createFile();
-                }}
-              >
-                <p className="dialog-description">
-                  {createKind === "folder"
-                    ? "Create a real folder in your document directory."
-                    : "A plain text file, ready to write in any editor."}
-                </p>
-                {createKind === "file" && (
-                  <>
-                    <label className="field-label" htmlFor="new-format">
-                      File type
-                    </label>
-                    <select
-                      id="new-format"
-                      className="text-input"
-                      value={
-                        /\.(md|fountain)$/i.test(newPath)
-                          ? documentFormat(newPath)
-                          : createFormat
-                      }
-                      onChange={(event) => {
-                        const format = event.target.value as DocumentFormat;
-                        setCreateFormat(format);
-                        setNewPath((value) =>
-                          value
-                            ? value.replace(/\.(md|fountain)$/i, "") +
-                              (format === "fountain" ? ".fountain" : ".md")
-                            : value,
+                  <ShareControls
+                    value={doc}
+                    name={name}
+                    onChange={updateShare}
+                  />
+                  {doc.owner && doc.path.includes("/") && (
+                    <button
+                      className="text-button"
+                      onClick={() => {
+                        setShareFolderPath(
+                          doc.path.split("/").slice(0, -1).join("/"),
                         );
+                        setPanel("folder-share");
                       }}
                     >
-                      <option value="markdown">Markdown (.md)</option>
-                      <option value="fountain">
-                        Fountain screenplay (.fountain)
-                      </option>
-                    </select>
-                  </>
-                )}
-                <label className="field-label" htmlFor="new-path">
-                  {createKind === "folder" ? "Folder path" : "Document path"}
-                </label>
-                <input
-                  id="new-path"
-                  className="text-input"
-                  autoFocus
-                  placeholder={
-                    createKind === "folder"
-                      ? "Projects / Research"
-                      : createFormat === "fountain"
-                        ? "Projects/My screenplay.fountain"
-                        : "Projects/My next idea.md"
-                  }
-                  value={newPath}
-                  onChange={(e) => setNewPath(e.target.value)}
-                  required
+                      <Folder size={16} />
+                      Share containing folder
+                    </button>
+                  )}
+                  {doc.path.includes("/") && (
+                    <p className="field-help">
+                      Folder links grant access separately.
+                    </p>
+                  )}
+                </>
+              )}
+              {panel === "folder-share" && config?.owner && shareFolderPath && (
+                <FolderShare
+                  key={shareFolderPath}
+                  path={shareFolderPath}
+                  name={name}
+                  onChanged={loadTree}
                 />
-                <p className="field-help">Use / to place it inside a folder.</p>
-                <div className="dialog-actions">
-                  <button
-                    type="button"
-                    className="button quiet"
-                    onClick={() => setPanel(null)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="button primary"
-                    disabled={busy || !newPath.trim()}
-                  >
-                    {busy
-                      ? "Creating…"
-                      : createKind === "folder"
-                        ? "Create folder"
-                        : "Create document"}
-                  </button>
-                </div>
-              </form>
-            )}
-            {panel === "login" && (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  login();
-                }}
-              >
-                <p className="dialog-description">
-                  Use the API key from this computer’s{" "}
-                  <code>.locdoc/owner.key</code>. Run <code>npm run owner</code>{" "}
-                  in the Locdoc folder to open it automatically.
-                </p>
-                <label className="field-label" htmlFor="owner-key">
-                  Owner API key
-                </label>
-                <input
-                  id="owner-key"
-                  type="password"
-                  autoComplete="off"
-                  className="text-input"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  autoFocus
-                  required
-                />
-                <p className="field-help">
-                  This browser will remember your owner session.
-                </p>
-                <div className="dialog-actions">
-                  <button
-                    className="button primary"
-                    disabled={busy || !apiKey.trim()}
-                  >
-                    {busy ? "Opening…" : "Open workspace"}
-                  </button>
-                </div>
-              </form>
-            )}
-            {panel === "settings" && (
-              <>
-                <label className="field-label" htmlFor="your-name">
-                  Your display name
-                </label>
-                <input
-                  id="your-name"
-                  className="text-input"
-                  maxLength={60}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                />
-                <p className="field-help">
-                  Shown beside your cursor and comments.
-                </p>
-                {config?.owner && (
-                  <div className="settings-folder">
-                    <Folder />
-                    <span>
-                      <strong>Documents folder</strong>
-                      <code>{config.root}</code>
-                    </span>
-                  </div>
-                )}
-                <button
-                  className="menu-action"
-                  onClick={() =>
-                    setPanel((current) =>
-                      current === "appearance" ? null : "appearance",
-                    )
-                  }
+              )}
+              {panel === "create" && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    createFile();
+                  }}
                 >
-                  <TextAa />
-                  Fonts and appearance
-                  <CaretRight size={14} />
-                </button>
-                {config?.owner && (
+                  <p className="dialog-description">
+                    {createKind === "folder"
+                      ? "Create a real folder in your document directory."
+                      : "A plain text file, ready to write in any editor."}
+                  </p>
+                  {createKind === "file" && (
+                    <>
+                      <label className="field-label" htmlFor="new-format">
+                        File type
+                      </label>
+                      <select
+                        id="new-format"
+                        className="text-input"
+                        value={
+                          /\.(md|fountain)$/i.test(newPath)
+                            ? documentFormat(newPath)
+                            : createFormat
+                        }
+                        onChange={(event) => {
+                          const format = event.target.value as DocumentFormat;
+                          setCreateFormat(format);
+                          setNewPath((value) =>
+                            value
+                              ? value.replace(/\.(md|fountain)$/i, "") +
+                                (format === "fountain" ? ".fountain" : ".md")
+                              : value,
+                          );
+                        }}
+                      >
+                        <option value="markdown">Markdown (.md)</option>
+                        <option value="fountain">
+                          Fountain screenplay (.fountain)
+                        </option>
+                      </select>
+                    </>
+                  )}
+                  <label className="field-label" htmlFor="new-path">
+                    {createKind === "folder" ? "Folder path" : "Document path"}
+                  </label>
+                  <input
+                    id="new-path"
+                    className="text-input"
+                    autoFocus
+                    placeholder={
+                      createKind === "folder"
+                        ? "Projects / Research"
+                        : createFormat === "fountain"
+                          ? "Projects/My screenplay.fountain"
+                          : "Projects/My next idea.md"
+                    }
+                    value={newPath}
+                    onChange={(e) => setNewPath(e.target.value)}
+                    required
+                  />
+                  <p className="field-help">
+                    Use / to place it inside a folder.
+                  </p>
+                  <div className="dialog-actions">
+                    <button
+                      type="button"
+                      className="button quiet"
+                      onClick={() => setPanel(null)}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      className="button primary"
+                      disabled={busy || !newPath.trim()}
+                    >
+                      {busy
+                        ? "Creating…"
+                        : createKind === "folder"
+                          ? "Create folder"
+                          : "Create document"}
+                    </button>
+                  </div>
+                </form>
+              )}
+              {panel === "login" && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    login();
+                  }}
+                >
+                  <p className="dialog-description">
+                    Use the API key from this computer’s{" "}
+                    <code>.locdoc/owner.key</code>. Run{" "}
+                    <code>npm run owner</code> in the Locdoc folder to open it
+                    automatically.
+                  </p>
+                  <label className="field-label" htmlFor="owner-key">
+                    Owner API key
+                  </label>
+                  <input
+                    id="owner-key"
+                    type="password"
+                    autoComplete="off"
+                    className="text-input"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    autoFocus
+                    required
+                  />
+                  <p className="field-help">
+                    This browser will remember your owner session.
+                  </p>
+                  <div className="dialog-actions">
+                    <button
+                      className="button primary"
+                      disabled={busy || !apiKey.trim()}
+                    >
+                      {busy ? "Opening…" : "Open workspace"}
+                    </button>
+                  </div>
+                </form>
+              )}
+              {panel === "settings" && (
+                <>
+                  <label className="field-label" htmlFor="your-name">
+                    Your display name
+                  </label>
+                  <input
+                    id="your-name"
+                    className="text-input"
+                    maxLength={60}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                  <p className="field-help">
+                    Shown beside your cursor and comments.
+                  </p>
+                  {config?.owner && (
+                    <div className="settings-folder">
+                      <Folder />
+                      <span>
+                        <strong>Documents folder</strong>
+                        <code>{config.root}</code>
+                      </span>
+                    </div>
+                  )}
                   <button
                     className="menu-action"
                     onClick={() =>
-                      action(async () => {
-                        await api("/api/logout", send("POST"));
-                        location.href = "/";
-                      })
+                      setPanel((current) =>
+                        current === "appearance" ? null : "appearance",
+                      )
                     }
                   >
-                    <LockSimple />
-                    Lock this browser
+                    <TextAa />
+                    Fonts and appearance
+                    <CaretRight size={14} />
                   </button>
-                )}
-              </>
-            )}
-            {panel === "history" && doc && (
-              <VersionHistory
-                endpoint={endpoint}
-                onRestore={() => {
-                  setPanel(null);
-                  tell(
-                    "Version restored. Your previous text was kept in history.",
-                  );
-                }}
-              />
-            )}
-            {panel === "document" && doc && (
-              <>
-                <p className="dialog-description">{doc.path}</p>
-                <div
-                  className="formatting-menu"
-                  role="group"
-                  aria-label="Formatting"
-                >
-                  {formattingTools(true)}
-                </div>
-                <button
-                  className="menu-action"
-                  onClick={() => {
-                    download();
+                  {config?.owner && (
+                    <button
+                      className="menu-action"
+                      onClick={() =>
+                        action(async () => {
+                          await api("/api/logout", send("POST"));
+                          location.href = "/";
+                        })
+                      }
+                    >
+                      <LockSimple />
+                      Lock this browser
+                    </button>
+                  )}
+                </>
+              )}
+              {panel === "history" && doc && (
+                <VersionHistory
+                  endpoint={endpoint}
+                  onRestore={() => {
                     setPanel(null);
+                    tell(
+                      "Version restored. Your previous text was kept in history.",
+                    );
                   }}
-                >
-                  <DownloadSimple />
-                  Download {fountain ? "Fountain" : "Markdown"}
-                </button>
-                {doc.owner && (
+                />
+              )}
+              {panel === "document" && doc && (
+                <>
+                  <p className="dialog-description">{doc.path}</p>
+                  {doc.edit && !fountain && (
+                    <div
+                      className="formatting-menu"
+                      role="group"
+                      aria-label="Formatting"
+                    >
+                      {formattingTools(true)}
+                    </div>
+                  )}
                   <button
                     className="menu-action"
-                    onClick={() => setPanel("history")}
-                  >
-                    <ArrowCounterClockwise />
-                    Version history
-                  </button>
-                )}
-                {doc.owner && (
-                  <RenameDocument
-                    path={doc.path}
-                    endpoint={endpoint()}
-                    onRename={(path) => {
-                      setDoc((doc) => (doc ? { ...doc, path } : doc));
-                      void loadTree();
+                    onClick={() => {
+                      download();
                       setPanel(null);
                     }}
-                  />
-                )}
-                <div className="attachment-info">
-                  <Image />
-                  <span>
-                    <strong>
-                      {(doc.usage / 1e6).toFixed(1)} MB of 50 MB used
-                    </strong>
-                    <small>Images up to 5 MB · Videos up to 20 MB</small>
-                  </span>
-                </div>
-              </>
-            )}
-          </div>
-        </dialog>
+                  >
+                    <DownloadSimple />
+                    Download {fountain ? "Fountain" : "Markdown"}
+                  </button>
+                  {doc.owner && (
+                    <button
+                      className="menu-action"
+                      onClick={() => setPanel("history")}
+                    >
+                      <ArrowCounterClockwise />
+                      Version history
+                    </button>
+                  )}
+                  {doc.owner && (
+                    <RenameDocument
+                      path={doc.path}
+                      endpoint={endpoint()}
+                      onRename={(path) => {
+                        setDoc((doc) => (doc ? { ...doc, path } : doc));
+                        void loadTree();
+                        setPanel(null);
+                      }}
+                    />
+                  )}
+                  <div className="attachment-info">
+                    <Image />
+                    <span>
+                      <strong>
+                        {(doc.usage / 1e6).toFixed(1)} MB of 50 MB used
+                      </strong>
+                      <small>Images up to 5 MB · Videos up to 20 MB</small>
+                    </span>
+                  </div>
+                </>
+              )}
+            </div>
+          </dialog>
+        </main>
         {linkTarget && doc && (
           <LinkPreview
             key={linkTarget.url}

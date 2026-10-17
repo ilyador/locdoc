@@ -262,7 +262,7 @@ async function chooseB() {
     ),
   );
 }
-test("overflow formatting edits the existing selection and closes the menu in both formats", async () => {
+test("primary formatting preserves selection and is never duplicated in document options", async () => {
   const { EditorView } = await import("@codemirror/view");
   for (const extension of ["md", "fountain"]) {
     docs = { a: makeDoc("a"), b: makeDoc("b") };
@@ -275,23 +275,54 @@ test("overflow formatting edits the existing selection and closes the menu in bo
       const view = EditorView.findFromDOM(input)!;
       await waitFor(() => assert.equal(view.state.doc.toString(), "a text"));
       act(() => view.dispatch({ selection: { anchor: 0, head: 6 } }));
+      fireEvent.click(
+        screen.getByRole("button", { name: "Italic", exact: true }),
+      );
+      await waitFor(() => assert.equal(view.state.doc.toString(), "*a text*"));
+      if (extension === "fountain") {
+        act(() => view.dispatch({ selection: { anchor: 1, head: 7 } }));
+        fireEvent.click(
+          screen.getByRole("button", { name: "Underline", exact: true }),
+        );
+        await waitFor(() =>
+          assert.equal(view.state.doc.toString(), "*_a text_*"),
+        );
+      }
       fireEvent.click(screen.getByRole("button", { name: "Document options" }));
-      const menu = page.container.querySelector(".formatting-menu")!;
-      fireEvent.click(menu.querySelector('[aria-label="Bold"]')!);
-      await waitFor(() =>
-        assert.equal(view.state.doc.toString(), "**a text**"),
+      const dialog = page.container.querySelector("dialog")!;
+      await waitFor(() => assert.equal(dialog.open, true));
+      assert.equal(
+        dialog.querySelectorAll(
+          '[aria-label="Bold"], [aria-label="Italic"], [aria-label="Underline"], [data-comment-control]',
+        ).length,
+        0,
       );
-      await waitFor(() =>
-        assert.equal(page.container.querySelector("dialog")?.open, false),
-      );
+      if (extension === "fountain")
+        assert.equal(dialog.querySelectorAll(".formatting-menu").length, 0);
       assert.ok(
         EditorView.findFromDOM(input) === view,
-        "Opening overflow must retain the editor and its selection",
+        "Formatting and document options must retain the editor",
       );
     } finally {
       page.unmount();
     }
   }
+});
+test("overflow-only formatting edits the retained selection and closes document options", async () => {
+  const { EditorView } = await import("@codemirror/view");
+  await openWorkspace();
+  const input = screen.getByRole("textbox", { name: "Markdown document" });
+  const view = EditorView.findFromDOM(input)!;
+  act(() => view.dispatch({ selection: { anchor: 0, head: 6 } }));
+  fireEvent.click(screen.getByRole("button", { name: "Document options" }));
+  const dialog = document.querySelector("dialog")!;
+  fireEvent.click(dialog.querySelector('[aria-label="Heading"]')!);
+  await waitFor(() => assert.equal(view.state.doc.toString(), "## a text"));
+  await waitFor(() => assert.equal(dialog.open, false));
+  assert.ok(
+    EditorView.findFromDOM(input) === view,
+    "Overflow must retain the editor",
+  );
 });
 test("appearance adjusts the live document without a modal or replacing its editor", async () => {
   const { EditorView } = await import("@codemirror/view");

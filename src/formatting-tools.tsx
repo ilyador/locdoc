@@ -55,13 +55,13 @@ export function FormattingTools({
         {
           label: "Bold",
           icon: TextB,
-          className: "toolbar-bold",
+          className: "toolbar-primary",
           run: () => onEdit((e) => e.wrap("**", "**")),
         },
         {
           label: "Italic",
           icon: TextItalic,
-          className: "toolbar-secondary",
+          className: "toolbar-primary",
           run: () => onEdit((e) => e.wrap("*", "*")),
         },
         ...(fountain
@@ -69,7 +69,7 @@ export function FormattingTools({
               {
                 label: "Underline",
                 icon: TextUnderline,
-                className: "toolbar-secondary",
+                className: "toolbar-primary",
                 run: () => onEdit((e) => e.wrap("_", "_")),
               },
             ]
@@ -89,7 +89,7 @@ export function FormattingTools({
               {
                 label: "Insert link (Ctrl K)",
                 icon: LinkSimple,
-                className: "toolbar-link",
+                className: "toolbar-primary",
                 run: onLink,
               },
               {
@@ -116,21 +116,21 @@ export function FormattingTools({
     : [];
   return (
     <div className="formatting-tools">
-      {commands.map(({ label, icon: Glyph, className, run, disabled }) => (
-        <button
-          key={label}
-          className={
-            expanded ? "menu-action" : `icon-button ${className || ""}`
-          }
-          aria-label={label}
-          title={label}
-          disabled={disabled}
-          onClick={run}
-        >
-          <Glyph size={18} />
-          {expanded && <span>{label.replace(/ \(.*\)$/, "")}</span>}
-        </button>
-      ))}
+      {commands
+        .filter(({ className }) => !expanded || className !== "toolbar-primary")
+        .map(({ label, icon: Glyph, className, run, disabled }) => (
+          <button
+            key={label}
+            className={`${expanded ? "menu-action" : "icon-button"} ${className || ""}`}
+            aria-label={label}
+            title={label}
+            disabled={disabled}
+            onClick={run}
+          >
+            <Glyph size={18} />
+            {expanded && <span>{label.replace(/ \(.*\)$/, "")}</span>}
+          </button>
+        ))}
       {editable && !fountain && (
         <div className="toolbar-media formatting-table">
           <TablePicker
@@ -141,16 +141,17 @@ export function FormattingTools({
           />
         </div>
       )}
-      <button
-        className={expanded ? "menu-action" : "icon-button toolbar-comment"}
-        aria-label="Add comment (Ctrl Alt M)"
-        title="Add comment (Ctrl Alt M)"
-        data-comment-control=""
-        onClick={onComment}
-      >
-        <ChatCircle size={18} />
-        {expanded && <span>Add comment</span>}
-      </button>
+      {!expanded && (
+        <button
+          className="icon-button toolbar-comment"
+          aria-label="Add comment (Ctrl Alt M)"
+          title="Add comment (Ctrl Alt M)"
+          data-comment-control=""
+          onClick={onComment}
+        >
+          <ChatCircle size={18} />
+        </button>
+      )}
     </div>
   );
 }
