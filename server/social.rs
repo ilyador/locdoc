@@ -19,12 +19,50 @@ static ICON: LazyLock<String> =
     LazyLock::new(|| BASE64.encode(include_bytes!("../public/icons/icon-512-v5.png")));
 static CACHE: Mutex<VecDeque<(String, Bytes)>> = Mutex::new(VecDeque::new());
 static RENDERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+static WAITING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 #[derive(Clone)]
 pub(super) struct Preview {
     pub title: String,
     pub description: String,
+    blocks: Vec<Block>,
 }
+
+#[derive(Clone, Debug)]
+enum Kind {
+    Paragraph,
+    Heading,
+    Bullet,
+    Number(u64),
+    Task(bool),
+    Rule,
+}
+
+#[derive(Clone, Debug)]
+struct Block {
+    kind: Kind,
+    text: String,
+    depth: usize,
+    quote: bool,
+}
+
+fn flush(text: &mut String, kind: &Kind, depth: usize, quote: bool, blocks: &mut Vec<Block>) {
+    let value = text
+        .lines()
+        .map(|line| clean(line, 640))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !value.trim().is_empty() {
+        blocks.push(Block {
+            kind: kind.clone(),
+            text: value.trim().into(),
+            depth,
+            quote,
+        });
+    }
+    text.clear();
+}
+
 impl Preview {
     pub fn new(source: &str, path: &str) -> Self {
         let reading = comments::reading_source(source);
@@ -33,9 +71,12 @@ impl Preview {
             .nth(32_000)
             .map_or(reading.len(), |(i, _)| i);
         let mut title = String::new();
-        let mut body = String::new();
-        let mut heading = String::new();
-        let mut in_heading = false;
+        let mut text = String::new();
+        let mut blocks = Vec::new();
+        let mut kind = Kind::Paragraph;
+        let mut lists: Vec<Option<u64>> = Vec::new();
+        let mut depth = 0;
+        let mut quotes = 0usize;
         let mut hidden = 0;
         let options = Options::all()
             .difference(Options::ENABLE_WIKILINKS | Options::ENABLE_SMART_PUNCTUATION);
@@ -49,37 +90,99 @@ impl Preview {
                 }
                 _ if hidden > 0 => {}
                 Event::Start(Tag::Heading { .. }) => {
-                    in_heading = true;
-                    heading.clear();
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    kind = Kind::Heading;
                 }
                 Event::End(TagEnd::Heading(_)) => {
                     if title.is_empty() {
-                        title = clean(&heading, 140);
+                        title = clean(&text, 140);
+                        text.clear();
+                    } else {
+                        flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
                     }
-                    in_heading = false;
+                    kind = Kind::Paragraph;
                 }
                 Event::Text(value) | Event::Code(value) => {
-                    if in_heading {
-                        heading.push_str(&value);
-                    } else {
-                        body.push_str(&value);
-                    }
+                    text.push_str(&value);
                 }
-                Event::SoftBreak
-                | Event::HardBreak
-                | Event::Rule
-                | Event::End(
-                    TagEnd::Paragraph | TagEnd::Item | TagEnd::TableCell | TagEnd::TableRow,
-                ) => {
-                    if in_heading {
-                        heading.push(' ');
+                Event::Start(Tag::List(start)) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    lists.push(start);
+                }
+                Event::End(TagEnd::List(_)) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    lists.pop();
+                    depth = lists.len();
+                    kind = Kind::Paragraph;
+                }
+                Event::Start(Tag::Item) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    depth = lists.len().saturating_sub(1);
+                    kind = if let Some(Some(number)) = lists.last_mut() {
+                        let value = *number;
+                        *number = number.saturating_add(1);
+                        Kind::Number(value)
                     } else {
-                        body.push(' ');
-                    }
+                        Kind::Bullet
+                    };
+                }
+                Event::TaskListMarker(checked) => kind = Kind::Task(checked),
+                Event::Start(Tag::BlockQuote(_)) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    quotes += 1;
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    quotes = quotes.saturating_sub(1);
+                }
+                Event::SoftBreak | Event::HardBreak => text.push('\n'),
+                Event::Start(Tag::TableCell) if !text.is_empty() => text.push_str(" · "),
+                Event::Rule => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    blocks.push(Block {
+                        kind: Kind::Rule,
+                        text: String::new(),
+                        depth: 0,
+                        quote: false,
+                    });
+                }
+                Event::End(
+                    TagEnd::Paragraph | TagEnd::Item | TagEnd::TableRow | TagEnd::TableHead,
+                ) => {
+                    flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+                    // Following paragraphs inside an item retain its indentation,
+                    // while its marker is drawn only on the first paragraph.
+                    kind = Kind::Paragraph;
+                    depth = lists.len();
                 }
                 _ => {}
             }
         }
+        flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
+        let description = clean(
+            &blocks
+                .iter()
+                .map(|v| v.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            280,
+        );
+        // The image needs only its opening few lines. Keep cache keys and render
+        // work bounded, without invalidating cards for edits far down the file.
+        let mut remaining = 640;
+        blocks.truncate(16);
+        blocks.retain_mut(|block| {
+            if remaining == 0 {
+                return false;
+            }
+            let count = block.text.chars().count();
+            if count > remaining {
+                block.text = block.text.chars().take(remaining).collect();
+                block.text.push('…');
+            }
+            remaining = remaining.saturating_sub(count);
+            true
+        });
         if title.is_empty() {
             title = clean(
                 &Path::new(path)
@@ -91,11 +194,17 @@ impl Preview {
         }
         Self {
             title,
-            description: clean(&body, 280),
+            description,
+            blocks,
         }
     }
     pub fn fingerprint(&self) -> String {
-        hash(&format!("{}\0{}", self.title, self.description))
+        // Include the layout revision and structure: a list and a paragraph can
+        // have identical metadata while requiring different preview images.
+        hash(&format!(
+            "card-2\0{}\0{}\0{:?}",
+            self.title, self.description, self.blocks
+        ))
     }
 }
 
@@ -120,7 +229,7 @@ pub(super) fn escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn wrap(value: &str, font: &[u8], size: f32, max_lines: usize) -> Vec<String> {
+fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize) -> Vec<String> {
     let face = ttf_parser::Face::parse(font, 0).unwrap();
     let advance = |c| {
         face.glyph_index(c)
@@ -132,9 +241,13 @@ fn wrap(value: &str, font: &[u8], size: f32, max_lines: usize) -> Vec<String> {
     while !remaining.is_empty() && lines.len() < max_lines {
         let mut width = 0.;
         let mut space = 0;
-        let mut cut = remaining.len();
+        let newline = remaining.find('\n');
+        let mut cut = newline.unwrap_or(remaining.len());
         for (i, c) in remaining.char_indices() {
-            if width + advance(c) > 1020. {
+            if c == '\n' {
+                break;
+            }
+            if width + advance(c) > width_limit {
                 cut = i;
                 break;
             }
@@ -147,11 +260,15 @@ fn wrap(value: &str, font: &[u8], size: f32, max_lines: usize) -> Vec<String> {
             lines.push(remaining.to_string());
             break;
         }
-        let split = if space > 0 { space } else { cut };
+        let split = if newline == Some(cut) || space == 0 {
+            cut
+        } else {
+            space
+        };
         let mut line = remaining[..split].trim_end().to_string();
         remaining = remaining[split..].trim_start();
         if lines.len() + 1 == max_lines {
-            while line.chars().map(&advance).sum::<f32>() + advance('…') > 1020. {
+            while line.chars().map(&advance).sum::<f32>() + advance('…') > width_limit {
                 line.pop();
             }
             line.push('…');
@@ -161,31 +278,90 @@ fn wrap(value: &str, font: &[u8], size: f32, max_lines: usize) -> Vec<String> {
     lines
 }
 
-fn render(value: &Preview) -> Result<Bytes> {
-    let title = wrap(&value.title, SEMIBOLD, 64., 2);
-    let excerpt = wrap(
-        &value.description,
-        REGULAR,
-        32.,
-        if title.len() < 2 { 4 } else { 3 },
-    );
+fn svg(value: &Preview) -> String {
+    let title = wrap(&value.title, SEMIBOLD, 88., 1072., 2);
     let mut svg = format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><rect width="1200" height="630" fill="#f4f4f2"/><defs><clipPath id="icon"><rect x="76" y="68" width="96" height="96" rx="16"/></clipPath></defs><image x="76" y="68" width="96" height="96" clip-path="url(#icon)" href="data:image/png;base64,{}"/><text x="196" y="137" font-family="Locdoc Social Display" font-size="58" fill="#173349">LOCDOC.</text>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><defs><linearGradient id="paper" x2="100%" y2="0%"><stop stop-color="#f4f4f2"/><stop offset="1" stop-color="#e7f0f7"/></linearGradient><clipPath id="icon"><rect x="836" y="266" width="300" height="300" rx="40"/></clipPath></defs><rect width="1200" height="630" fill="url(#paper)"/><image x="836" y="266" width="300" height="300" clip-path="url(#icon)" href="data:image/png;base64,{}"/><text x="64" y="590" font-family="Locdoc Social Display" font-size="76" fill="#173349">LOCDOC.</text>"##,
         *ICON
     );
     for (i, line) in title.iter().enumerate() {
-        svg.push_str(&format!(r##"<text x="76" y="{}" font-family="Locdoc Social Sans" font-weight="600" font-size="64" fill="#173349">{}</text>"##, 264 + i * 76, escape(line)));
+        svg.push_str(&format!(r##"<text x="64" y="{}" font-family="Locdoc Social Sans" font-weight="600" font-size="88" fill="#173349">{}</text>"##, 144 + i * 96, escape(line)));
     }
-    for (i, line) in excerpt.iter().enumerate() {
-        svg.push_str(&format!(r##"<text x="76" y="{}" font-family="Locdoc Social Sans" font-size="32" fill="#51606c">{}</text>"##, 264 + title.len().saturating_sub(1) * 76 + 72 + i * 44, escape(line)));
+    let mut y = 224. + title.len().saturating_sub(1) as f32 * 96.;
+    for (index, block) in value.blocks.iter().enumerate() {
+        if y > 496. {
+            break;
+        }
+        if matches!(block.kind, Kind::Rule) {
+            svg.push_str(&format!(
+                r##"<path d="M64 {}h700" stroke="#c4cbd3"/>"##,
+                y - 20.
+            ));
+            y += 32.;
+            continue;
+        }
+        let heading = matches!(block.kind, Kind::Heading);
+        let (size, step, font, weight) = if heading {
+            (52., 64., SEMIBOLD, 600)
+        } else {
+            (44., 56., REGULAR, 400)
+        };
+        let indent = block.depth.min(3) as f32 * 32. + if block.quote { 24. } else { 0. };
+        let marker = match block.kind {
+            Kind::Number(n) => n.to_string().len() as f32 * 26. + 18.,
+            Kind::Bullet | Kind::Task(_) => 40.,
+            _ => 0.,
+        };
+        let x = 64. + indent + marker;
+        let available = ((496. - y) / step) as usize + 1;
+        let mut lines = wrap(&block.text, font, size, 700. - indent - marker, available);
+        let gap = if matches!(block.kind, Kind::Bullet | Kind::Number(_) | Kind::Task(_)) {
+            8.
+        } else {
+            16.
+        };
+        if index + 1 < value.blocks.len()
+            && y + lines.len() as f32 * step + gap > 496.
+            && let Some(last) = lines.last_mut()
+            && !last.ends_with('…')
+        {
+            last.push('…');
+            *last = wrap(last, font, size, 700. - indent - marker, 1).remove(0);
+        }
+        match block.kind {
+            Kind::Bullet => svg.push_str(&format!(r##"<circle cx="{}" cy="{}" r="5" fill="#173349"/>"##, x - 27., y - 14.)),
+            Kind::Number(n) => svg.push_str(&format!(r##"<text x="{}" y="{y}" text-anchor="end" font-family="Locdoc Social Sans" font-size="44" fill="#173349">{n}.</text>"##, x - 14.)),
+            Kind::Task(checked) => {
+                svg.push_str(&format!(r##"<rect x="{}" y="{}" width="26" height="26" rx="4" fill="none" stroke="#315f7a" stroke-width="2"/>"##, x - 40., y - 29.));
+                if checked { svg.push_str(&format!(r##"<path d="M{} {}l6 6 12-14" fill="none" stroke="#315f7a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>"##, x - 36., y - 16.)); }
+            }
+            _ => {}
+        }
+        if block.quote {
+            svg.push_str(&format!(
+                r##"<path d="M{} {}v{}" stroke="#315f7a"/>"##,
+                64. + indent - 22.,
+                y - size * 0.8,
+                lines.len() as f32 * step
+            ));
+        }
+        for line in lines {
+            svg.push_str(&format!(r##"<text x="{x}" y="{y}" font-family="Locdoc Social Sans" font-weight="{weight}" font-size="{size}" fill="#173349">{}</text>"##, escape(&line)));
+            y += step;
+        }
+        y += gap;
     }
     svg.push_str("</svg>");
+    svg
+}
+
+fn render(value: &Preview) -> Result<Bytes> {
     let options = usvg::Options {
         fontdb: FONTS.clone(),
         ..Default::default()
     };
-    let tree =
-        usvg::Tree::from_str(&svg, &options).map_err(|_| bad("Could not render this preview."))?;
+    let tree = usvg::Tree::from_str(&svg(value), &options)
+        .map_err(|_| bad("Could not render this preview."))?;
     let mut pixels =
         tiny_skia::Pixmap::new(1200, 630).ok_or_else(|| bad("Could not allocate this preview."))?;
     resvg::render(&tree, tiny_skia::Transform::default(), &mut pixels.as_mut());
@@ -200,12 +376,22 @@ pub(super) async fn image(value: Preview) -> Result<Bytes> {
     if let Some((_, png)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(png.clone());
     }
-    let permit = RENDERS.try_acquire().map_err(|_| {
+    // A small cold burst should wait its turn, rather than fail its third image.
+    // Bound both CPU work and the waiting queue so crawlers cannot pile up jobs.
+    let waiting = WAITING.try_acquire().map_err(|_| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Preview renderer is busy. Try again shortly.".into(),
         )
     })?;
+    let permit = RENDERS
+        .acquire()
+        .await
+        .map_err(|_| bad("Preview renderer stopped."))?;
+    drop(waiting);
+    if let Some((_, png)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return Ok(png.clone());
+    }
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let png = render(&value)?;
@@ -245,7 +431,7 @@ mod tests {
             ),
             "note.md",
         );
-        let lines = wrap(&value.title, SEMIBOLD, 64., 2);
+        let lines = wrap(&value.title, SEMIBOLD, 88., 1072., 2);
         assert_eq!(lines.len(), 2);
         assert!(lines[1].ends_with('…'));
         let png = render(&value).unwrap();
@@ -262,6 +448,51 @@ mod tests {
             let value = Preview::new(&source, "note.md");
             assert_eq!(value.title, "Actual title");
             assert_eq!(value.description, "Opening prose for sharing.");
+        }
+    }
+
+    #[test]
+    fn preview_keeps_headings_breaks_nested_lists_and_checkboxes() {
+        let value = Preview::new(
+            "# A plan\n\nFirst line\nSecond line\n\n## Next steps\n\n3. Choose a place\n   - Bring a notebook\n4. Go outside\n\n- [x] Pack\n- [ ] Leave\n\n> Take your time.",
+            "note.md",
+        );
+        assert_eq!(value.title, "A plan");
+        assert_eq!(value.blocks[0].text, "First line\nSecond line");
+        assert!(matches!(value.blocks[1].kind, Kind::Heading));
+        assert!(matches!(value.blocks[2].kind, Kind::Number(3)));
+        assert!(matches!(value.blocks[3].kind, Kind::Bullet));
+        assert_eq!(value.blocks[3].depth, 1);
+        assert!(matches!(value.blocks[4].kind, Kind::Number(4)));
+        assert!(matches!(value.blocks[5].kind, Kind::Task(true)));
+        assert!(matches!(value.blocks[6].kind, Kind::Task(false)));
+        assert!(value.blocks[7].quote);
+        assert_eq!(
+            wrap("First line\nSecond line", REGULAR, 44., 780., 5),
+            ["First line", "Second line"]
+        );
+    }
+
+    #[test]
+    fn formatting_changes_invalidate_the_image_even_when_metadata_is_identical() {
+        let paragraph = Preview::new("# A plan\n\nChoose a place", "note.md");
+        let list = Preview::new("# A plan\n\n- Choose a place", "note.md");
+        assert_eq!(paragraph.title, list.title);
+        assert_eq!(paragraph.description, list.description);
+        assert_ne!(paragraph.fingerprint(), list.fingerprint());
+        assert_ne!(render(&paragraph).unwrap(), render(&list).unwrap());
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_previews_wait_for_bounded_render_capacity() {
+        let requests = (0..4).map(|i| {
+            image(Preview::new(
+                &format!("# Cold card {i}\n\n- A short list"),
+                "note.md",
+            ))
+        });
+        for result in futures_util::future::join_all(requests).await {
+            assert_eq!(&result.unwrap()[..8], b"\x89PNG\r\n\x1a\n");
         }
     }
 }
