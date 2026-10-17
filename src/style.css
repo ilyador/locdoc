@@ -1969,7 +1969,6 @@ button:hover {
   :root {
     --header-height: 64px;
     --toolbar-height: 58px;
-    --format-control-height: 40px;
     --footer-height: 36px;
   }
   .app,
