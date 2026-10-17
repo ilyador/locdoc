@@ -2185,7 +2185,8 @@ button:hover {
     bottom: 0;
     width: min(290px, calc(100vw - 40px));
   }
-  .sidebar-scrim {
+  /* Keep the backdrop translucent even under the global button hover style. */
+  .app .sidebar-scrim {
     position: absolute;
     inset: 0;
     display: block;
