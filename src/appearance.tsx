@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { CaretDown, Desktop, Sun, Moon } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
+import { CaretDown, Desktop, Sun, Moon, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import type { DocumentFormat } from "./document-format";
 type GoogleFont = { family: string; category: string };
@@ -204,12 +204,14 @@ export function useAppearance() {
     }),
   };
 }
-export function AppearanceSettings({
+export function AppearancePanel({
   owner,
   value,
+  onClose,
 }: {
   owner: boolean;
   value: ReturnType<ReturnType<typeof useAppearance>["forFormat"]>;
+  onClose: () => void;
 }) {
   const {
     format,
@@ -229,6 +231,15 @@ export function AppearanceSettings({
     theme,
     setTheme,
   } = value;
+  const [tab, setTab] = useState("font");
+  const firstTab = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    // Wait until a previously open workspace dialog has returned focus.
+    const frame = requestAnimationFrame(() =>
+      firstTab.current?.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, []);
   const [fonts, setFonts] = useState<string[]>([]);
   const [newFont, setNewFont] = useState("");
   const [fontCatalog, setFontCatalog] = useState<GoogleFont[]>([]);
@@ -303,266 +314,357 @@ export function AppearanceSettings({
       tell(`${result.family} installed locally.`);
     });
   return (
-    <>
-      {" "}
-      <>
-        <p className="dialog-description">
-          Font and spacing settings apply to all{" "}
-          {format === "fountain" ? "Fountain" : "Markdown"} files in this
-          browser.
-        </p>
-        <label className="field-label" htmlFor="font">
-          Document font
-        </label>
-        <div className="select-field">
-          <select
-            id="font"
-            className="text-input"
-            value={font}
-            onChange={(e) => setFont(e.target.value)}
-          >
-            {Array.from(new Set([...bundledFonts, ...fonts])).map((f) => (
-              <option key={f}>{f}</option>
-            ))}
-          </select>
-          <CaretDown size={16} className="select-arrow" aria-hidden="true" />
-        </div>
-        <div className="writing-controls">
-          <div className="writing-control">
-            <div className="writing-control-label">
-              <label htmlFor="font-size">Text size</label>
-              <output htmlFor="font-size">{fontSize} px</output>
-            </div>
-            <input
-              id="font-size"
-              type="range"
-              min={10}
-              max={28}
-              step={1}
-              value={fontSize}
-              aria-valuetext={`${fontSize} pixels`}
-              onChange={(e) => setFontSize(Number(e.target.value))}
-            />
-          </div>
-          <div className="writing-control">
-            <div className="writing-control-label">
-              <label htmlFor="line-height">Line height</label>
-              <output htmlFor="line-height">{lineHeight.toFixed(2)}×</output>
-            </div>
-            <input
-              id="line-height"
-              type="range"
-              min={1.2}
-              max={2.4}
-              step={0.05}
-              value={lineHeight}
-              aria-valuetext={`${lineHeight.toFixed(2)} times text size`}
-              onChange={(e) => setLineHeight(Number(e.target.value))}
-            />
-          </div>
-          {format === "markdown" && (
-            <div className="writing-control">
-              <div className="writing-control-label">
-                <label htmlFor="paragraph-spacing">Paragraph spacing</label>
-                <output htmlFor="paragraph-spacing">
-                  {Math.round(paragraphSpacing * 100)}%
-                </output>
-              </div>
-              <input
-                id="paragraph-spacing"
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={paragraphSpacing}
-                aria-valuetext={`${Math.round(paragraphSpacing * 100)} percent of line height`}
-                onChange={(event) =>
-                  setParagraphSpacing(Number(event.target.value))
-                }
-              />
-            </div>
-          )}
-          <div className="writing-control">
-            <div className="writing-control-label">
-              <label htmlFor="page-width">Page width</label>
-              <output htmlFor="page-width">
-                {pageWidth === null ? "Auto" : `${pageWidth} px`}
-              </output>
-            </div>
-            <input
-              id="page-width"
-              type="range"
-              min={480}
-              max={1400}
-              step={10}
-              value={pageWidth ?? 890}
-              aria-valuetext={
-                pageWidth === null ? "Automatic width" : `${pageWidth} pixels`
-              }
-              aria-describedby="page-width-help"
-              onChange={(e) => setPageWidth(Number(e.target.value))}
-            />
-          </div>
-        </div>
-        <div className="writing-controls-help">
-          <p id="page-width-help" className="field-help">
-            Maximum page width. Fits smaller screens automatically.
-          </p>
+    <aside
+      id="appearance-panel"
+      className="appearance-panel"
+      aria-labelledby="appearance-title"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && !event.defaultPrevented) {
+          event.preventDefault();
+          event.stopPropagation();
+          onClose();
+        }
+      }}
+    >
+      <div className="appearance-heading">
+        <h2 id="appearance-title">Appearance</h2>
+        <button
+          className="icon-button"
+          aria-label="Close appearance"
+          title="Close appearance"
+          onClick={onClose}
+        >
+          <X size={18} />
+        </button>
+      </div>
+      <div
+        className="appearance-tabs"
+        role="tablist"
+        aria-label="Appearance settings"
+      >
+        {[
+          ["font", "Font"],
+          ["layout", "Layout"],
+          ["theme", "Theme"],
+        ].map(([key, label], index) => (
           <button
-            className="text-button"
-            disabled={
-              fontSize === defaultFontSize &&
-              lineHeight === 1.85 &&
-              pageWidth === null &&
-              (format !== "markdown" || paragraphSpacing === 0.15)
-            }
-            onClick={() => {
-              setFontSize(defaultFontSize);
-              setLineHeight(1.85);
-              setPageWidth(null);
-              if (format === "markdown") setParagraphSpacing(0.15);
+            key={key}
+            ref={key === "font" ? firstTab : undefined}
+            role="tab"
+            id={`appearance-tab-${key}`}
+            aria-selected={tab === key}
+            aria-controls={`appearance-content-${key}`}
+            tabIndex={tab === key ? 0 : -1}
+            onClick={() => setTab(key)}
+            onKeyDown={(event) => {
+              const next =
+                event.key === "ArrowRight"
+                  ? (index + 1) % 3
+                  : event.key === "ArrowLeft"
+                    ? (index + 2) % 3
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? 2
+                        : null;
+              if (next === null) return;
+              event.preventDefault();
+              const button =
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                  '[role="tab"]',
+                )[next];
+              button?.click();
+              button?.focus();
             }}
           >
-            Reset size &amp; spacing
+            {label}
           </button>
-        </div>
-        <label className="writing-toggle">
-          <input
-            type="checkbox"
-            checked={scrollPastEnd}
-            onChange={(event) => setScrollPastEnd(event.target.checked)}
-          />
-          <span>Scroll past end</span>
-          <span className="field-help">Half a page</span>
-        </label>
-        <div
-          className="font-preview"
-          style={{ fontFamily: documentFontFamily(font), fontSize, lineHeight }}
-        >
-          <strong>A space for your next idea.</strong>
-          <p>The best writing starts with a little room to think.</p>
-        </div>
-        {owner && (
+        ))}
+      </div>
+      <div
+        className="appearance-content"
+        role="tabpanel"
+        id={`appearance-content-${tab}`}
+        aria-labelledby={`appearance-tab-${tab}`}
+        tabIndex={0}
+      >
+        {tab === "font" && (
           <>
-            <label className="field-label" htmlFor="install-font">
-              Search Google Fonts
+            <label className="field-label" htmlFor="font">
+              Document font
             </label>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const exact = matchingFonts.find(
-                  (f) => f.family.toLowerCase() === fontQuery,
-                );
-                if (exact) {
-                  if (
-                    bundledFonts.includes(exact.family) ||
-                    fonts.includes(exact.family)
-                  )
-                    setFont(exact.family);
-                  else installFont(exact.family);
-                }
-              }}
-            >
-              <input
-                id="install-font"
+            <div className="select-field">
+              <select
+                id="font"
                 className="text-input"
-                type="search"
-                placeholder="Search by name or style…"
-                autoComplete="off"
-                aria-controls="font-results"
-                value={newFont}
-                onChange={(e) => setNewFont(e.target.value)}
-              />
-            </form>
-            {catalogLoading && (
-              <p className="field-help" role="status">
-                Loading font search…
-              </p>
-            )}
-            {catalogError && (
-              <p className="field-help" role="status">
-                {catalogError}{" "}
-                <button
-                  className="text-button"
-                  onClick={() => setCatalogAttempt((n) => n + 1)}
-                >
-                  Retry
-                </button>
-              </p>
-            )}
-            {fontQuery && !catalogLoading && !catalogError && (
-              <ul
-                className="font-results"
-                id="font-results"
-                aria-label="Google Fonts search results"
+                value={font}
+                onChange={(e) => setFont(e.target.value)}
               >
-                {matchingFonts.map((f) => {
-                  const available =
-                    bundledFonts.includes(f.family) || fonts.includes(f.family);
-                  return (
-                    <li key={f.family}>
-                      <span>
-                        <strong>{f.family}</strong>
-                        <small>{f.category}</small>
-                      </span>
-                      <button
-                        className="button quiet small-button"
-                        disabled={busy}
-                        aria-label={`${available ? "Use" : "Install"} ${f.family}`}
-                        onClick={() =>
-                          available ? setFont(f.family) : installFont(f.family)
-                        }
-                      >
-                        {available ? "Use" : "Install"}
-                      </button>
-                    </li>
-                  );
-                })}
-                {!matchingFonts.length && (
-                  <li className="font-no-results" role="status">
-                    No matching fonts. Try another name or style.
-                  </li>
+                {Array.from(new Set([...bundledFonts, ...fonts])).map((f) => (
+                  <option key={f}>{f}</option>
+                ))}
+              </select>
+              <CaretDown
+                size={16}
+                className="select-arrow"
+                aria-hidden="true"
+              />
+            </div>
+            <div className="writing-controls">
+              <div className="writing-control">
+                <div className="writing-control-label">
+                  <label htmlFor="font-size">Text size</label>
+                  <output htmlFor="font-size">{fontSize} px</output>
+                </div>
+                <input
+                  id="font-size"
+                  type="range"
+                  min={10}
+                  max={28}
+                  step={1}
+                  value={fontSize}
+                  aria-valuetext={`${fontSize} pixels`}
+                  onChange={(e) => setFontSize(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            {owner && (
+              <>
+                <label className="field-label" htmlFor="install-font">
+                  Search Google Fonts
+                </label>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const exact = matchingFonts.find(
+                      (f) => f.family.toLowerCase() === fontQuery,
+                    );
+                    if (exact) {
+                      if (
+                        bundledFonts.includes(exact.family) ||
+                        fonts.includes(exact.family)
+                      )
+                        setFont(exact.family);
+                      else installFont(exact.family);
+                    }
+                  }}
+                >
+                  <input
+                    id="install-font"
+                    className="text-input"
+                    type="search"
+                    placeholder="Search by name or style…"
+                    autoComplete="off"
+                    aria-controls="font-results"
+                    value={newFont}
+                    onChange={(e) => setNewFont(e.target.value)}
+                  />
+                </form>
+                {catalogLoading && (
+                  <p className="field-help" role="status">
+                    Loading font search…
+                  </p>
                 )}
-              </ul>
+                {catalogError && (
+                  <p className="field-help" role="status">
+                    {catalogError}{" "}
+                    <button
+                      className="text-button"
+                      onClick={() => setCatalogAttempt((n) => n + 1)}
+                    >
+                      Retry
+                    </button>
+                  </p>
+                )}
+                {fontQuery && !catalogLoading && !catalogError && (
+                  <ul
+                    className="font-results"
+                    id="font-results"
+                    aria-label="Google Fonts search results"
+                  >
+                    {matchingFonts.map((f) => {
+                      const available =
+                        bundledFonts.includes(f.family) ||
+                        fonts.includes(f.family);
+                      return (
+                        <li key={f.family}>
+                          <span>
+                            <strong>{f.family}</strong>
+                            <small>{f.category}</small>
+                          </span>
+                          <button
+                            className="button quiet small-button"
+                            disabled={busy}
+                            aria-label={`${available ? "Use" : "Install"} ${f.family}`}
+                            onClick={() =>
+                              available
+                                ? setFont(f.family)
+                                : installFont(f.family)
+                            }
+                          >
+                            {available ? "Use" : "Install"}
+                          </button>
+                        </li>
+                      );
+                    })}
+                    {!matchingFonts.length && (
+                      <li className="font-no-results" role="status">
+                        No matching fonts. Try another name or style.
+                      </li>
+                    )}
+                  </ul>
+                )}
+                <p className="field-help">
+                  Search{" "}
+                  {fontCatalog.length
+                    ? fontCatalog.length.toLocaleString()
+                    : "the"}{" "}
+                  Google Fonts families. Installed fonts are saved and served
+                  locally.
+                </p>
+              </>
             )}
-            <p className="field-help">
-              Search{" "}
-              {fontCatalog.length ? fontCatalog.length.toLocaleString() : "the"}{" "}
-              Google Fonts families. Installed fonts are saved and served
-              locally.
-            </p>
           </>
         )}
-        <label className="field-label">Appearance</label>
-        <p className="field-help">
-          Auto follows your device and switches when its appearance changes.
-        </p>
-        <div className="theme-buttons">
-          {[
-            ["auto", Desktop, "Auto"],
-            ["light", Sun, "Light"],
-            ["dark", Moon, "Dark"],
-          ].map(([t, Icon, label]) => {
-            const Component = Icon as typeof Sun;
-            return (
+        {tab === "layout" && (
+          <>
+            <div className="writing-controls">
+              <div className="writing-control">
+                <div className="writing-control-label">
+                  <label htmlFor="line-height">Line height</label>
+                  <output htmlFor="line-height">
+                    {lineHeight.toFixed(2)}×
+                  </output>
+                </div>
+                <input
+                  id="line-height"
+                  type="range"
+                  min={1.2}
+                  max={2.4}
+                  step={0.05}
+                  value={lineHeight}
+                  aria-valuetext={`${lineHeight.toFixed(2)} times text size`}
+                  onChange={(e) => setLineHeight(Number(e.target.value))}
+                />
+              </div>
+              {format === "markdown" && (
+                <div className="writing-control">
+                  <div className="writing-control-label">
+                    <label htmlFor="paragraph-spacing">Paragraph spacing</label>
+                    <output htmlFor="paragraph-spacing">
+                      {Math.round(paragraphSpacing * 100)}%
+                    </output>
+                  </div>
+                  <input
+                    id="paragraph-spacing"
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={paragraphSpacing}
+                    aria-valuetext={`${Math.round(paragraphSpacing * 100)} percent of line height`}
+                    onChange={(event) =>
+                      setParagraphSpacing(Number(event.target.value))
+                    }
+                  />
+                </div>
+              )}
+              <div className="writing-control">
+                <div className="writing-control-label">
+                  <label htmlFor="page-width">Page width</label>
+                  <output htmlFor="page-width">
+                    {pageWidth === null ? "Auto" : `${pageWidth} px`}
+                  </output>
+                </div>
+                <input
+                  id="page-width"
+                  type="range"
+                  min={480}
+                  max={1400}
+                  step={10}
+                  value={pageWidth ?? 890}
+                  aria-valuetext={
+                    pageWidth === null
+                      ? "Automatic width"
+                      : `${pageWidth} pixels`
+                  }
+                  aria-describedby="page-width-help"
+                  onChange={(e) => setPageWidth(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="writing-controls-help">
+              <p id="page-width-help" className="field-help">
+                Maximum page width. Fits smaller screens automatically.
+              </p>
               <button
-                key={t as string}
-                className={theme === t ? "active" : ""}
-                aria-pressed={theme === t}
-                onClick={() => setTheme(t as string)}
+                className="text-button"
+                disabled={
+                  fontSize === defaultFontSize &&
+                  lineHeight === 1.85 &&
+                  pageWidth === null &&
+                  (format !== "markdown" || paragraphSpacing === 0.15)
+                }
+                onClick={() => {
+                  setFontSize(defaultFontSize);
+                  setLineHeight(1.85);
+                  setPageWidth(null);
+                  if (format === "markdown") setParagraphSpacing(0.15);
+                }}
               >
-                <Component size={18} />
-                {label as string}
+                Reset size &amp; spacing
               </button>
-            );
-          })}
-        </div>
-      </>
-      {notice && (
-        <p className="field-help" role="status">
-          {notice}
-        </p>
-      )}
-    </>
+            </div>
+            <label className="writing-toggle">
+              <input
+                type="checkbox"
+                checked={scrollPastEnd}
+                onChange={(event) => setScrollPastEnd(event.target.checked)}
+              />
+              <span>Scroll past end</span>
+              <span className="field-help">Half a page</span>
+            </label>
+          </>
+        )}
+        {tab === "theme" && (
+          <>
+            <p className="field-help">
+              Auto follows your device and switches when its appearance changes.
+            </p>
+            <div className="theme-buttons">
+              {[
+                ["auto", Desktop, "Auto"],
+                ["light", Sun, "Light"],
+                ["dark", Moon, "Dark"],
+              ].map(([t, Icon, label]) => {
+                const Component = Icon as typeof Sun;
+                return (
+                  <button
+                    key={t as string}
+                    className={theme === t ? "active" : ""}
+                    aria-pressed={theme === t}
+                    onClick={() => setTheme(t as string)}
+                  >
+                    <Component size={18} />
+                    {label as string}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+        {tab !== "theme" && (
+          <p className="appearance-scope">
+            For all {format === "fountain" ? "Fountain" : "Markdown"} files in
+            this browser.
+          </p>
+        )}
+        {notice && (
+          <p className="field-help" role="status">
+            {notice}
+          </p>
+        )}
+      </div>
+    </aside>
   );
 }

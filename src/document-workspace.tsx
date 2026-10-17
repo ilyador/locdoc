@@ -45,7 +45,7 @@ import { FormattingTools } from "./formatting-tools";
 import { captureInsertion, insertAttachment } from "./document-session";
 import { normalizePresence, publishPresence } from "./presence";
 import { useDocument } from "./use-document";
-import { AppearanceSettings, documentFontFamily } from "./appearance";
+import { AppearancePanel, documentFontFamily } from "./appearance";
 import { VersionHistory } from "./version-history";
 import { RenameDocument } from "./rename-document";
 import { CommentThread, CommentComposer } from "./comments";
@@ -175,6 +175,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
+  const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const accessQuery = sharedToken
     ? `?token=${encodeURIComponent(sharedToken)}`
     : "";
@@ -237,7 +238,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [tell]);
   useEffect(() => {
-    if (panel) dialog.current?.showModal();
+    if (panel && panel !== "appearance") dialog.current?.showModal();
     else dialog.current?.close();
   }, [panel]);
   const openDocument = async (next: string | null) => {
@@ -810,9 +811,16 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               <div className="format-left">
                 <button
                   className="font-button"
+                  ref={appearanceTrigger}
                   aria-label="Fonts and appearance"
+                  aria-expanded={panel === "appearance"}
+                  aria-controls="appearance-panel"
                   title={`Fonts and appearance (${font})`}
-                  onClick={() => setPanel("appearance")}
+                  onClick={() =>
+                    setPanel((current) =>
+                      current === "appearance" ? null : "appearance",
+                    )
+                  }
                 >
                   <span>aA</span>
                 </button>
@@ -895,75 +903,89 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               </div>
             </div>
           )}
-          {!config ||
-          (!doc && !error && Boolean((sharedToken && !config.folder) || id)) ? (
-            <div
-              className="loading-surface"
-              role="status"
-              aria-label="Opening document"
-            >
-              <div />
-              <div />
-              <div />
-            </div>
-          ) : !config.owner && !sharedToken ? (
-            <div className="welcome">
-              <span className="welcome-symbol">
-                <Files size={32} weight="duotone" />
-              </span>
-              <h1>
-                Your words.
-                <br />
-                Your own space.
-              </h1>
-              <p>
-                Open your local workspace with the owner API key stored on this
-                computer.
-              </p>
-              <button
-                className="button primary"
-                onClick={() => setPanel("login")}
+          <div
+            className={`document-layout ${panel === "appearance" ? "with-appearance" : ""}`}
+          >
+            {panel === "appearance" && (
+              <AppearancePanel
+                owner={!!config?.owner}
+                value={appearance}
+                onClose={() => {
+                  setPanel(null);
+                  appearanceTrigger.current?.focus({ preventScroll: true });
+                }}
+              />
+            )}
+            {!config ||
+            (!doc &&
+              !error &&
+              Boolean((sharedToken && !config.folder) || id)) ? (
+              <div
+                className="loading-surface"
+                role="status"
+                aria-label="Opening document"
               >
-                Open workspace
-                <ArrowUpRight size={17} />
-              </button>
-              <code>npm run owner</code>
-            </div>
-          ) : !doc ? (
-            <div className="welcome">
-              <span className="welcome-symbol">
-                <FileText size={32} />
-              </span>
-              <h1>
-                {error
-                  ? "This document is unavailable."
-                  : config.folder
-                    ? "This folder is empty."
-                    : "A little room for your ideas."}
-              </h1>
-              <p>
-                {config.folder && !error
-                  ? "Documents added here will appear automatically."
-                  : sharedToken
-                    ? "Ask the owner for a current sharing link."
-                    : "Create a document or open a Markdown or Fountain file from the sidebar. Your words stay on your computer."}
-              </p>
-              {config.owner && (
+                <div />
+                <div />
+                <div />
+              </div>
+            ) : !config.owner && !sharedToken ? (
+              <div className="welcome">
+                <span className="welcome-symbol">
+                  <Files size={32} weight="duotone" />
+                </span>
+                <h1>
+                  Your words.
+                  <br />
+                  Your own space.
+                </h1>
+                <p>
+                  Open your local workspace with the owner API key stored on
+                  this computer.
+                </p>
                 <button
                   className="button primary"
-                  onClick={() => {
-                    setCreateKind("file");
-                    setNewPath("");
-                    setPanel("create");
-                  }}
+                  onClick={() => setPanel("login")}
                 >
-                  <Plus />
-                  Create a document
+                  Open workspace
+                  <ArrowUpRight size={17} />
                 </button>
-              )}
-            </div>
-          ) : (
-            <div className="document-layout">
+                <code>npm run owner</code>
+              </div>
+            ) : !doc ? (
+              <div className="welcome">
+                <span className="welcome-symbol">
+                  <FileText size={32} />
+                </span>
+                <h1>
+                  {error
+                    ? "This document is unavailable."
+                    : config.folder
+                      ? "This folder is empty."
+                      : "A little room for your ideas."}
+                </h1>
+                <p>
+                  {config.folder && !error
+                    ? "Documents added here will appear automatically."
+                    : sharedToken
+                      ? "Ask the owner for a current sharing link."
+                      : "Create a document or open a Markdown or Fountain file from the sidebar. Your words stay on your computer."}
+                </p>
+                {config.owner && (
+                  <button
+                    className="button primary"
+                    onClick={() => {
+                      setCreateKind("file");
+                      setNewPath("");
+                      setPanel("create");
+                    }}
+                  >
+                    <Plus />
+                    Create a document
+                  </button>
+                )}
+              </div>
+            ) : (
               <div className="writing-pane">
                 <div
                   className="document-canvas"
@@ -1018,8 +1040,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   )}
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
           <footer className="statusbar">
             <div
               className={`document-status ${statusWarning ? "has-warning" : ""}`}
@@ -1076,7 +1098,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         <dialog
           ref={dialog}
           aria-labelledby="panel-title"
-          className={`dialog ${panel === "appearance" ? "appearance-dialog" : ""}`}
+          className="dialog"
           onCancel={() => setPanel(null)}
           onClick={(e) => {
             if (e.target === dialog.current) setPanel(null);
@@ -1091,7 +1113,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     "folder-share": "Share folder",
                     create:
                       createKind === "folder" ? "New folder" : "New document",
-                    appearance: "Make yourself comfortable",
                     login: "Open your workspace",
                     settings: "Your workspace",
                     document: "Document options",
@@ -1237,9 +1258,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 </div>
               </form>
             )}
-            {panel === "appearance" && (
-              <AppearanceSettings owner={!!config?.owner} value={appearance} />
-            )}
             {panel === "login" && (
               <form
                 onSubmit={(e) => {
@@ -1304,7 +1322,11 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 )}
                 <button
                   className="menu-action"
-                  onClick={() => setPanel("appearance")}
+                  onClick={() =>
+                    setPanel((current) =>
+                      current === "appearance" ? null : "appearance",
+                    )
+                  }
                 >
                   <TextAa />
                   Fonts and appearance

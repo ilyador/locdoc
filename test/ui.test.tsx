@@ -141,6 +141,8 @@ before(async () => {
     const path = new URL(String(input), location.href).pathname;
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ path, body });
+    if (path === "/api/fonts" || path === "/font-catalog.json")
+      return response({ fonts: [] });
     if (failBootstrap && path === "/api/config")
       return new Response(JSON.stringify({ error: "Config unavailable" }), {
         status: 503,
@@ -290,6 +292,97 @@ test("overflow formatting edits the existing selection and closes the menu in bo
       page.unmount();
     }
   }
+});
+test("appearance adjusts the live document without a modal or replacing its editor", async () => {
+  const { EditorView } = await import("@codemirror/view");
+  const saved = ["locdoc.writing.markdown", "locdoc.theme"].map((key) => [
+    key,
+    localStorage.getItem(key),
+  ]);
+  const oldTheme = document.documentElement.getAttribute("data-theme");
+  docs = { a: makeDoc("a"), b: makeDoc("b") };
+  const page = render(<WorkspaceFixture />);
+  try {
+    const input = await screen.findByRole("textbox", {
+      name: "Markdown document",
+    });
+    const view = EditorView.findFromDOM(input)!;
+    act(() => view.dispatch({ selection: { anchor: 1, head: 3 } }));
+    const trigger = screen.getByRole("button", {
+      name: "Fonts and appearance",
+      exact: true,
+    });
+    fireEvent.click(trigger);
+    await screen.findByRole("complementary", { name: "Appearance" });
+    assert.equal(page.container.querySelector("dialog")?.open, false);
+    fireEvent.change(screen.getByLabelText("Document font"), {
+      target: { value: "Courier Prime" },
+    });
+    fireEvent.change(screen.getByRole("slider", { name: "Text size" }), {
+      target: { value: "22" },
+    });
+    const app = page.container.querySelector<HTMLElement>(".app")!;
+    assert.equal(app.style.getPropertyValue("--doc-size"), "22px");
+    assert.ok(
+      app.style.getPropertyValue("--doc-font").includes("Courier Prime"),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "Layout" }));
+    fireEvent.change(screen.getByRole("slider", { name: "Line height" }), {
+      target: { value: "1.55" },
+    });
+    assert.equal(app.style.getPropertyValue("--doc-line-height"), "1.55");
+    fireEvent.keyDown(screen.getByRole("tab", { name: "Layout" }), {
+      key: "ArrowRight",
+    });
+    assert.equal(
+      screen.getByRole("tab", { name: "Theme" }).getAttribute("aria-selected"),
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Dark", exact: true }));
+    assert.equal(document.documentElement.dataset.theme, "dark");
+    assert.ok(
+      EditorView.findFromDOM(input) === view,
+      "Live adjustments must retain the editor",
+    );
+    assert.equal(view.state.doc.toString(), "a text");
+    assert.equal(view.state.selection.main.from, 1);
+    assert.equal(view.state.selection.main.to, 3);
+    fireEvent.click(screen.getByRole("button", { name: "Close appearance" }));
+    assert.ok(
+      page.container.querySelector(".appearance-panel") === null,
+      "Appearance closes without leaving a panel",
+    );
+    assert.ok(
+      document.activeElement === trigger,
+      "Closing appearance returns focus to its trigger",
+    );
+  } finally {
+    page.unmount();
+    for (const [key, value] of saved)
+      value === null
+        ? localStorage.removeItem(key!)
+        : localStorage.setItem(key!, value!);
+    oldTheme === null
+      ? document.documentElement.removeAttribute("data-theme")
+      : document.documentElement.setAttribute("data-theme", oldTheme);
+  }
+});
+test("workspace settings hand off to nonmodal appearance and other dialogs still open", async () => {
+  const { within } = await import("@testing-library/react");
+  await openWorkspace();
+  fireEvent.click(document.querySelector(".profile")!);
+  const settings = screen.getByRole("dialog", { name: "Your workspace" });
+  fireEvent.click(
+    within(settings).getByRole("button", { name: "Fonts and appearance" }),
+  );
+  await screen.findByRole("complementary", { name: "Appearance" });
+  assert.equal(settings.open, false);
+  fireEvent.click(screen.getByRole("button", { name: "Share", exact: true }));
+  assert.ok(
+    document.querySelector(".appearance-panel") === null,
+    "Opening a modal removes the appearance column",
+  );
+  assert.ok(screen.getByRole("dialog", { name: "Share document" }).open);
 });
 test("late sharing response cannot change the next document's permissions", async () => {
   await openWorkspace();

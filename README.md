@@ -114,7 +114,7 @@ Choose **Share** in a document, or expand **Folders** and use the sharing icon b
 
 ## Writing and comments
 
-One live-preview editor styles Markdown and reveals syntax near the cursor. Use the toolbar for checkboxes, tables, links, media and comments. Font, size, line height, page width and light/dark appearance are browser preferences. Google Fonts can be searched and installed locally by the owner.
+One live-preview editor styles Markdown and reveals syntax near the cursor. Use the toolbar for checkboxes, tables, links, media and comments. Font, size, line height, page width and light/dark appearance are browser preferences. Open aA for live controls in a bottom sheet on mobile or a column to the left of the document on desktop. The document stays visible and editable while you adjust Font, Layout and Theme. Google Fonts can be searched and installed locally by the owner.
 
 Select text to comment, then open the small inline marker to read or reply. Comments also live in the raw Markdown:
 
