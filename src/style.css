@@ -618,21 +618,10 @@ button:hover {
   height: var(--format-control-height);
 }
 .font-button {
-  flex-shrink: 1;
-  gap: 7px;
-  padding: 6px 10px;
-  height: auto;
-  min-height: var(--format-control-height);
-  min-width: 0;
-  max-width: 100%;
-}
-.font-button span {
-  white-space: normal;
-  overflow-wrap: anywhere;
-  text-align: start;
-}
-.font-button svg {
-  flex-shrink: 0;
+  flex: 0 0 var(--format-control-height);
+  justify-content: center;
+  width: var(--format-control-height);
+  padding: 0;
 }
 .format-tools .icon-button {
   height: 32px;
@@ -954,10 +943,6 @@ button:hover {
   .format-tools {
     gap: 4px;
   }
-  .formatbar .font-button {
-    gap: 5px;
-    padding-inline: 8px;
-  }
   .formatbar .text-size-control .icon-button {
     width: 26px;
   }
@@ -968,22 +953,16 @@ button:hover {
     flex-basis: 92px;
     width: 92px;
   }
-  .formatbar .toolbar-media,
-  .formatbar .toolbar-comment,
-  .formatbar .toolbar-divider,
-  .formatbar[data-format="fountain"] .toolbar-bold {
-    display: none;
-  }
-  .formatbar[data-format="fountain"] .format-command-slot {
+  .formatbar .toolbar-divider {
     display: none;
   }
 }
 @container workspace (max-width: 350px) {
-  .format-command-slot,
-  .formatbar .toolbar-bold,
-  .formatbar .toolbar-link,
-  .formatbar[data-format="fountain"] .text-size-control {
-    display: none;
+  .formatbar {
+    column-gap: 4px;
+  }
+  .format-tools {
+    gap: 2px;
   }
 }
 .cm-editor {
@@ -2469,11 +2448,6 @@ button:hover {
   font-size: var(--ui-control-size);
   line-height: 1.55;
   overflow-wrap: anywhere;
-}
-@media (max-width: 350px) {
-  .format-tools .toolbar-link {
-    display: none;
-  }
 }
 
 .tree-item > .doc-meta {

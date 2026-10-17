@@ -811,10 +811,10 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 <button
                   className="font-button"
                   aria-label="Fonts and appearance"
+                  title={`Fonts and appearance (${font})`}
                   onClick={() => setPanel("appearance")}
                 >
-                  <span>{font}</span>
-                  <CaretDown size={14} />
+                  <span>aA</span>
                 </button>
                 <div
                   className="text-size-control"
