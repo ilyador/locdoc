@@ -1048,7 +1048,7 @@ button:hover {
 }
 .cm-content .md-literal-brackets,
 .cm-content .md-literal-brackets * {
-  color: inherit;
+  color: var(--syntax-teal);
 }
 .md-rule {
   color: transparent;
