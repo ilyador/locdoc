@@ -701,7 +701,10 @@ button:hover {
   flex: 1;
   overflow-y: auto;
   overscroll-behavior-y: none;
-  scroll-behavior: smooth;
+  /* CodeMirror corrects estimated line heights while scrolling. Animate neither
+     those corrections nor native trackpad momentum. */
+  scroll-behavior: auto;
+  container-type: size;
 }
 .document-canvas {
   width: 100%;
@@ -873,7 +876,7 @@ button:hover {
   overflow: visible !important;
 }
 .cm-content {
-  padding: 0 0 120px !important;
+  padding: 0 0 var(--doc-end-space, 120px) !important;
   min-width: 0;
   max-width: 100%;
   flex: 1 1 0;
@@ -884,6 +887,28 @@ button:hover {
 .cm-line {
   padding: 0 !important;
   min-height: calc(var(--doc-line-height) * 1em);
+}
+/* Keep block spacing in CodeMirror's measured line box, never a margin. */
+.cm-line.md-block-end {
+  padding-block-end: calc(
+    var(--doc-paragraph-spacing, 0.15) * var(--doc-line-height) * 1em
+  ) !important;
+}
+.writing-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  font-size: var(--ui-control-size);
+}
+.writing-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.writing-toggle .field-help {
+  margin: 0 0 0 auto;
 }
 .md-list > .cm-line {
   padding-inline-start: var(--list-indent) !important;
@@ -2105,9 +2130,6 @@ button:hover {
 .md-h3 {
   min-height: 1.6em;
 }
-.cm-content {
-  padding-bottom: 55px !important;
-}
 .version-preview {
   max-height: 340px;
   overflow: auto;
@@ -2419,4 +2441,23 @@ button:hover {
 .folder-row:hover {
   background: var(--hover);
   border-radius: 5px;
+}
+
+.doc-label {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+.doc-label .doc-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.doc-extension {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: var(--ui-timestamp-size);
+  font-weight: var(--weight-regular);
+  white-space: nowrap;
 }

@@ -313,6 +313,15 @@ function livePreview(
             pos = line.to + 1;
           }
         }
+        if (
+          name === "ListItem" ||
+          (name === "Paragraph" && n.node.parent?.name !== "ListItem")
+        )
+          decorations.push(
+            Decoration.line({ class: "md-block-end" }).range(
+              state.doc.lineAt(Math.max(from, to - 1)).from,
+            ),
+          );
         const heading = name.match(/^ATXHeading(\d)$/);
         if (heading)
           decorations.push(
@@ -483,7 +492,10 @@ function livePreview(
   return StateField.define<ReturnType<typeof build>>({
     create: build,
     update(value, tr) {
-      return tr.docChanged || tr.selection || tr.reconfigured
+      return tr.docChanged ||
+        tr.selection ||
+        tr.reconfigured ||
+        syntaxTree(tr.state) !== syntaxTree(tr.startState)
         ? build(tr.state)
         : value;
     },
@@ -493,6 +505,12 @@ function livePreview(
     ],
   });
 }
+
+// Sidebar metadata refreshes must not replace the parser and discard its tree.
+const markdownSupport = [
+  markdown({ base: markdownLanguage, extensions: [commentMarkdown] }),
+  syntaxHighlighting(writingHighlight),
+];
 
 function documentPreview(
   id: string,
@@ -504,11 +522,7 @@ function documentPreview(
   return [
     fountain
       ? fountainPreview()
-      : [
-          markdown({ base: markdownLanguage, extensions: [commentMarkdown] }),
-          syntaxHighlighting(writingHighlight),
-          livePreview(id, token, path, entries),
-        ],
+      : [markdownSupport, livePreview(id, token, path, entries)],
     EditorView.editorAttributes.of({
       class: fountain ? "fountain-editor" : "",
     }),

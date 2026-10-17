@@ -85,6 +85,9 @@ formatting markers while you edit; the file on disk stays plain text.
 Courier Prime is bundled as the default Fountain font. Font, text size, line
 height and page width preferences are saved separately for Markdown and Fountain
 in each browser.
+Both formats offer **Scroll past end**, leaving half a viewport of writing room
+below the last line. Markdown also has a **Paragraph spacing** slider, initially
+15% of line height, for paragraphs and list items.
 
 Type `INT.`, `EXT.`, uppercase character names, dialogue and parentheticals
 naturally. The **Element** menu can force a scene heading, action, character,

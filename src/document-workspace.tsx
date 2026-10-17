@@ -62,6 +62,7 @@ import { IconButton, Avatar } from "./ui";
 import { countDocumentWords } from "./word-count";
 import {
   documentFormat,
+  documentExtension,
   documentName,
   documentPath,
   type DocumentFormat,
@@ -113,7 +114,15 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     workspace.initialDocument,
   );
   const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
-  const { font, fontSize, setFontSize, lineHeight, pageWidth } = appearance;
+  const {
+    font,
+    fontSize,
+    setFontSize,
+    lineHeight,
+    pageWidth,
+    scrollPastEnd,
+    paragraphSpacing,
+  } = appearance;
   const [shareFolderPath, setShareFolderPath] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [newCommentDraft, setNewCommentDraft] = useState<{
@@ -506,6 +515,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     "--doc-size": `${fontSize}px`,
     "--doc-line-height": lineHeight,
     "--doc-width": pageWidth === null ? undefined : `${pageWidth}px`,
+    "--doc-end-space": scrollPastEnd ? "50cqh" : "0px",
+    "--doc-paragraph-spacing": paragraphSpacing,
   } as CSSProperties;
 
   return (
@@ -640,7 +651,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           {sharedToken && doc && !config?.folder && (
             <div className="shared-sidebar">
               <FileText />
-              <strong>{filename}</strong>
+              <strong className="doc-label">
+                <span className="doc-title">{filename}</span>{" "}
+                <span className="doc-extension">
+                  {documentExtension(doc.path)}
+                </span>
+              </strong>
               <p>
                 {doc.edit
                   ? "You can edit this document and leave comments."
@@ -701,7 +717,14 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   <CaretRight size={12} />
                 </>
               )}
-              <span className="crumb-current">{filename}</span>
+              <span className="crumb-current doc-label">
+                <span className="doc-title">{filename}</span>{" "}
+                {doc && (
+                  <span className="doc-extension">
+                    {documentExtension(doc.path)}
+                  </span>
+                )}
+              </span>
             </div>
             <div className="top-actions">
               {doc && (

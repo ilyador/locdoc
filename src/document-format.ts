@@ -16,3 +16,7 @@ export function documentPath(path: string, format: DocumentFormat) {
     ? path
     : path + (format === "fountain" ? ".fountain" : ".md");
 }
+
+export function documentExtension(path: string) {
+  return /\.(md|fountain)$/i.exec(path)?.[0].toLowerCase() || "";
+}

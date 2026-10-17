@@ -250,7 +250,7 @@ async function openWorkspace() {
   await screen.findByRole("textbox", { name: "Markdown document" });
 }
 async function chooseB() {
-  fireEvent.click(screen.getByRole("button", { name: "b", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "b .md", exact: true }));
   await waitFor(() => assert.equal(document.title, "b · locdoc"));
   await waitFor(() =>
     assert.ok(
@@ -825,11 +825,15 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(profile("fountain").fontSize, 18);
     assert.equal(profile("fountain").lineHeight, 1.85);
     assert.equal(profile("fountain").pageWidth, null);
+    assert.equal(profile("markdown").paragraphSpacing, 0.15);
+    assert.equal(profile("fountain").scrollPastEnd, true);
     act(() => {
       profile("fountain").setFontSize(16);
       profile("fountain").setLineHeight(1.4);
       profile("fountain").setPageWidth(900);
       profile("markdown").setFont("Georgia");
+      profile("markdown").setParagraphSpacing(0.3);
+      profile("fountain").setScrollPastEnd(false);
     });
     assert.equal(profile("markdown").fontSize, 21);
     assert.equal(profile("markdown").lineHeight, 1.6);
@@ -840,6 +844,8 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
       sizes: { desktop: 13 },
       lineHeight: 1.5,
       pageWidth: 650,
+      paragraphSpacing: 0.25,
+      scrollPastEnd: true,
     });
     act(() => {
       localStorage.setItem("locdoc.writing.markdown", fromOtherTab);
@@ -856,6 +862,9 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(profile("fountain").fontSize, 16);
     assert.equal(profile("fountain").lineHeight, 1.4);
     assert.equal(profile("fountain").pageWidth, 900);
+    assert.equal(profile("markdown").paragraphSpacing, 0.25);
+    assert.equal(profile("markdown").scrollPastEnd, true);
+    assert.equal(profile("fountain").scrollPastEnd, false);
     page.unmount();
     const reopened = renderHook(() => useAppearance());
     assert.equal(reopened.result.current.forFormat("markdown").fontSize, 13);
@@ -866,6 +875,14 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(reopened.result.current.forFormat("fountain").fontSize, 16);
     assert.equal(reopened.result.current.forFormat("fountain").lineHeight, 1.4);
     assert.equal(reopened.result.current.forFormat("fountain").pageWidth, 900);
+    assert.equal(
+      reopened.result.current.forFormat("fountain").scrollPastEnd,
+      false,
+    );
+    assert.equal(
+      reopened.result.current.forFormat("markdown").paragraphSpacing,
+      0.25,
+    );
     reopened.unmount();
   } finally {
     window.innerWidth = width;
@@ -1521,6 +1538,103 @@ test("word count measures reading content instead of Markdown control syntax", (
     ["#\n-\n*\n\n", 0],
   ] as const)
     assert.equal(countMarkdownWords(source), expected, source);
+});
+
+test(
+  "sidebar refreshes retain the Markdown parser state in a long document",
+  { timeout: 10000 },
+  async () => {
+    const { MarkdownEditor } = await import("../src/editor.tsx");
+    const { EditorView } = await import("@codemirror/view");
+    const { forceParsing, syntaxTree } = await import("@codemirror/language");
+    const { Awareness } = await import("y-protocols/awareness");
+    const ydoc = new Y.Doc(),
+      awareness = new Awareness(ydoc);
+    const source = "## A section\n\nA paragraph with **emphasis**.\n\n".repeat(
+      100,
+    );
+    ydoc.getText("content").insert(0, source);
+    const props = {
+      ydoc,
+      provider: { awareness } as any,
+      editable: true,
+      id: "long-preview",
+      path: "long.md",
+      onChange() {},
+      onComment() {},
+      onUpload() {},
+    };
+    const page = render(<MarkdownEditor {...props} entries={[]} />);
+    try {
+      const view = EditorView.findFromDOM(
+        page.container.querySelector(".cm-editor")!,
+      )!;
+      await act(async () => {
+        forceParsing(view, source.length, 500);
+      });
+      const parsed = syntaxTree(view.state);
+      assert.equal(parsed.length, source.length);
+      page.rerender(
+        <MarkdownEditor
+          {...props}
+          entries={[
+            { id: "another", path: "another.md", kind: "file", shared: false },
+          ]}
+        />,
+      );
+      assert.ok(
+        syntaxTree(view.state) === parsed,
+        "Sidebar refresh discarded the parsed Markdown tree.",
+      );
+    } finally {
+      page.unmount();
+      awareness.destroy();
+      ydoc.destroy();
+    }
+  },
+);
+
+test("Markdown block gaps follow paragraph and list-item ends, leaving headings and code alone", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    awareness = new Awareness(ydoc);
+  const source =
+    "A paragraph\ncontinued on the next source line.\n\nAnother paragraph.\n\n- One item\n  continued on the next source line.\n- Two items\n\n## Heading\n\n```text\nCode\n```";
+  ydoc.getText("content").insert(0, source);
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="gaps"
+      path="gaps.md"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  const ends = [...page.container.querySelectorAll(".md-block-end")];
+  assert.equal(ends.length, 4);
+  assert.deepEqual(
+    ends.map((el) => el.textContent),
+    [
+      "continued on the next source line.",
+      "Another paragraph.",
+      "  continued on the next source line.",
+      "- Two items",
+    ],
+  );
+  assert.equal(
+    page.container.querySelectorAll(
+      ".md-h2.md-block-end, .md-code-line.md-block-end",
+    ).length,
+    0,
+  );
+  assert.equal(ydoc.getText("content").toString(), source);
+  page.unmount();
+  awareness.destroy();
+  ydoc.destroy();
 });
 
 test("Fountain previews stay editable, preserve comments and survive format/permission changes", async () => {

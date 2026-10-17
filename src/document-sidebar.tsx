@@ -10,6 +10,7 @@ import {
 import { IconButton } from "./ui";
 import type { Entry } from "./model";
 import { documentTitle } from "./document-links";
+import { documentExtension } from "./document-format";
 import { recentDocuments, sidebarTimestamp } from "./recent-documents";
 
 export function DocumentSidebar({
@@ -87,7 +88,12 @@ export function DocumentSidebar({
           <FileText size={16} />
         )}
         <span className="doc-name">
-          {documentTitle(e)}
+          <span className="doc-label">
+            <span className="doc-title">{documentTitle(e)}</span>{" "}
+            {e.kind === "file" && (
+              <span className="doc-extension">{documentExtension(e.path)}</span>
+            )}
+          </span>
           {!nested && e.path.includes("/") && (
             <small>{e.path.split("/").slice(0, -1).join(" / ")}</small>
           )}

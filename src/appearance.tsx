@@ -49,6 +49,8 @@ type WritingPreferences = {
   sizes: Partial<Record<WritingDevice, number>>;
   lineHeight: number;
   pageWidth: number | null;
+  scrollPastEnd: boolean;
+  paragraphSpacing: number;
 };
 const preferenceKey = (format: DocumentFormat) => `locdoc.writing.${format}`;
 function storedObject(key: string) {
@@ -102,6 +104,8 @@ function readWritingPreferences(format: DocumentFormat): WritingPreferences {
   return {
     font,
     sizes,
+    scrollPastEnd: saved?.scrollPastEnd !== false,
+    paragraphSpacing: bounded(saved?.paragraphSpacing, 0, 1, 0.15),
     lineHeight: bounded(lineHeight, 1.2, 2.4, 1.85),
     pageWidth:
       typeof width === "number" && Number.isFinite(width) && width > 0
@@ -134,6 +138,11 @@ function useWritingAppearance(format: DocumentFormat, device: WritingDevice) {
   ) => setPreferences((current) => ({ ...current, [property]: value }));
   return {
     format,
+    scrollPastEnd: preferences.scrollPastEnd,
+    setScrollPastEnd: (value: boolean) => update("scrollPastEnd", value),
+    paragraphSpacing: preferences.paragraphSpacing,
+    setParagraphSpacing: (value: number) =>
+      update("paragraphSpacing", bounded(value, 0, 1, 0.15)),
     font: preferences.font,
     setFont: (value: string) => update("font", value),
     fontSize: preferences.sizes[device] ?? defaultSizes[device],
@@ -204,6 +213,10 @@ export function AppearanceSettings({
 }) {
   const {
     format,
+    scrollPastEnd,
+    setScrollPastEnd,
+    paragraphSpacing,
+    setParagraphSpacing,
     font,
     setFont,
     fontSize,
@@ -347,6 +360,28 @@ export function AppearanceSettings({
               onChange={(e) => setLineHeight(Number(e.target.value))}
             />
           </div>
+          {format === "markdown" && (
+            <div className="writing-control">
+              <div className="writing-control-label">
+                <label htmlFor="paragraph-spacing">Paragraph spacing</label>
+                <output htmlFor="paragraph-spacing">
+                  {Math.round(paragraphSpacing * 100)}%
+                </output>
+              </div>
+              <input
+                id="paragraph-spacing"
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={paragraphSpacing}
+                aria-valuetext={`${Math.round(paragraphSpacing * 100)} percent of line height`}
+                onChange={(event) =>
+                  setParagraphSpacing(Number(event.target.value))
+                }
+              />
+            </div>
+          )}
           <div className="writing-control">
             <div className="writing-control-label">
               <label htmlFor="page-width">Page width</label>
@@ -378,17 +413,28 @@ export function AppearanceSettings({
             disabled={
               fontSize === defaultFontSize &&
               lineHeight === 1.85 &&
-              pageWidth === null
+              pageWidth === null &&
+              (format !== "markdown" || paragraphSpacing === 0.15)
             }
             onClick={() => {
               setFontSize(defaultFontSize);
               setLineHeight(1.85);
               setPageWidth(null);
+              if (format === "markdown") setParagraphSpacing(0.15);
             }}
           >
             Reset size &amp; spacing
           </button>
         </div>
+        <label className="writing-toggle">
+          <input
+            type="checkbox"
+            checked={scrollPastEnd}
+            onChange={(event) => setScrollPastEnd(event.target.checked)}
+          />
+          <span>Scroll past end</span>
+          <span className="field-help">Half a page</span>
+        </label>
         <div
           className="font-preview"
           style={{ fontFamily: documentFontFamily(font), fontSize, lineHeight }}
