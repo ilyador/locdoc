@@ -157,6 +157,16 @@ npm test
 
 Verification writes its web build to `.locdoc/verified-web`, leaving the running `dist` untouched. Tests use temporary directories, never your documents or owner key. The suite covers concurrent clients, comments, desktop writers, server restarts, permission changes, folder boundaries, request races and durable browser drafts.
 
+Node test files run serially through `scripts/test-node.sh`, with a 256 MiB V8 old-space limit, a 2 GiB Linux data-allocation limit per process (including native buffers), no core dumps and a ten-minute suite timeout. The allocation limit is not a combined process-tree or RSS limit. Explicit sync soaks up to thirty minutes extend the timeout. Use the same wrapper for focused tests:
+
+```sh
+bash scripts/test-node.sh --import tsx --test --test-name-pattern="sidebar refreshes" test/ui.test.tsx
+```
+
+Compare parser, editor and DOM object identities with `assert.ok(actual === expected, "short explanation")`; formatting these object graphs in an equality failure can consume enormous amounts of memory. For value assertions, compare small scalar projections.
+
+The GitHub Actions workflow repeats verification in a clean environment on each push. It is optional; running Locdoc does not require GitHub or a runner.
+
 Before updating, back up state and stop the service. Pull changes, run `npm ci`, `npm run verify`, `npm run build`, then start the service again. Deploy matching backend and frontend builds. Do not run a build into a live `dist` directory.
 
 Architecture stays small: one Axum process, one SQLite database, ordinary Markdown files. `server/documents.rs` owns file identity; `server/folders.rs` owns folder capabilities; `server/disk.rs` owns file leases; `server/comments.rs` owns source comments; `server/links.rs` owns safe previews. The browser keeps document state below a keyed React boundary, so late async results cannot overwrite a different open document.

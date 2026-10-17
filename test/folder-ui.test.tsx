@@ -136,7 +136,10 @@ test("folder sharing has a separate accessible target and does not toggle the fo
     />,
   );
   const button = screen.getByRole("button", { name: "Share folder Design" });
-  assert.equal(button.parentElement.closest("button"), null);
+  assert.ok(
+    button.parentElement.closest("button") === null,
+    "Folder sharing must not nest buttons.",
+  );
   fireEvent.click(button);
   assert.equal(shared, "Design");
   assert.equal(toggled, 0);

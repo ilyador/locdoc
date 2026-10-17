@@ -303,10 +303,14 @@ test("cancel closes a comment without posting and restores writing focus", async
     target: { value: "Discard this comment" },
   });
   fireEvent.click(screen.getByRole("button", { name: "Cancel comment" }));
-  assert.equal(screen.queryByLabelText("New comment"), null);
-  assert.equal(
-    document.activeElement,
-    screen.getByRole("textbox", { name: "Markdown document" }),
+  assert.ok(
+    screen.queryByLabelText("New comment") === null,
+    "Comment composer should be closed.",
+  );
+  assert.ok(
+    document.activeElement ===
+      screen.getByRole("textbox", { name: "Markdown document" }),
+    "Focus should return to the editor.",
   );
   assert.equal(
     requests.filter((r) => r.path.endsWith("/comments") && r.body).length,
@@ -942,7 +946,10 @@ test("an inline reply remains mounted while collaborative edits move its passage
   });
   assert.equal(icon.textContent, "");
   assert.ok(icon.closest(".cm-line"));
-  assert.equal(document.querySelector(".comment-marker-line"), null);
+  assert.ok(
+    document.querySelector(".comment-marker-line") === null,
+    "The separate comment indicator should be absent.",
+  );
   assert.equal(text.toString(), original);
   fireEvent.change(input, { target: { value: "Keep this unsent reply" } });
   act(() => text.insert(0, "New introduction\n"));
@@ -1202,23 +1209,29 @@ test("expanded comments retain list indentation across fragments without indenti
     const wrapper = page.container.querySelector<HTMLElement>(".md-list")!;
     assert.equal(wrapper.style.getPropertyValue("--list-indent"), "2ch");
     if (suffix) {
-      assert.equal(host.parentElement, wrapper);
+      assert.ok(
+        host.parentElement === wrapper,
+        "Comment should remain inside its list wrapper.",
+      );
       assert.equal(host.previousElementSibling?.textContent, "- Another");
       assert.equal(host.nextElementSibling?.textContent, suffix);
       assert.ok(host.nextElementSibling?.classList.contains("cm-line"));
       assert.equal(wrapper.querySelectorAll(":scope > .cm-line").length, 2);
       assert.equal(wrapper.querySelectorAll(".md-list-prefix").length, 1);
     } else {
-      assert.equal(
-        host.parentElement,
-        page.container.querySelector(".cm-content"),
+      assert.ok(
+        host.parentElement === page.container.querySelector(".cm-content"),
+        "Comment should remain directly inside the editor content.",
       );
       assert.equal(wrapper.querySelectorAll(":scope > .cm-line").length, 1);
     }
     const paragraph = [...page.container.querySelectorAll(".cm-line")].find(
       (line) => line.textContent === "A separate paragraph",
     )!;
-    assert.equal(paragraph.closest(".md-list"), null);
+    assert.ok(
+      paragraph.closest(".md-list") === null,
+      "Separate paragraph should not inherit a list wrapper.",
+    );
     assert.equal(text.toString(), source);
     page.rerender(<MarkdownEditor {...props} activeComment={null} />);
     assert.equal(
@@ -1397,7 +1410,10 @@ test("standalone safe-area height differences cannot shorten the shell or surviv
     assert.equal(style.getPropertyValue("--app-viewport-height"), "844px");
     stop();
     stop = undefined;
-    assert.equal(document.querySelector("[data-viewport-gauge]"), null);
+    assert.ok(
+      document.querySelector("[data-viewport-gauge]") === null,
+      "Viewport gauge should be removed during cleanup.",
+    );
     assert.equal(
       document.documentElement.hasAttribute("data-standalone"),
       false,
@@ -1439,9 +1455,9 @@ test("a reply stays compact until used and collapses after posting", async () =>
     !screen.queryByLabelText("Reply to comment"),
     "Reply field is collapsed",
   );
-  assert.equal(
-    screen.queryByRole("button", { name: "Post", exact: true }),
-    null,
+  assert.ok(
+    screen.queryByRole("button", { name: "Post", exact: true }) === null,
+    "Post button should be absent while the reply is collapsed.",
   );
   fireEvent.click(screen.getByRole("button", { name: "Reply", exact: true }));
   const input = screen.getByLabelText("Reply to comment");
@@ -1459,9 +1475,9 @@ test("a reply stays compact until used and collapses after posting", async () =>
     ),
   );
   assert.deepEqual(posted, ["A quick reply"]);
-  assert.equal(
-    screen.queryByRole("button", { name: "Post", exact: true }),
-    null,
+  assert.ok(
+    screen.queryByRole("button", { name: "Post", exact: true }) === null,
+    "Post button should be absent while the reply is collapsed.",
   );
   assert.ok(screen.getByRole("button", { name: "Reply", exact: true }));
 });
@@ -1879,7 +1895,10 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
         stop();
         input.remove();
       }
-      assert.equal(document.querySelector("[data-viewport-gauge]"), null);
+      assert.ok(
+        document.querySelector("[data-viewport-gauge]") === null,
+        "Viewport gauge should be removed during cleanup.",
+      );
       assert.ok(!root.hasAttribute("data-keyboard-open"));
     }
   } finally {
