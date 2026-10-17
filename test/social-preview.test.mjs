@@ -66,8 +66,8 @@ before(async () => {
   );
   await copyFile(resolve("index.html"), join(dir, "dist/index.html"));
   await copyFile(
-    resolve("public/social/locdoc-v3.png"),
-    join(dir, "dist/social/locdoc-v3.png"),
+    resolve("public/social/locdoc-v4.png"),
+    join(dir, "dist/social/locdoc-v4.png"),
   );
   server = spawn(resolve("target/debug/locdoc"), [], {
     cwd: dir,
@@ -140,7 +140,7 @@ test("social crawlers receive app-only metadata with absolute URLs on every app 
     assert.match(meta("og:title"), /Locdoc/);
     assert.ok(meta("og:description"));
     assert.equal(meta("og:url"), publicUrl + new URL(path, base).pathname);
-    assert.equal(meta("og:image"), publicUrl + "/social/locdoc-v3.png");
+    assert.equal(meta("og:image"), publicUrl + "/social/locdoc-v4.png");
     assert.equal(meta("twitter:image"), meta("og:image"));
     assert.equal(meta("twitter:card"), "summary_large_image");
     assert.ok(meta("og:image:alt"));
@@ -151,7 +151,7 @@ test("social crawlers receive app-only metadata with absolute URLs on every app 
     );
     dom.window.close();
   }
-  const response = await fetch(base + "/social/locdoc-v3.png");
+  const response = await fetch(base + "/social/locdoc-v4.png");
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "image/png");
   const png = Buffer.from(await response.arrayBuffer());
