@@ -215,9 +215,17 @@ test("view links allow source comments but reject forged CRDT writes and uploads
     ),
     "pixel.png",
   );
+  // Buffer this small fixture: an early 403 can close the socket while Node's
+  // streaming multipart encoder is still writing, hiding the actual response.
+  const encoded = new Response(form);
   const upload = await fetch(
     `${base}/api/docs/${d.id}/upload?token=${grant.token}`,
-    { method: "POST", body: form },
+    {
+      method: "POST",
+      headers: { "Content-Type": encoded.headers.get("Content-Type") },
+      body: await encoded.arrayBuffer(),
+      signal: AbortSignal.timeout(7000),
+    },
   );
   assert.equal(upload.status, 403);
   await request(`/api/docs/${d.id}/share?token=${grant.token}`, {
