@@ -3,8 +3,10 @@ import { Table, X } from "@phosphor-icons/react";
 
 export function TablePicker({
   onInsert,
+  showLabel = false,
 }: {
   onInsert: (rows: number, columns: number) => void;
+  showLabel?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [size, setSize] = useState({ rows: 3, columns: 3 });
@@ -48,7 +50,7 @@ export function TablePicker({
       }}
     >
       <button
-        className="icon-button"
+        className={showLabel ? "menu-action" : "icon-button"}
         title="Insert table"
         aria-label="Insert table"
         aria-expanded={open}
@@ -57,6 +59,7 @@ export function TablePicker({
         onClick={() => setOpen((value) => !value)}
       >
         <Table size={19} />
+        {showLabel && <span>Insert table</span>}
       </button>
       {open && (
         <div className="table-picker-panel" id="table-picker-panel">

@@ -20,15 +20,6 @@ import {
   ArrowUpRight,
   ShareNetwork,
   X,
-  LinkSimple,
-  TextB,
-  TextItalic,
-  TextUnderline,
-  TextH,
-  ListBullets,
-  ListChecks,
-  Quotes,
-  Code,
   Image,
   ChatCircle,
   TextAa,
@@ -50,7 +41,7 @@ import { DocumentSidebar } from "./document-sidebar";
 import { LinkPicker } from "./link-picker";
 import { LinkPreview } from "./link-preview";
 import type { LinkTarget } from "./editor";
-import { TablePicker } from "./table-picker";
+import { FormattingTools } from "./formatting-tools";
 import { captureInsertion, insertAttachment } from "./document-session";
 import { normalizePresence, publishPresence } from "./presence";
 import { useDocument } from "./use-document";
@@ -510,6 +501,29 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       )}
     </section>
   );
+  const formattingTools = (expanded = false) =>
+    doc && (
+      <FormattingTools
+        expanded={expanded}
+        fountain={fountain}
+        editable={doc.edit}
+        busy={busy}
+        onEdit={(command) => {
+          setPanel(null);
+          if (editor.current) command(editor.current);
+          requestAnimationFrame(() => editor.current?.focus());
+        }}
+        onLink={startLink}
+        onUpload={() => {
+          setPanel(null);
+          fileInput.current?.click();
+        }}
+        onComment={() => {
+          setPanel(null);
+          startComment();
+        }}
+      />
+    );
   const style = {
     "--doc-font": documentFontFamily(font),
     "--doc-size": `${fontSize}px`,
@@ -789,14 +803,16 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             </div>
           )}
           {doc && (
-            <div className="formatbar">
+            <div
+              className="formatbar"
+              data-format={fountain ? "fountain" : "markdown"}
+            >
               <div className="format-left">
                 <button
                   className="font-button"
                   aria-label="Fonts and appearance"
                   onClick={() => setPanel("appearance")}
                 >
-                  <TextAa size={17} />
                   <span>{font}</span>
                   <CaretDown size={14} />
                 </button>
@@ -861,100 +877,14 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         />
                       </div>
                     )}
-                    {!fountain && (
-                      <>
-                        <IconButton
-                          label="Heading"
-                          className="toolbar-secondary"
-                          onClick={() => editor.current?.wrap("## ")}
-                        >
-                          <TextH />
-                        </IconButton>
-                      </>
-                    )}
-                    <IconButton
-                      label="Bold"
-                      onClick={() => editor.current?.wrap("**", "**")}
-                    >
-                      <TextB />
-                    </IconButton>
-                    <IconButton
-                      label="Italic"
-                      className="toolbar-secondary"
-                      onClick={() => editor.current?.wrap("*", "*")}
-                    >
-                      <TextItalic />
-                    </IconButton>
-                    {fountain && (
-                      <IconButton
-                        className="toolbar-secondary"
-                        label="Underline"
-                        onClick={() => editor.current?.wrap("_", "_")}
-                      >
-                        <TextUnderline />
-                      </IconButton>
-                    )}
-                    {!fountain && (
-                      <>
-                        <span className="toolbar-divider" />
-                        <IconButton
-                          label="Bulleted list"
-                          className="toolbar-secondary"
-                          onClick={() => editor.current?.wrap("- ")}
-                        >
-                          <ListBullets />
-                        </IconButton>
-                        <IconButton
-                          label="Todo list"
-                          className="toolbar-secondary"
-                          onClick={() => editor.current?.toggleTasks()}
-                        >
-                          <ListChecks />
-                        </IconButton>
-                        <IconButton
-                          label="Insert link (Ctrl K)"
-                          className="toolbar-link"
-                          onClick={startLink}
-                        >
-                          <LinkSimple />
-                        </IconButton>
-                        <IconButton
-                          label="Blockquote"
-                          className="toolbar-extra"
-                          onClick={() => editor.current?.wrap("> ")}
-                        >
-                          <Quotes />
-                        </IconButton>
-                        <IconButton
-                          label="Inline code"
-                          className="toolbar-extra"
-                          onClick={() => editor.current?.wrap("`", "`")}
-                        >
-                          <Code />
-                        </IconButton>
-                        <IconButton
-                          label="Insert local image or video"
-                          disabled={busy}
-                          onClick={() => fileInput.current?.click()}
-                        >
-                          <Image />
-                        </IconButton>
-                        <TablePicker
-                          onInsert={(rows, columns) =>
-                            editor.current?.insertTable(rows, columns)
-                          }
-                        />
-                      </>
-                    )}
                   </>
                 )}
-                <IconButton
-                  label="Add comment (Ctrl Alt M)"
-                  data-comment-control=""
-                  onClick={startComment}
+                <div
+                  className="format-command-slot"
+                  aria-hidden={panel === "document" || undefined}
                 >
-                  <ChatCircle />
-                </IconButton>
+                  {formattingTools()}
+                </div>
                 <span className="toolbar-divider" />
                 <IconButton
                   label="Document options"
@@ -1410,25 +1340,13 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             {panel === "document" && doc && (
               <>
                 <p className="dialog-description">{doc.path}</p>
-                {doc.edit && !fountain && (
-                  <>
-                    <button className="menu-action" onClick={startLink}>
-                      <LinkSimple />
-                      Insert link
-                    </button>
-                    <button
-                      className="menu-action"
-                      onClick={() => {
-                        setPanel(null);
-                        editor.current?.toggleTasks();
-                        requestAnimationFrame(() => editor.current?.focus());
-                      }}
-                    >
-                      <ListChecks />
-                      Todo list
-                    </button>
-                  </>
-                )}
+                <div
+                  className="formatting-menu"
+                  role="group"
+                  aria-label="Formatting"
+                >
+                  {formattingTools(true)}
+                </div>
                 <button
                   className="menu-action"
                   onClick={() => {

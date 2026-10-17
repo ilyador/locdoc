@@ -442,6 +442,7 @@ button:hover {
 .workspace {
   display: flex;
   flex-direction: column;
+  container: workspace / inline-size;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -553,7 +554,7 @@ button:hover {
 }
 .formatbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
@@ -564,7 +565,8 @@ button:hover {
   background: var(--surface);
 }
 .format-left,
-.format-tools {
+.format-tools,
+.formatting-tools {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -573,6 +575,15 @@ button:hover {
 .format-left {
   gap: 13px;
   max-width: 100%;
+}
+.format-tools {
+  flex-shrink: 0;
+}
+.formatting-tools {
+  flex-wrap: nowrap;
+}
+.formatting-table {
+  display: flex;
 }
 .toolbar-divider {
   display: inline-block;
@@ -607,6 +618,7 @@ button:hover {
   height: var(--format-control-height);
 }
 .font-button {
+  flex-shrink: 1;
   gap: 7px;
   padding: 6px 10px;
   height: auto;
@@ -638,6 +650,37 @@ button:hover {
   min-width: 25px;
   text-align: center;
   font-variant-numeric: tabular-nums;
+}
+.formatting-menu {
+  padding-block-end: 12px;
+  margin-block-end: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.formatting-menu .formatting-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 8px;
+}
+.formatting-menu .menu-action {
+  min-height: 36px;
+  padding: 8px;
+  font-size: var(--ui-control-size);
+  line-height: 1.3;
+}
+.formatting-menu .menu-action > svg {
+  flex-shrink: 0;
+}
+.formatting-menu .formatting-table,
+.formatting-menu .table-picker {
+  display: block;
+  grid-column: 1 / -1;
+}
+.formatting-menu .table-picker-panel {
+  position: static;
+  margin-block: 8px;
+  width: 100%;
+  box-shadow: none;
+  border: 1px solid var(--line);
 }
 .table-picker {
   position: relative;
@@ -867,6 +910,81 @@ button:hover {
 }
 .fountain-element-select {
   min-width: 0;
+}
+/* Respond to the writing column, including space taken by the sidebar. */
+@container workspace (max-width: 1000px) {
+  .formatbar {
+    padding-inline: 17px;
+  }
+  .format-left {
+    gap: 6px;
+  }
+  .format-tools,
+  .formatting-tools {
+    gap: 0;
+  }
+  .format-tools .icon-button {
+    width: 30px;
+  }
+  .format-tools .toolbar-divider {
+    margin-inline: 2px;
+  }
+}
+@container workspace (max-width: 850px) {
+  .formatbar .toolbar-extra {
+    display: none;
+  }
+}
+@container workspace (max-width: 760px) {
+  .formatbar {
+    padding-inline: 12px;
+    column-gap: 6px;
+  }
+  .formatbar .toolbar-secondary {
+    display: none;
+  }
+}
+@container workspace (max-width: 600px) {
+  .formatbar {
+    padding-inline: 8px;
+  }
+  .format-left {
+    gap: 4px;
+  }
+  .format-tools {
+    gap: 4px;
+  }
+  .formatbar .font-button {
+    gap: 5px;
+    padding-inline: 8px;
+  }
+  .formatbar .text-size-control .icon-button {
+    width: 26px;
+  }
+  .formatbar .text-size-control output {
+    min-width: 24px;
+  }
+  .formatbar .fountain-element-field {
+    flex-basis: 92px;
+    width: 92px;
+  }
+  .formatbar .toolbar-media,
+  .formatbar .toolbar-comment,
+  .formatbar .toolbar-divider,
+  .formatbar[data-format="fountain"] .toolbar-bold {
+    display: none;
+  }
+  .formatbar[data-format="fountain"] .format-command-slot {
+    display: none;
+  }
+}
+@container workspace (max-width: 350px) {
+  .format-command-slot,
+  .formatbar .toolbar-bold,
+  .formatbar .toolbar-link,
+  .formatbar[data-format="fountain"] .text-size-control {
+    display: none;
+  }
 }
 .cm-editor {
   font-family: inherit;
@@ -1903,23 +2021,8 @@ button:hover {
   .top-actions {
     gap: 9px;
   }
-  .formatbar {
-    padding: 6px 17px;
-  }
   .document-canvas {
     padding: 24px 34px 25px;
-  }
-  .format-left {
-    gap: 6px;
-  }
-  .format-tools {
-    gap: 0;
-  }
-  .format-tools .icon-button {
-    width: 30px;
-  }
-  .format-tools .toolbar-divider {
-    margin: 0 2px;
   }
 }
 @media (max-width: 1000px) {
@@ -1943,13 +2046,6 @@ button:hover {
     width: 40px;
   }
   .crumb-folder {
-    display: none;
-  }
-  .formatbar {
-    padding: 6px 12px;
-    gap: 8px 5px;
-  }
-  .format-tools .toolbar-extra {
     display: none;
   }
   .document-canvas {
@@ -2035,28 +2131,6 @@ button:hover {
   }
   .comments-toggle {
     width: 40px;
-  }
-  .formatbar {
-    min-height: var(--toolbar-height);
-    padding: 6px 10px;
-  }
-  .format-left {
-    gap: 3px;
-  }
-  .format-left > .toolbar-divider {
-    display: none;
-  }
-  .font-button {
-    padding: 6px 9px;
-    min-width: 44px;
-  }
-  .format-tools .icon-button {
-    height: 32px;
-    width: 30px;
-  }
-  .format-tools .toolbar-secondary,
-  .format-tools .toolbar-divider {
-    display: none;
   }
   .document-canvas {
     padding: 20px 22px 24px;

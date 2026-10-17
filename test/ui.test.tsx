@@ -260,6 +260,37 @@ async function chooseB() {
     ),
   );
 }
+test("overflow formatting edits the existing selection and closes the menu in both formats", async () => {
+  const { EditorView } = await import("@codemirror/view");
+  for (const extension of ["md", "fountain"]) {
+    docs = { a: makeDoc("a"), b: makeDoc("b") };
+    docs.a.path = `a.${extension}`;
+    const page = render(<WorkspaceFixture />);
+    try {
+      const input = await screen.findByRole("textbox", {
+        name: extension === "md" ? "Markdown document" : "Fountain screenplay",
+      });
+      const view = EditorView.findFromDOM(input)!;
+      await waitFor(() => assert.equal(view.state.doc.toString(), "a text"));
+      act(() => view.dispatch({ selection: { anchor: 0, head: 6 } }));
+      fireEvent.click(screen.getByRole("button", { name: "Document options" }));
+      const menu = page.container.querySelector(".formatting-menu")!;
+      fireEvent.click(menu.querySelector('[aria-label="Bold"]')!);
+      await waitFor(() =>
+        assert.equal(view.state.doc.toString(), "**a text**"),
+      );
+      await waitFor(() =>
+        assert.equal(page.container.querySelector("dialog")?.open, false),
+      );
+      assert.ok(
+        EditorView.findFromDOM(input) === view,
+        "Opening overflow must retain the editor and its selection",
+      );
+    } finally {
+      page.unmount();
+    }
+  }
+});
 test("late sharing response cannot change the next document's permissions", async () => {
   await openWorkspace();
   delayShare = true;
