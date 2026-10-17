@@ -23,6 +23,7 @@ import {
 } from "./comment-syntax";
 import { markdownLink, resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
+import { rememberEditorScroll } from "./editor-scroll";
 import { fountainPreview } from "./fountain-preview";
 import { parseFountain, type FountainForce } from "./fountain";
 import type { Entry } from "./model";
@@ -314,8 +315,24 @@ function livePreview(
             pos = line.to + 1;
           }
         }
-        if (name === "ListItem" || name === "Paragraph" || name === "Task")
+        if (name === "ListItem" || name === "Task")
           blockEnds.add(state.doc.lineAt(Math.max(from, to - 1)).from);
+        if (name === "Paragraph") {
+          let list = n.node.parent;
+          while (list && list.name !== "ListItem") list = list.parent;
+          // Enter creates a visible text block even without a blank Markdown
+          // line. Keep list continuations together and natural wrapping intact.
+          for (let pos = list ? Math.max(from, to - 1) : from; pos < to;) {
+            const line = state.doc.lineAt(pos);
+            if (
+              visibleTextRanges(state, line.from, line.to).some((range) =>
+                state.sliceDoc(range.from, range.to).trim(),
+              )
+            )
+              blockEnds.add(line.from);
+            pos = line.to + 1;
+          }
+        }
         const heading = name.match(/^ATXHeading(\d)$/);
         if (heading)
           decorations.push(
@@ -553,6 +570,7 @@ export const MarkdownEditor = forwardRef<
     conversation?: ReactNode;
     path?: string;
     entries?: Entry[];
+    scrollKey?: string;
     onLink?: (target: LinkTarget) => void;
     onInsertLink?: () => void;
   }
@@ -573,6 +591,7 @@ export const MarkdownEditor = forwardRef<
     conversation,
     path,
     entries,
+    scrollKey,
     onLink,
     onInsertLink,
   },
@@ -1013,6 +1032,10 @@ export const MarkdownEditor = forwardRef<
       undo.destroy();
     };
   }, [ydoc, provider, id]);
+  useLayoutEffect(() => {
+    if (view.current && scrollKey)
+      return rememberEditorScroll(view.current, scrollKey);
+  }, [ydoc, provider, id, scrollKey]);
   useLayoutEffect(() => {
     const v = view.current;
     if (!v) return;

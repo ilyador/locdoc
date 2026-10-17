@@ -798,7 +798,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 >
                   <TextAa size={17} />
                   <span>{font}</span>
-                  <CaretDown size={11} />
+                  <CaretDown size={14} />
                 </button>
                 <div
                   className="text-size-control"
@@ -1051,6 +1051,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         {...session}
                         editable={doc.edit}
                         id={doc.id}
+                        scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
                         token={sharedToken}
                         path={doc.path}
                         entries={entries}

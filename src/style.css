@@ -48,7 +48,7 @@
   --doc-line-height: 1.85;
   --header-height: 70px;
   --toolbar-height: 58px;
-  --format-control-height: 36px;
+  --format-control-height: 32px;
   --footer-height: 36px;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
@@ -584,21 +584,23 @@ button:hover {
   margin: 0 4px;
 }
 .font-button,
-.text-size-control {
+.text-size-control,
+.fountain-element-select {
   display: flex;
   align-items: center;
   height: var(--format-control-height);
   font-size: var(--ui-control-size);
-  font-weight: var(--weight-medium);
+  font-weight: var(--weight-regular);
   color: var(--secondary);
   line-height: 1;
   border: 1px solid var(--line);
-  background: var(--subtle);
+  background: var(--surface);
   border-radius: 6px;
 }
 .font-button:hover,
-.text-size-control:hover {
-  background: var(--hover);
+.text-size-control:hover,
+.fountain-element-select:hover {
+  background: var(--subtle);
 }
 .font-button {
   gap: 7px;
@@ -858,13 +860,6 @@ button:hover {
 }
 .fountain-element-select {
   min-width: 0;
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--surface);
-  color: var(--secondary);
-  font: inherit;
-  font-size: var(--ui-control-size);
 }
 .cm-editor {
   font-family: inherit;

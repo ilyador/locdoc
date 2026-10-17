@@ -1610,7 +1610,7 @@ test(
   },
 );
 
-test("Markdown block gaps follow paragraph and list-item ends, leaving headings and code alone", async () => {
+test("Markdown gaps separate single-newline text blocks while keeping list continuations, headings and code tight", async () => {
   const { MarkdownEditor } = await import("../src/editor.tsx");
   const { Awareness } = await import("y-protocols/awareness");
   const ydoc = new Y.Doc(),
@@ -1631,10 +1631,11 @@ test("Markdown block gaps follow paragraph and list-item ends, leaving headings 
     />,
   );
   const ends = [...page.container.querySelectorAll(".md-block-end")];
-  assert.equal(ends.length, 4);
+  assert.equal(ends.length, 5);
   assert.deepEqual(
     ends.map((el) => el.textContent),
     [
+      "A paragraph",
       "continued on the next source line.",
       "Another paragraph.",
       "  continued on the next source line.",

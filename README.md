@@ -8,6 +8,7 @@ A small, self-hosted Markdown and Fountain editor over real files. Write in your
 - Collaborative editing with visible cursors and inline comments.
 - Document and folder links with **view & comment** or **edit & comment** access.
 - Searchable document links, link previews, local fonts, automatic dark mode, and mobile layouts.
+- Scroll positions remembered in each browser, separately for each document and reader.
 - A local owner key; no email, hosted database, or third-party collaboration service.
 
 ## Install
