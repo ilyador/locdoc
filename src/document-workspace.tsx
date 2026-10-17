@@ -538,14 +538,18 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     <IconContext.Provider value={{ size: 18, weight: "regular" }}>
       {workspace.needsName && <NamePrompt onChoose={workspace.chooseName} />}
       <div className={`app ${sidebar ? "with-sidebar" : ""}`} style={style}>
-        {sidebar && (
-          <button
-            className="sidebar-scrim"
-            aria-label="Close sidebar"
-            onClick={() => setSidebar(false)}
-          />
-        )}
-        <aside className={`sidebar ${sidebar ? "is-open" : ""}`}>
+        <button
+          className="sidebar-scrim"
+          aria-label="Close sidebar"
+          aria-hidden={!sidebar}
+          inert={!sidebar}
+          tabIndex={-1}
+          onClick={() => setSidebar(false)}
+        />
+        <aside
+          className={`sidebar ${sidebar ? "is-open" : ""}`}
+          inert={!sidebar}
+        >
           <div className="brand-row">
             <a
               className="brand"
