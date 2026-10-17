@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { CaretDown, Desktop, Sun, Moon } from "@phosphor-icons/react";
 import { api, send } from "./api";
+import type { DocumentFormat } from "./document-format";
 type GoogleFont = { family: string; category: string };
 export function documentFontFamily(font: string) {
-  if (font === "JetBrains Mono")
-    return '"JetBrains Mono", ui-monospace, monospace';
+  if (["JetBrains Mono", "Courier Prime"].includes(font))
+    return `"${font}", ui-monospace, monospace`;
   if (font === "DM Sans") return '"DM Sans Variable", sans-serif';
   if (font === "monospace") return "ui-monospace, monospace";
   if (["Asul", "Lora", "Georgia"].includes(font))
@@ -13,6 +14,7 @@ export function documentFontFamily(font: string) {
 }
 const bundledFonts = [
   "JetBrains Mono",
+  "Courier Prime",
   "IBM Plex Sans",
   "DM Sans",
   "Lora",
@@ -42,76 +44,135 @@ function writingDevice(): WritingDevice {
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   return iPad || window.innerWidth <= 1180 ? "tablet" : "desktop";
 }
+type WritingPreferences = {
+  font: string;
+  sizes: Partial<Record<WritingDevice, number>>;
+  lineHeight: number;
+  pageWidth: number | null;
+};
+const preferenceKey = (format: DocumentFormat) => `locdoc.writing.${format}`;
+function storedObject(key: string) {
+  try {
+    const value = JSON.parse(localStorage.getItem(key) || "null");
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+function bounded(value: unknown, min: number, max: number, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(max, Math.max(min, value))
+    : fallback;
+}
+function readWritingPreferences(format: DocumentFormat): WritingPreferences {
+  const saved = storedObject(preferenceKey(format));
+  const legacy = format === "markdown" && !saved;
+  let font = format === "fountain" ? "Courier Prime" : "JetBrains Mono";
+  if (typeof saved?.font === "string" && saved.font.trim()) font = saved.font;
+  else if (legacy) {
+    const previous = localStorage.getItem("locdoc.font");
+    const oldDefault =
+      localStorage.getItem("locdoc.typography") !== "jetbrains-v1" &&
+      (!previous || ["Asul", "DM Sans", "IBM Plex Sans"].includes(previous));
+    if (previous && !oldDefault) font = previous;
+  }
+  const rawSizes = legacy ? storedObject("locdoc.fontSizes") : saved?.sizes;
+  const sizes: WritingPreferences["sizes"] = {};
+  for (const device of Object.keys(defaultSizes) as WritingDevice[]) {
+    const value = rawSizes?.[device];
+    if (typeof value === "number" && Number.isFinite(value))
+      sizes[device] = bounded(value, 10, 28, defaultSizes[device]);
+  }
+  if (legacy && localStorage.getItem("locdoc.fontSizes") === null) {
+    const previous = Number(localStorage.getItem("locdoc.fontSize"));
+    const oldDefault =
+      previous === 20 ||
+      (previous === 17 && !localStorage.getItem("locdoc.typography"));
+    if (previous >= 10 && previous <= 28 && !oldDefault)
+      sizes[writingDevice()] = previous;
+  }
+  const lineHeight = legacy
+    ? Number(localStorage.getItem("locdoc.lineHeight") || 1.85)
+    : saved?.lineHeight;
+  const width = legacy
+    ? Number(localStorage.getItem("locdoc.pageWidth"))
+    : saved?.pageWidth;
+  return {
+    font,
+    sizes,
+    lineHeight: bounded(lineHeight, 1.2, 2.4, 1.85),
+    pageWidth:
+      typeof width === "number" && Number.isFinite(width) && width > 0
+        ? bounded(width, 480, 1400, 890)
+        : null,
+  };
+}
+function useWritingAppearance(format: DocumentFormat, device: WritingDevice) {
+  const [preferences, setPreferences] = useState(() =>
+    readWritingPreferences(format),
+  );
+  const key = preferenceKey(format);
+  useEffect(() => {
+    localStorage.setItem(key, JSON.stringify(preferences));
+  }, [key, preferences]);
+  useEffect(() => {
+    const update = (event: StorageEvent) => {
+      if (
+        event.storageArea === localStorage &&
+        (event.key === key || event.key === null)
+      )
+        setPreferences(readWritingPreferences(format));
+    };
+    window.addEventListener("storage", update);
+    return () => window.removeEventListener("storage", update);
+  }, [format, key]);
+  const update = <K extends keyof WritingPreferences>(
+    property: K,
+    value: WritingPreferences[K],
+  ) => setPreferences((current) => ({ ...current, [property]: value }));
+  return {
+    format,
+    font: preferences.font,
+    setFont: (value: string) => update("font", value),
+    fontSize: preferences.sizes[device] ?? defaultSizes[device],
+    defaultFontSize: defaultSizes[device],
+    setFontSize: (value: number | ((current: number) => number)) =>
+      setPreferences((current) => ({
+        ...current,
+        sizes: {
+          ...current.sizes,
+          [device]: bounded(
+            typeof value === "function"
+              ? value(current.sizes[device] ?? defaultSizes[device])
+              : value,
+            10,
+            28,
+            defaultSizes[device],
+          ),
+        },
+      })),
+    lineHeight: preferences.lineHeight,
+    setLineHeight: (value: number) =>
+      update("lineHeight", bounded(value, 1.2, 2.4, 1.85)),
+    pageWidth: preferences.pageWidth,
+    setPageWidth: (value: number | null) =>
+      update(
+        "pageWidth",
+        value === null ? null : bounded(value, 480, 1400, 890),
+      ),
+  };
+}
 export function useAppearance() {
   const [device, setDevice] = useState(writingDevice);
-  const [sizes, setSizes] = useState<Partial<Record<WritingDevice, number>>>(
-    () => {
-      const raw = localStorage.getItem("locdoc.fontSizes");
-      if (raw !== null) {
-        try {
-          const saved = JSON.parse(raw);
-          return Object.fromEntries(
-            Object.keys(defaultSizes)
-              .filter(
-                (key) =>
-                  typeof saved?.[key] === "number" &&
-                  Number.isFinite(saved[key]),
-              )
-              .map((key) => [key, Math.min(28, Math.max(10, saved[key]))]),
-          );
-        } catch {
-          return {};
-        }
-      }
-      const legacy = Number(localStorage.getItem("locdoc.fontSize"));
-      const oldDefault =
-        legacy === 20 ||
-        (legacy === 17 && !localStorage.getItem("locdoc.typography"));
-      return Number.isFinite(legacy) &&
-        legacy >= 10 &&
-        legacy <= 28 &&
-        !oldDefault
-        ? { [writingDevice()]: legacy }
-        : {};
-    },
-  );
-  const defaultFontSize = defaultSizes[device];
-  const fontSize = sizes[device] ?? defaultFontSize;
-  const setFontSize = (value: number | ((current: number) => number)) =>
-    setSizes((current) => ({
-      ...current,
-      [device]: Math.min(
-        28,
-        Math.max(
-          10,
-          typeof value === "function"
-            ? value(current[device] ?? defaultSizes[device])
-            : value,
-        ),
-      ),
-    }));
   useEffect(() => {
     const update = () => setDevice(writingDevice());
     window.addEventListener("resize", update);
     return () => window.removeEventListener("resize", update);
   }, []);
-  const [font, setFont] = useState(() => {
-    const saved = localStorage.getItem("locdoc.font");
-    const previousDefault =
-      localStorage.getItem("locdoc.typography") !== "jetbrains-v1" &&
-      (!saved || ["Asul", "DM Sans", "IBM Plex Sans"].includes(saved));
-    return previousDefault ? "JetBrains Mono" : saved || "JetBrains Mono";
-  });
-  const [lineHeight, setLineHeight] = useState(() => {
-    const saved = Number(localStorage.getItem("locdoc.lineHeight") || 1.85);
-    return Number.isFinite(saved) ? Math.min(2.4, Math.max(1.2, saved)) : 1.85;
-  });
-  const [pageWidth, setPageWidth] = useState<number | null>(() => {
-    const saved = Number(localStorage.getItem("locdoc.pageWidth"));
-    return Number.isFinite(saved) && saved > 0
-      ? Math.min(1400, Math.max(480, saved))
-      : null;
-  });
+  const markdown = useWritingAppearance("markdown", device);
+  const fountain = useWritingAppearance("fountain", device);
   const [theme, setTheme] = useState(
     localStorage.getItem("locdoc.theme") || "auto",
   );
@@ -126,26 +187,12 @@ export function useAppearance() {
     preference.addEventListener("change", apply);
     return () => preference.removeEventListener("change", apply);
   }, [theme]);
-  useEffect(() => {
-    localStorage.setItem("locdoc.typography", "jetbrains-v1");
-    localStorage.setItem("locdoc.font", font);
-    localStorage.setItem("locdoc.fontSizes", JSON.stringify(sizes));
-    localStorage.setItem("locdoc.lineHeight", String(lineHeight));
-    if (pageWidth === null) localStorage.removeItem("locdoc.pageWidth");
-    else localStorage.setItem("locdoc.pageWidth", String(pageWidth));
-  }, [font, sizes, lineHeight, pageWidth]);
   return {
-    font,
-    setFont,
-    fontSize,
-    setFontSize,
-    defaultFontSize,
-    lineHeight,
-    setLineHeight,
-    pageWidth,
-    setPageWidth,
-    theme,
-    setTheme,
+    forFormat: (format: DocumentFormat) => ({
+      ...(format === "fountain" ? fountain : markdown),
+      theme,
+      setTheme,
+    }),
   };
 }
 export function AppearanceSettings({
@@ -153,9 +200,10 @@ export function AppearanceSettings({
   value,
 }: {
   owner: boolean;
-  value: ReturnType<typeof useAppearance>;
+  value: ReturnType<ReturnType<typeof useAppearance>["forFormat"]>;
 }) {
   const {
+    format,
     font,
     setFont,
     fontSize,
@@ -246,7 +294,8 @@ export function AppearanceSettings({
       {" "}
       <>
         <p className="dialog-description">
-          A reading space that feels like you. These preferences apply in this
+          Font and spacing settings apply to all{" "}
+          {format === "fountain" ? "Fountain" : "Markdown"} files in this
           browser.
         </p>
         <label className="field-label" htmlFor="font">

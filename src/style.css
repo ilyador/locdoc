@@ -839,22 +839,26 @@ button:hover {
 .fountain-dual-marker {
   color: var(--muted);
 }
+.fountain-element-field {
+  flex: 0 0 96px;
+  width: 96px;
+}
+.select-field.fountain-element-field select {
+  width: 100%;
+  padding: 0 28px 0 10px;
+}
+.select-field.fountain-element-field > .select-arrow {
+  right: 8px;
+}
 .fountain-element-select {
-  max-width: 116px;
   min-width: 0;
   height: 32px;
-  padding: 0 7px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface);
   color: var(--secondary);
   font: inherit;
   font-size: var(--ui-control-size);
-}
-@media (max-width: 600px) {
-  .fountain-element-select {
-    width: 96px;
-  }
 }
 .cm-editor {
   font-family: inherit;

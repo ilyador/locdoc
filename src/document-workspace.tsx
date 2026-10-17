@@ -97,8 +97,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     foldersOpen,
     setFoldersOpen,
   } = workspace;
-  const { font, fontSize, setFontSize, lineHeight, pageWidth } =
-    workspace.appearance;
   const {
     doc,
     setDoc,
@@ -114,6 +112,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     !!config && (config.owner || !!sharedToken),
     workspace.initialDocument,
   );
+  const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
+  const { font, fontSize, setFontSize, lineHeight, pageWidth } = appearance;
   const [shareFolderPath, setShareFolderPath] = useState<string | null>(null);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [newCommentDraft, setNewCommentDraft] = useState<{
@@ -809,27 +809,34 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 {doc.edit && (
                   <>
                     {fountain && (
-                      <select
-                        className="fountain-element-select"
-                        aria-label="Screenplay element"
-                        value=""
-                        onChange={(event) =>
-                          editor.current?.formatFountain(
-                            event.target.value as FountainForce,
-                          )
-                        }
-                      >
-                        <option value="" disabled>
-                          Element
-                        </option>
-                        <option value="scene">Scene heading</option>
-                        <option value="action">Action</option>
-                        <option value="character">Character</option>
-                        <option value="parenthetical">Parenthetical</option>
-                        <option value="transition">Transition</option>
-                        <option value="centered">Centered</option>
-                        <option value="lyric">Lyrics</option>
-                      </select>
+                      <div className="select-field fountain-element-field">
+                        <select
+                          className="fountain-element-select"
+                          aria-label="Screenplay element"
+                          value=""
+                          onChange={(event) =>
+                            editor.current?.formatFountain(
+                              event.target.value as FountainForce,
+                            )
+                          }
+                        >
+                          <option value="" disabled>
+                            Element
+                          </option>
+                          <option value="scene">Scene heading</option>
+                          <option value="action">Action</option>
+                          <option value="character">Character</option>
+                          <option value="parenthetical">Parenthetical</option>
+                          <option value="transition">Transition</option>
+                          <option value="centered">Centered</option>
+                          <option value="lyric">Lyrics</option>
+                        </select>
+                        <CaretDown
+                          size={14}
+                          className="select-arrow"
+                          aria-hidden="true"
+                        />
+                      </div>
                     )}
                     {!fountain && (
                       <>
@@ -1277,10 +1284,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               </form>
             )}
             {panel === "appearance" && (
-              <AppearanceSettings
-                owner={!!config?.owner}
-                value={workspace.appearance}
-              />
+              <AppearanceSettings owner={!!config?.owner} value={appearance} />
             )}
             {panel === "login" && (
               <form

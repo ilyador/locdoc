@@ -82,6 +82,9 @@ Choose **Fountain screenplay** when creating a document, or place a `.fountain`
 file in your documents folder. Locdoc formats it as you type, using the
 [Fountain syntax](https://fountain.io/syntax/). The current line reveals its
 formatting markers while you edit; the file on disk stays plain text.
+Courier Prime is bundled as the default Fountain font. Font, text size, line
+height and page width preferences are saved separately for Markdown and Fountain
+in each browser.
 
 Type `INT.`, `EXT.`, uppercase character names, dialogue and parentheticals
 naturally. The **Element** menu can force a scene heading, action, character,

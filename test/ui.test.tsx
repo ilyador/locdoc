@@ -772,26 +772,100 @@ test("device font defaults and explicit sizes survive resizing and reopening", a
       configurable: true,
     });
     const page = renderHook(() => useAppearance());
-    assert.equal(page.result.current.fontSize, 12);
-    act(() => page.result.current.setFontSize(10));
+    assert.equal(page.result.current.forFormat("markdown").fontSize, 12);
+    act(() => page.result.current.forFormat("markdown").setFontSize(10));
     act(() => {
       window.innerWidth = 1024;
       window.dispatchEvent(new window.Event("resize"));
     });
-    assert.equal(page.result.current.fontSize, 15);
+    assert.equal(page.result.current.forFormat("markdown").fontSize, 15);
     act(() => {
       window.innerWidth = 1440;
       window.dispatchEvent(new window.Event("resize"));
     });
-    assert.equal(page.result.current.fontSize, 18);
+    assert.equal(page.result.current.forFormat("markdown").fontSize, 18);
     act(() => {
       window.innerWidth = 390;
       window.dispatchEvent(new window.Event("resize"));
     });
-    assert.equal(page.result.current.fontSize, 10);
+    assert.equal(page.result.current.forFormat("markdown").fontSize, 10);
     page.unmount();
     const reopened = renderHook(() => useAppearance());
-    assert.equal(reopened.result.current.fontSize, 10);
+    assert.equal(reopened.result.current.forFormat("markdown").fontSize, 10);
+    reopened.unmount();
+  } finally {
+    window.innerWidth = width;
+    localStorage.clear();
+    for (const [key, value] of previous) localStorage.setItem(key, value);
+  }
+});
+
+test("writing profiles migrate Markdown and isolate Fountain across tabs and reopening", async () => {
+  const previous = new Map(Object.entries(localStorage));
+  const width = window.innerWidth;
+  try {
+    window.innerWidth = 1440;
+    localStorage.clear();
+    localStorage.setItem("locdoc.typography", "jetbrains-v1");
+    localStorage.setItem("locdoc.font", "Lora");
+    localStorage.setItem(
+      "locdoc.fontSizes",
+      JSON.stringify({ desktop: 21, phone: 11 }),
+    );
+    localStorage.setItem("locdoc.lineHeight", "1.6");
+    localStorage.setItem("locdoc.pageWidth", "780");
+    const page = renderHook(() => useAppearance());
+    const profile = (format: "markdown" | "fountain") =>
+      page.result.current.forFormat(format);
+    assert.equal(profile("markdown").font, "Lora");
+    assert.equal(profile("markdown").fontSize, 21);
+    assert.equal(profile("markdown").lineHeight, 1.6);
+    assert.equal(profile("markdown").pageWidth, 780);
+    assert.equal(profile("fountain").font, "Courier Prime");
+    assert.equal(profile("fountain").fontSize, 18);
+    assert.equal(profile("fountain").lineHeight, 1.85);
+    assert.equal(profile("fountain").pageWidth, null);
+    act(() => {
+      profile("fountain").setFontSize(16);
+      profile("fountain").setLineHeight(1.4);
+      profile("fountain").setPageWidth(900);
+      profile("markdown").setFont("Georgia");
+    });
+    assert.equal(profile("markdown").fontSize, 21);
+    assert.equal(profile("markdown").lineHeight, 1.6);
+    assert.equal(profile("markdown").pageWidth, 780);
+    assert.equal(profile("fountain").font, "Courier Prime");
+    const fromOtherTab = JSON.stringify({
+      font: "JetBrains Mono",
+      sizes: { desktop: 13 },
+      lineHeight: 1.5,
+      pageWidth: 650,
+    });
+    act(() => {
+      localStorage.setItem("locdoc.writing.markdown", fromOtherTab);
+      window.dispatchEvent(
+        new window.StorageEvent("storage", {
+          key: "locdoc.writing.markdown",
+          newValue: fromOtherTab,
+          storageArea: localStorage,
+        }),
+      );
+    });
+    assert.equal(profile("markdown").font, "JetBrains Mono");
+    assert.equal(profile("markdown").fontSize, 13);
+    assert.equal(profile("fountain").fontSize, 16);
+    assert.equal(profile("fountain").lineHeight, 1.4);
+    assert.equal(profile("fountain").pageWidth, 900);
+    page.unmount();
+    const reopened = renderHook(() => useAppearance());
+    assert.equal(reopened.result.current.forFormat("markdown").fontSize, 13);
+    assert.equal(
+      reopened.result.current.forFormat("fountain").font,
+      "Courier Prime",
+    );
+    assert.equal(reopened.result.current.forFormat("fountain").fontSize, 16);
+    assert.equal(reopened.result.current.forFormat("fountain").lineHeight, 1.4);
+    assert.equal(reopened.result.current.forFormat("fountain").pageWidth, 900);
     reopened.unmount();
   } finally {
     window.innerWidth = width;
