@@ -62,7 +62,7 @@ async fn preview(
         let doc = shared_doc(s, &token, Some(&doc.id))?.ok_or_else(denied)?;
         let room = s.room(&doc)?;
         let mut room = room.lock().unwrap();
-        s.store_room(&doc, &mut room)?;
+        room.ensure_committed(s, &doc)?;
         let value = social::Preview::new(&room_text(&room), &doc.path);
         Ok(Some((doc, value)))
     })
@@ -191,7 +191,7 @@ mod tests {
                 "# Original title",
                 "# Accepted browser title",
             );
-            room.save.edited();
+            room.engine.edited();
             store.store_room(&document, &mut room).unwrap();
         }
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -239,7 +239,7 @@ mod tests {
             "# Original title"
         );
         assert!(
-            room.lock().unwrap().save.needs_projection(),
+            room.lock().unwrap().engine.needs_projection(),
             "A crawler must not bypass normal save coalescing"
         );
     }

@@ -40,7 +40,10 @@ pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIde
                 && !data.join("locdoc.sqlite").exists()
                 && !data.join("root.identity").exists() =>
         {
-            fs::create_dir_all(root)?
+            fs::create_dir_all(root)?;
+            // Persist every newly created ancestor as well as the root itself.
+            // Otherwise a durable root.identity could outlive its directory.
+            disk::sync_directories(&fs::canonicalize(root)?, Path::new("/"))?;
         }
         _ => return Err(root_unavailable()),
     }
@@ -129,6 +132,42 @@ fn retire(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// SQLite and a directory cannot commit atomically. Keep the rename intent
+/// durable until both the directory entry and document identity have committed.
+/// File identity binds recovery to our file; birth time, where supported,
+/// additionally distinguishes an unrelated file that reuses the same inode.
+struct FileMove {
+    document: String,
+    source: String,
+    destination: String,
+    device: String,
+    inode: String,
+    born: Option<String>,
+}
+impl FileMove {
+    fn birth(metadata: &fs::Metadata) -> Option<String> {
+        metadata
+            .created()
+            .ok()?
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|time| time.as_nanos().to_string())
+    }
+    fn contains(&self, path: &Path) -> std::io::Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(metadata.is_file()
+                && metadata.dev().to_string() == self.device
+                && metadata.ino().to_string() == self.inode
+                && self
+                    .born
+                    .as_ref()
+                    .is_none_or(|born| Self::birth(&metadata).as_ref() == Some(born))),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
     let db = connection.unchecked_transaction()?;
     let has_active = db
@@ -146,6 +185,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         ("disk_state", "BLOB"),
         ("write_intent", "INTEGER NOT NULL DEFAULT 0"),
         ("write_target", "BLOB"),
+        ("write_state", "BLOB"),
         ("write_before_hash", "TEXT"),
         ("write_before", "BLOB"),
         ("line_ending", "TEXT NOT NULL DEFAULT 'lf'"),
@@ -170,6 +210,19 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         }
     }
     db.execute_batch("CREATE TABLE IF NOT EXISTS active_media(doc TEXT NOT NULL,reference TEXT NOT NULL,PRIMARY KEY(doc,reference));")?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS document_moves(
+            doc TEXT PRIMARY KEY,source TEXT NOT NULL,destination TEXT NOT NULL UNIQUE,
+            device TEXT NOT NULL,inode TEXT NOT NULL,born TEXT);",
+    )?;
+    let has_move_birth = db
+        .prepare("PRAGMA table_info(document_moves)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|column| column == "born");
+    if !has_move_birth {
+        db.execute("ALTER TABLE document_moves ADD COLUMN born TEXT", [])?;
+    }
     let has_kind = db
         .prepare("PRAGMA table_info(revisions)")?
         .query_map([], |row| row.get::<_, String>(1))?
@@ -224,6 +277,15 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
 }
 
 impl Store {
+    pub(super) fn create_folder(&self, input: &str) -> Result<()> {
+        let _files = self.document_files.lock().unwrap();
+        let path = self.safe(input, false)?;
+        if path.exists() {
+            return Err(bad("A file or folder with this name already exists."));
+        }
+        fs::create_dir_all(&path)?;
+        disk::sync_directories(&path, &self.root)
+    }
     pub(super) fn safe(&self, rel: &str, hidden: bool) -> Result<PathBuf> {
         if !self.root_identity.matches(&self.root) {
             return Err(root_unavailable());
@@ -266,6 +328,7 @@ impl Store {
     pub(super) fn index_document(&self, input: &str) -> Result<Document> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
+        self.finish_pending_path(&path)?;
         if format(&path).is_none() || !self.safe(&path, false)?.is_file() {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,
@@ -289,20 +352,49 @@ impl Store {
 
     fn close_document(&self, id: &str) {
         let room = self.rooms.lock().unwrap().remove(id);
-        if let Some(room) = room {
-            let _ = room.lock().unwrap().tx.send(vec![126]);
+        if let Some(room) = room
+            && let Ok(room) = room.try_lock()
+        {
+            let _ = room.tx.send(vec![126]);
         }
+        // Busy peers observe the invalidated permission generation before
+        // their next frame or heartbeat. Closing must never wait on their room.
     }
 
     pub(super) fn create_document(&self, input: &str) -> Result<Document> {
         use std::io::Write;
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
+        self.finish_pending_path(&path)?;
         if format(&path).is_none() {
             return Err(bad("Document names must end with .md or .fountain."));
         }
         let full = self.safe(&path, false)?;
         fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
+        match fs::symlink_metadata(&full) {
+            Ok(_) => return Err(bad("A file or folder with this name already exists.")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let previous = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM docs WHERE path=? AND active=1",
+                [&path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(previous) = previous
+            && !self.retire_missing_identity(&previous, &full)?
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "The previous document is busy or its file changed. Retry after its save finishes."
+                    .into(),
+            ));
+        }
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -326,24 +418,14 @@ impl Store {
             };
             file.write_all(initial.as_bytes())?;
             file.sync_all()?;
+            disk::sync_directories(full.parent().unwrap(), &self.root)?;
             let id = uuid::Uuid::new_v4().to_string();
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
-            let previous = tx
-                .query_row("SELECT id FROM docs WHERE path=?", [&path], |r| {
-                    r.get::<_, String>(0)
-                })
-                .optional()?;
-            if let Some(ref previous) = previous {
-                retire(&tx, previous)?;
-            }
             tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;
             tx.commit()?;
             drop(db);
             self.permissions.invalidate();
-            if let Some(previous) = previous {
-                self.close_document(&previous);
-            }
             Ok(Document {
                 id,
                 path: path.clone(),
@@ -351,16 +433,18 @@ impl Store {
                 token: None,
             })
         })();
-        if result.is_err() {
-            let _ = fs::remove_file(full);
-        }
+        // If SQLite refuses creation, retain the new file for normal private
+        // discovery after storage recovers. A desktop app may already have
+        // written to it; rollback must never delete those bytes.
         result
     }
 
     pub(super) fn rename_document(&self, id: &str, input: &str) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
+        self.finish_pending_path(&self.doc(id)?.path)?;
         let d = self.doc(id)?;
         let path = relative_path(input, false)?;
+        self.finish_pending_path(&path)?;
         if path == d.path {
             return Ok(());
         }
@@ -379,42 +463,187 @@ impl Store {
         let source = self.safe(&d.path, false)?;
         let room = self.room(&d)?;
         let mut r = room.lock().unwrap();
-        if !self.persist(&d, &mut r)? {
+        if !r.flush_to_disk(self, &d)? {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "A desktop application has this file open. Finish its save before renaming.".into(),
             ));
         }
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        let previous = tx
-            .query_row("SELECT id FROM docs WHERE path=?", [&path], |r| {
-                r.get::<_, String>(0)
-            })
+        let metadata = fs::symlink_metadata(&source)?;
+        let movement = FileMove {
+            document: id.into(),
+            source: d.path,
+            destination: path,
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+            born: FileMove::birth(&metadata),
+        };
+        let previous = {
+            let mut db = self.db.lock().unwrap();
+            // Exercise path constraints before committing a filesystem intent.
+            // The transaction rolls back; only finish_file_move publishes it.
+            let tx = db.transaction()?;
+            let previous = Self::move_identity(&tx, &movement)?;
+            tx.rollback()?;
+            previous
+        };
+        if let Some(previous) = previous
+            && !self.retire_missing_identity(&previous, &dest)?
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "The previous destination is busy or changed. Retry after its save finishes."
+                    .into(),
+            ));
+        }
+        self.db.lock().unwrap().execute(
+            "INSERT INTO document_moves(doc,source,destination,device,inode,born)
+                    VALUES(?,?,?,?,?,?)",
+            params![
+                id,
+                movement.source,
+                movement.destination,
+                movement.device,
+                movement.inode,
+                movement.born
+            ],
+        )?;
+        let completed = self.finish_file_move(&movement)?;
+        drop(r);
+        if !completed {
+            return Err(bad("That path already exists."));
+        }
+        Ok(())
+    }
+
+    fn move_identity(db: &Connection, movement: &FileMove) -> Result<Option<String>> {
+        let previous = db
+            .query_row(
+                "SELECT id FROM docs WHERE path=? AND id!=?",
+                params![movement.destination, movement.document],
+                |row| row.get::<_, String>(0),
+            )
             .optional()?;
         if let Some(ref previous) = previous {
-            retire(&tx, previous)?;
+            retire(db, previous)?;
         }
-        // All SQL constraints are checked before touching the filesystem.
-        tx.execute("UPDATE docs SET path=? WHERE id=?", params![path, id])?;
-        // A same-folder hard link fails atomically if an external app creates
-        // the destination; it never overwrites that app's file.
-        fs::hard_link(&source, &dest)?;
-        if let Err(error) = fs::remove_file(&source) {
-            let _ = fs::remove_file(&dest);
-            return Err(error.into());
+        let updated = db.execute(
+            "UPDATE docs SET path=? WHERE id=? AND active=1 AND path IN (?,?)",
+            params![
+                movement.destination,
+                movement.document,
+                movement.source,
+                movement.destination
+            ],
+        )?;
+        if updated != 1 {
+            return Err(bad("The document identity changed during its rename."));
         }
-        if let Err(error) = tx.commit() {
-            if !source.exists() {
-                let _ = fs::rename(&dest, &source);
+        Ok(previous)
+    }
+
+    fn finish_file_move(&self, movement: &FileMove) -> Result<bool> {
+        let source = self.safe(&movement.source, false)?;
+        let destination = self.safe(&movement.destination, false)?;
+        let original_source = movement.contains(&source)?;
+        if !movement.contains(&destination)? {
+            if !original_source {
+                return Err(ApiError(StatusCode::CONFLICT,
+                    "An interrupted rename cannot find its original file. Restore the original file before continuing; its saved edits remain in recovery.".into()));
             }
-            return Err(error.into());
+            match disk::rename_new(&source, &destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // The original remains safely in place. An external app's
+                    // destination wins; abort our intent without touching it.
+                    self.db.lock().unwrap().execute(
+                        "DELETE FROM document_moves WHERE doc=?",
+                        [&movement.document],
+                    )?;
+                    return Ok(false);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else if original_source {
+            // Also tolerate an interrupted legacy hard-link move. Both names
+            // refer to exactly our inode, so removing the old alias is safe.
+            fs::remove_file(&source)?;
         }
+        disk::sync_directories(destination.parent().unwrap(), &self.root)?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let previous = Self::move_identity(&tx, movement)?;
+        tx.execute(
+            "DELETE FROM document_moves WHERE doc=?",
+            [&movement.document],
+        )?;
+        tx.commit()?;
         drop(db);
-        drop(r);
         self.permissions.invalidate();
         if let Some(previous) = previous {
             self.close_document(&previous);
+        }
+        Ok(true)
+    }
+
+    fn pending_file_moves(&self, path: Option<&str>) -> Result<Vec<FileMove>> {
+        let movements = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT doc,source,destination,device,inode,born FROM document_moves
+                WHERE ?1 IS NULL OR source=?1 OR destination=?1 ORDER BY doc",
+            )?
+            .query_map([path], |row| {
+                Ok(FileMove {
+                    document: row.get(0)?,
+                    source: row.get(1)?,
+                    destination: row.get(2)?,
+                    device: row.get(3)?,
+                    inode: row.get(4)?,
+                    born: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(movements)
+    }
+
+    fn finish_pending_path(&self, path: &str) -> Result<()> {
+        for movement in self.pending_file_moves(Some(path))? {
+            self.finish_file_move(&movement)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn recover_file_operations(&self) -> Result<()> {
+        let _files = self.document_files.lock().unwrap();
+        for movement in self.pending_file_moves(None)? {
+            if let Err(error) = self.finish_file_move(&movement) {
+                // A missing external file cannot justify deleting saved state
+                // or stopping recovery of every other document in the folder.
+                tracing::error!(
+                    document = movement.document,
+                    "Interrupted rename needs owner recovery: {error}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn retry_file_operations(&self) -> Result<()> {
+        let Ok(_files) = self.document_files.try_lock() else {
+            return Ok(());
+        };
+        for movement in self.pending_file_moves(None)? {
+            if let Err(error) = self.finish_file_move(&movement) {
+                // Startup reports unresolved operations at error level. A
+                // persistent external conflict must not flood logs each pass.
+                tracing::debug!(
+                    document = movement.document,
+                    "Rename still pending: {error}"
+                );
+            }
         }
         Ok(())
     }
@@ -428,10 +657,13 @@ impl Store {
             .db
             .lock()
             .unwrap()
-            .prepare("SELECT id,path FROM docs WHERE active=1")?
+            .prepare(
+                "SELECT id,path FROM docs WHERE active=1
+                AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=docs.id)",
+            )?
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut missing = rows
+        let missing = rows
             .into_iter()
             .filter_map(|(id, path)| {
                 let full = self.safe(&path, false).ok()?;
@@ -441,41 +673,60 @@ impl Store {
                 }
             })
             .collect::<Vec<_>>();
-        // Do not hold the database while taking a room lock: persistence takes
-        // them in the reverse order. Preserve accepted edits before retirement.
-        for (id, _) in &missing {
-            let room = self.rooms.lock().unwrap().get(id).cloned();
-            if let Some(room) = room {
-                let room = room.lock().unwrap();
-                let source = room_text(&room);
-                if room.save.needs_projection()
-                    || room.save.interrupted()
-                    || source != room.save.source()
-                {
-                    self.snapshot(&self.doc(id)?, &source, true)?;
-                }
-            }
-        }
-        if !self.root_identity.matches(&self.root) {
-            return Ok(());
-        }
-        missing.retain(|(_, full)| {
-            fs::metadata(full).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-        });
-        let mut db = self.db.lock().unwrap();
-        let tx = db.transaction()?;
-        for (id, _) in &missing {
-            retire(&tx, id)?;
-        }
-        tx.commit()?;
-        drop(db);
-        if !missing.is_empty() {
-            self.permissions.invalidate();
-        }
-        for (id, _) in missing {
-            self.close_document(&id);
+        for (id, full) in missing {
+            self.retire_missing_identity(&id, &full)?;
         }
         Ok(())
+    }
+
+    /// Shared by intentional path reuse and external-file retirement. Preserve
+    /// the final accepted room before revoking identity, with one lock order.
+    fn retire_missing_identity(&self, id: &str, path: &Path) -> Result<bool> {
+        let room = self.rooms.lock().unwrap().get(id).cloned();
+        let mut live = if let Some(room) = &room {
+            // A busy missing file must not delay unrelated documents' saves.
+            let Ok(live) = room.try_lock() else {
+                return Ok(false);
+            };
+            Some(live)
+        } else {
+            None
+        };
+        let missing = || {
+            self.root_identity.matches(&self.root)
+                && fs::metadata(path)
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        };
+        if !missing() {
+            return Ok(false);
+        }
+        if let Some(room) = live.as_mut() {
+            // A failed comment/restore transaction may still be waiting in the
+            // engine. Never evict that buffer merely because its file moved.
+            let document = self.doc(id)?;
+            room.ensure_committed(self, &document)?;
+            let source = room_text(room);
+            if room.engine.needs_projection()
+                || room.engine.interrupted()
+                || source != room.engine.source()
+            {
+                self.snapshot(&document, &source, true)?;
+            }
+        }
+        if !missing() {
+            return Ok(false);
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        retire(&tx, id)?;
+        tx.commit()?;
+        drop(db);
+        self.permissions.invalidate();
+        // Cache operations acquire map -> room. Drop the guard before removing
+        // it from that map; stale commands reject the now-inactive identity.
+        drop(live);
+        self.close_document(id);
+        Ok(true)
     }
 }
 
@@ -651,6 +902,343 @@ mod tests {
         assert!(s.root.join("a.md").is_file());
         assert!(!s.root.join("b.md").exists());
         assert_eq!(s.doc(&a.id).unwrap().path, "a.md");
+    }
+    #[test]
+    fn failed_creation_retains_the_file_for_private_recovery_and_desktop_edits() {
+        let (_directory, s) = store();
+        s.db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_create BEFORE INSERT ON docs
+                BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;",
+            )
+            .unwrap();
+        assert!(s.create_document("recover.md").is_err());
+        let path = s.root.join("recover.md");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# recover\n\n");
+        fs::write(&path, "Desktop text added after the failed create").unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_create")
+            .unwrap();
+        let discovered = s.index_document("recover.md").unwrap();
+        assert_eq!(discovered.permission, "private");
+        assert!(discovered.token.is_none());
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "Desktop text added after the failed create"
+        );
+    }
+    #[test]
+    fn failed_path_reuse_cannot_revive_the_previous_share_on_discovery() {
+        let (directory, s) = store();
+        let old = s.create_document("reused.md").unwrap();
+        share(&s, &old.id);
+        let moved = directory.path().join("intentional-move.md");
+        fs::rename(s.root.join("reused.md"), &moved).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_create BEFORE INSERT ON docs
+                BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;",
+            )
+            .unwrap();
+        assert!(s.create_document("reused.md").is_err());
+        assert!(s.doc(&old.id).is_err());
+        s.db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_create")
+            .unwrap();
+        let discovered = s.index_document("reused.md").unwrap();
+        assert_ne!(discovered.id, old.id);
+        assert_eq!(discovered.permission, "private");
+        assert!(discovered.token.is_none());
+        assert_eq!(fs::read_to_string(moved).unwrap(), "# reused\n\n");
+    }
+    fn interrupted_move(s: &Store, document: &Document, destination: &str) {
+        let metadata = fs::metadata(s.root.join(&document.path)).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO document_moves(doc,source,destination,device,inode,born) VALUES(?,?,?,?,?,?)",
+                params![
+                    document.id,
+                    document.path,
+                    destination,
+                    metadata.dev().to_string(),
+                    metadata.ino().to_string(),
+                    FileMove::birth(&metadata)
+                ],
+            )
+            .unwrap();
+    }
+    fn reopen(s: App) -> App {
+        let root = s.root.clone();
+        let data = s.data.clone();
+        drop(s);
+        let s = Store::open(root, data, "http://localhost".into()).unwrap();
+        s.recover_file_operations().unwrap();
+        s
+    }
+    #[test]
+    fn rename_recovery_preserves_identity_content_and_history_at_every_commit_boundary() {
+        for stage in 0..3 {
+            let (_dir, s) = store();
+            let document = s.create_document("Nested/original.md").unwrap();
+            share(&s, &document.id);
+            let room = s.room(&document).unwrap();
+            let frame = append_frame(&room, "Accepted browser text");
+            process_frame(
+                &s,
+                &document,
+                &room,
+                &frame,
+                true,
+                true,
+                &mut Peer::default(),
+            )
+            .unwrap();
+            s.persist(&document, &mut room.lock().unwrap()).unwrap();
+            let source = fs::read_to_string(s.root.join(&document.path)).unwrap();
+            s.snapshot(&document, &source, true).unwrap();
+            drop(room);
+            interrupted_move(&s, &document, "Nested/renamed.md");
+            if stage >= 1 {
+                disk::rename_new(
+                    &s.root.join(&document.path),
+                    &s.root.join("Nested/renamed.md"),
+                )
+                .unwrap();
+            }
+            if stage >= 2 {
+                disk::sync_directories(&s.root.join("Nested"), &s.root).unwrap();
+            }
+            let s = reopen(s);
+            let recovered = s.doc(&document.id).unwrap();
+            assert_eq!(recovered.path, "Nested/renamed.md");
+            assert_eq!(recovered.token.as_deref(), Some("old-link"));
+            assert_eq!(
+                fs::read_to_string(s.root.join(&recovered.path)).unwrap(),
+                source
+            );
+            assert!(!s.root.join("Nested/original.md").exists());
+            assert_eq!(
+                s.index_document("Nested/renamed.md").unwrap().id,
+                document.id
+            );
+            let db = s.db.lock().unwrap();
+            let recovery: String = db
+                .query_row(
+                    "SELECT content FROM revisions WHERE doc=? AND kind='recovery'",
+                    [&document.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(recovery, source);
+            let pending: i64 = db
+                .query_row("SELECT count(*) FROM document_moves", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(pending, 0);
+        }
+    }
+    #[test]
+    fn interrupted_rename_never_overwrites_a_later_destination() {
+        let (_dir, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        share(&s, &document.id);
+        interrupted_move(&s, &document, "other.md");
+        fs::write(s.root.join("other.md"), "Unrelated desktop file").unwrap();
+        let s = reopen(s);
+        assert_eq!(s.doc(&document.id).unwrap().path, "original.md");
+        assert_eq!(
+            s.doc(&document.id).unwrap().token.as_deref(),
+            Some("old-link")
+        );
+        assert_eq!(
+            fs::read_to_string(s.root.join("original.md")).unwrap(),
+            "# original\n\n"
+        );
+        assert_eq!(
+            fs::read_to_string(s.root.join("other.md")).unwrap(),
+            "Unrelated desktop file"
+        );
+        let pending: i64 =
+            s.db.lock()
+                .unwrap()
+                .query_row("SELECT count(*) FROM document_moves", [], |row| row.get(0))
+                .unwrap();
+        assert_eq!(pending, 0);
+    }
+    #[test]
+    fn rename_recovery_rejects_an_unrelated_file_with_a_reused_inode() {
+        let (_directory, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        interrupted_move(&s, &document, "renamed.md");
+        // Model inode reuse: device/inode still match, creation identity does not.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE document_moves SET born='another-file-creation' WHERE doc=?",
+                [&document.id],
+            )
+            .unwrap();
+        let s = reopen(s);
+        assert!(s.root.join("original.md").is_file());
+        assert!(!s.root.join("renamed.md").exists());
+        assert_eq!(s.doc(&document.id).unwrap().path, "original.md");
+        s.create_document("unrelated.md").unwrap();
+    }
+    #[test]
+    fn completed_filesystem_rename_does_not_delete_a_new_file_at_the_old_path() {
+        let (_dir, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        share(&s, &document.id);
+        interrupted_move(&s, &document, "renamed.md");
+        disk::rename_new(&s.root.join("original.md"), &s.root.join("renamed.md")).unwrap();
+        fs::write(s.root.join("original.md"), "New desktop document").unwrap();
+        let s = reopen(s);
+        let recovered = s.doc(&document.id).unwrap();
+        assert_eq!(recovered.path, "renamed.md");
+        assert_eq!(recovered.token.as_deref(), Some("old-link"));
+        assert_eq!(
+            fs::read_to_string(s.root.join("original.md")).unwrap(),
+            "New desktop document"
+        );
+        let replacement = s.index_document("original.md").unwrap();
+        assert_ne!(replacement.id, document.id);
+        assert_eq!(replacement.permission, "private");
+    }
+    #[test]
+    fn unfinished_rename_cannot_import_an_unrelated_recreation_of_its_old_path() {
+        let (_directory, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        let room = s.room(&document).unwrap();
+        room.lock().unwrap().flush_to_disk(&s, &document).unwrap();
+        interrupted_move(&s, &document, "renamed.md");
+        disk::rename_new(&s.root.join("original.md"), &s.root.join("renamed.md")).unwrap();
+        fs::write(s.root.join("original.md"), "An unrelated new document").unwrap();
+        {
+            let mut room = room.lock().unwrap();
+            let result = room.reconcile(&s, &document);
+            assert!(!matches!(result, Ok(true)));
+            assert_eq!(room_text(&room), "# original\n\n");
+        }
+        assert_eq!(
+            fs::read_to_string(s.root.join("renamed.md")).unwrap(),
+            "# original\n\n"
+        );
+        assert_eq!(
+            fs::read_to_string(s.root.join("original.md")).unwrap(),
+            "An unrelated new document"
+        );
+        s.recover_file_operations().unwrap();
+        assert_eq!(s.doc(&document.id).unwrap().path, "renamed.md");
+        let replacement = s.index_document("original.md").unwrap();
+        assert_ne!(replacement.id, document.id);
+        assert_eq!(replacement.permission, "private");
+    }
+    #[test]
+    fn pending_renames_retry_without_restart_or_waiting_for_a_busy_file_operation() {
+        let (_directory, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        interrupted_move(&s, &document, "renamed.md");
+        let busy = s.document_files.lock().unwrap();
+        s.retry_file_operations().unwrap();
+        assert!(s.root.join("original.md").is_file());
+        assert!(!s.root.join("renamed.md").exists());
+        drop(busy);
+        s.retry_file_operations().unwrap();
+        assert_eq!(s.doc(&document.id).unwrap().path, "renamed.md");
+        assert_eq!(
+            fs::read_to_string(s.root.join("renamed.md")).unwrap(),
+            "# original\n\n"
+        );
+    }
+    #[test]
+    fn an_unresolvable_rename_preserves_recovery_without_blocking_other_documents() {
+        let (directory, s) = store();
+        let document = s.create_document("original.md").unwrap();
+        let room = s.room(&document).unwrap();
+        let frame = append_frame(&room, "Accepted text remains recoverable");
+        process_frame(
+            &s,
+            &document,
+            &room,
+            &frame,
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        s.persist(&document, &mut room.lock().unwrap()).unwrap();
+        drop(room);
+        interrupted_move(&s, &document, "renamed.md");
+        fs::rename(
+            s.root.join("original.md"),
+            directory.path().join("moved-outside.md"),
+        )
+        .unwrap();
+        let s = reopen(s);
+        s.retire_missing_documents().unwrap();
+        assert!(s.doc(&document.id).is_ok());
+        assert!(s.room(&document).is_err());
+        let state: Vec<u8> =
+            s.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT disk_state FROM docs WHERE id=?",
+                    [&document.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        let recovered = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        recovered
+            .transact_mut()
+            .apply_update(security::decode_update(&state).unwrap())
+            .unwrap();
+        assert!(
+            recovered
+                .get_or_insert_text("content")
+                .get_string(&recovered.transact())
+                .contains("Accepted text remains recoverable")
+        );
+        s.create_document("unaffected.md").unwrap();
+        assert!(s.index_document("unaffected.md").is_ok());
+        assert!(!s.root.join("original.md").exists());
+        assert!(!s.root.join("renamed.md").exists());
+    }
+    #[test]
+    fn retirement_skips_busy_rooms_then_snapshots_their_final_accepted_edits() {
+        let (_directory, s) = store();
+        let document = s.create_document("removed.md").unwrap();
+        let room = s.room(&document).unwrap();
+        let frame = append_frame(&room, "The pending browser edit");
+        process_frame(
+            &s,
+            &document,
+            &room,
+            &frame,
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        fs::remove_file(s.root.join("removed.md")).unwrap();
+        let live = room.lock().unwrap();
+        s.retire_missing_documents().unwrap();
+        assert!(s.doc(&document.id).is_ok());
+        let expected = room_text(&live);
+        drop(live);
+        s.retire_missing_documents().unwrap();
+        assert!(s.doc(&document.id).is_err());
+        let recovery: String = s.db.lock().unwrap().query_row(
+            "SELECT content FROM revisions WHERE doc=? AND kind='recovery' ORDER BY rowid DESC LIMIT 1",
+            [&document.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recovery, expected);
     }
     #[test]
     fn creating_or_renaming_never_overwrites_a_file() {

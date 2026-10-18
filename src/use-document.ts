@@ -14,6 +14,7 @@ import { documentSession } from "./document-session";
 import { normalizePresence } from "./presence";
 import { sharedToken, type Document as Doc } from "./model";
 type Session = ReturnType<typeof documentSession>;
+type Projection = "synced" | "pending" | "blocked" | "conflict";
 
 export function useDocument(
   id: string | null,
@@ -83,8 +84,13 @@ export function useDocument(
             connect: false,
           },
         );
-        let serverWaiting = !!d.diskPending;
-        let serverSaving = !!d.diskSaving;
+        let projection: Projection = d.diskConflict
+          ? "conflict"
+          : d.diskPending
+            ? "blocked"
+            : d.diskSaving
+              ? "pending"
+              : "synced";
         let receiptId = "";
         let resetting = false;
         let transientWarning = "";
@@ -112,21 +118,24 @@ export function useDocument(
               notifiedWarning = warning;
               setStorageWarning(warning);
             }
-            const status = drafts.pending
-              ? provider.wsconnected
-                ? serverWaiting
-                  ? "Waiting for desktop file"
-                  : "Saving…"
-                : drafts.stored
-                  ? "Offline · draft saved here"
-                  : "Saving draft…"
-              : serverWaiting
-                ? "Waiting for desktop file"
-                : provider.synced
-                  ? serverSaving
-                    ? "Saving…"
-                    : "Saved to disk"
-                  : "Connecting";
+            const status =
+              projection === "conflict"
+                ? "Recovery needed"
+                : drafts.pending
+                  ? provider.wsconnected
+                    ? projection === "blocked"
+                      ? "Waiting for desktop file"
+                      : "Saving…"
+                    : drafts.stored
+                      ? "Offline · draft saved here"
+                      : "Saving draft…"
+                  : projection === "blocked"
+                    ? "Waiting for desktop file"
+                    : provider.synced
+                      ? projection === "pending"
+                        ? "Saving…"
+                        : "Saved to disk"
+                      : "Connecting";
             if (status !== notifiedStatus) {
               notifiedStatus = status;
               setStatus(status);
@@ -142,7 +151,7 @@ export function useDocument(
           },
         );
         recoveryJournal.current = drafts;
-        await drafts.restore(d.edit, {
+        await drafts.restore(d.edit && projection !== "conflict", {
           lineEndingMigrated: d.lineEndingMigrated,
           collaborationEpoch: d.collaborationEpoch,
         });
@@ -153,7 +162,12 @@ export function useDocument(
           return;
         }
         drafts.bind(provider, (id) => {
-          if (!provider.wsconnected || !provider.ws) return false;
+          if (
+            projection === "conflict" ||
+            !provider.wsconnected ||
+            !provider.ws
+          )
+            return false;
           receiptId = id;
           const encoder = createEncoder();
           writeVarUint(encoder, 124);
@@ -161,10 +175,10 @@ export function useDocument(
           provider.ws.send(toUint8Array(encoder));
           return true;
         });
-        setDoc(d);
+        setDoc(projection === "conflict" ? { ...d, edit: false } : d);
         document.title = `${d.path.split("/").pop()?.replace(/\.md$/, "")} · locdoc`;
         const rejectDraft = (message: string) => {
-          if (!active || resetting) return;
+          if (!active || resetting || projection === "conflict") return;
           resetting = true;
           clearTimeout(retryTimer);
           provider.disconnect();
@@ -187,6 +201,10 @@ export function useDocument(
         provider.messageHandlers[120] = (_encoder, decoder) => {
           if (!active || resetting) return;
           transientWarning = readVarString(decoder);
+          if (projection === "conflict") {
+            updateStatus();
+            return;
+          }
           provider.disconnect();
           drafts.disconnected();
           clearTimeout(retryTimer);
@@ -197,6 +215,7 @@ export function useDocument(
           updateStatus();
         };
         provider.messageHandlers[127] = (_encoder, decoder) => {
+          if (projection === "conflict") return;
           if (hasContent(decoder)) {
             const id = readVarString(decoder);
             if (id === receiptId) {
@@ -214,8 +233,18 @@ export function useDocument(
         };
         provider.messageHandlers[121] = (_encoder, decoder) => {
           const state = readVarString(decoder);
-          serverWaiting = state === "1";
-          serverSaving = state !== "0";
+          if (state === "3") {
+            projection = "conflict";
+            clearTimeout(retryTimer);
+            drafts.disconnected();
+            if (active)
+              setDoc((doc) =>
+                doc ? { ...doc, edit: false, diskConflict: true } : doc,
+              );
+          } else if (projection !== "conflict") {
+            projection =
+              state === "1" ? "blocked" : state === "0" ? "synced" : "pending";
+          }
           updateStatus();
         };
         provider.messageHandlers[123] = (_encoder, decoder) => {
@@ -238,12 +267,20 @@ export function useDocument(
         });
         provider.on("connection-close", () => {
           if (resetting) return;
-          serverWaiting = false;
+          if (projection === "blocked") projection = "pending";
           drafts.disconnected();
           if (active && !transientWarning)
             api<Doc>(`/api/docs/${id}${accessQuery}`)
               .then((d) => {
-                if (active && !resetting) setDoc(d);
+                if (active && !resetting) {
+                  if (d.diskConflict) projection = "conflict";
+                  setDoc(
+                    projection === "conflict"
+                      ? { ...d, edit: false, diskConflict: true }
+                      : d,
+                  );
+                  updateStatus();
+                }
               })
               .catch((e) => {
                 if (

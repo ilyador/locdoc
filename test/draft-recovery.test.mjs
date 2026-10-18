@@ -96,6 +96,61 @@ test("blocked IndexedDB never blocks a viewer and keeps editable drafts guarded 
   assert.equal(hasUnstoredDrafts(), false);
 });
 
+test("an asynchronously aborted draft transaction preserves the last durable draft and retries the latest edit", async () => {
+  const accepted = seed(),
+    edited = clone(accepted),
+    key = crypto.randomUUID(),
+    journal = new DraftJournal(edited, key);
+  journal.bind("server");
+  edited.getText("content").insert(13, " previous");
+  await journal.flush();
+  const originalPut = IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put = function (record, ...args) {
+    const request = originalPut.call(this, record, ...args);
+    if (record.key === key)
+      request.addEventListener("success", () => this.transaction.abort(), {
+        once: true,
+      });
+    return request;
+  };
+  const beforeRetry = clone(accepted),
+    previous = new DraftJournal(beforeRetry, key);
+  const afterRetry = clone(accepted),
+    latest = new DraftJournal(afterRetry, key);
+  try {
+    edited
+      .getText("content")
+      .insert(edited.getText("content").length, " latest");
+    await assert.rejects(journal.flush(), /Draft storage failed/);
+    assert.equal(journal.pending, true);
+    assert.equal(journal.stored, false);
+    assert.equal(hasUnstoredDrafts(), true);
+    await previous.restore(true);
+    assert.equal(
+      beforeRetry.getText("content").toString(),
+      "Accepted text previous",
+    );
+    IDBObjectStore.prototype.put = originalPut;
+    await journal.flush();
+    await latest.restore(true);
+    assert.equal(
+      afterRetry.getText("content").toString(),
+      "Accepted text previous latest",
+    );
+    await journal.acknowledge(journal.checkpoint());
+    assert.equal((await records(key)).length, 0);
+  } finally {
+    IDBObjectStore.prototype.put = originalPut;
+    journal.dispose();
+    previous.dispose();
+    latest.dispose();
+    edited.destroy();
+    beforeRetry.destroy();
+    afterRetry.destroy();
+    accepted.destroy();
+  }
+});
+
 test("a rejected edit is quarantined atomically, never replays, and does not block later valid edits", async () => {
   const accepted = seed(),
     edited = clone(accepted),

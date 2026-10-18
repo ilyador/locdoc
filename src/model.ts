@@ -22,6 +22,7 @@ export type Document = {
   state: string;
   diskPending?: boolean;
   diskSaving?: boolean;
+  diskConflict?: boolean;
   lineEndingMigrated?: boolean;
   collaborationEpoch?: string;
   mediaToken?: string | null;

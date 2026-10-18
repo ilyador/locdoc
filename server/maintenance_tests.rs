@@ -164,6 +164,91 @@ fn corrupt_state_requires_explicit_disk_choice_and_archives_every_opaque_byte() 
 }
 
 #[test]
+fn recovery_archives_live_comment_metadata_after_a_failed_sqlite_commit() {
+    let (_directory, store, document) = fixture("Original text\n");
+    let room = store.room(&document).unwrap();
+    let mut room = room.lock().unwrap();
+    room.flush_to_disk(&store, &document).unwrap();
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_comment BEFORE INSERT ON comments
+            BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;",
+        )
+        .unwrap();
+    let metadata = json!({"id":"pending-thread","guest":"owner","name":"Test writer",
+        "body":"Uncommitted comment","created":42,"resolved":false,"replies":[]});
+    let result = room.edit(&store, &document, |room| {
+        let text = room.awareness.doc().get_or_insert_text("content");
+        let length = text.len(&room.awareness.doc().transact());
+        text.insert(
+            &mut room.awareness.doc().transact_mut(),
+            length,
+            "\n[[comment(Test writer): Uncommitted comment]]\n",
+        );
+        vec![metadata.clone()]
+    });
+    assert!(result.is_err());
+    let bundle = capture(
+        &store,
+        &document,
+        Err("File unavailable".into()),
+        Some(&room),
+        true,
+    )
+    .unwrap();
+    assert_eq!(bundle.pending_comments, vec![metadata.clone()]);
+    let saved = archive(&store, &bundle).unwrap();
+    let saved: Value = serde_json::from_slice(&fs::read(store.data.join(saved)).unwrap()).unwrap();
+    assert_eq!(saved["pendingComments"], json!([metadata]));
+    let recovered = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    recovered
+        .transact_mut()
+        .apply_update(
+            security::decode_update(&BASE64.decode(saved["liveState"].as_str().unwrap()).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(
+        recovered
+            .get_or_insert_text("content")
+            .get_string(&recovered.transact())
+            .contains("[[comment(Test writer): Uncommitted comment]]")
+    );
+    drop(room);
+    fs::remove_file(store.root.join("test.md")).unwrap();
+    assert!(store.retire_missing_documents().is_err());
+    assert!(store.doc(&document.id).is_ok());
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_comment")
+        .unwrap();
+    store.retire_missing_documents().unwrap();
+    assert!(store.doc(&document.id).is_err());
+    let preserved: String = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT data FROM comments WHERE id='pending-thread'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&preserved).unwrap()["body"],
+        "Uncommitted comment"
+    );
+}
+
+#[test]
 fn corrupt_client_ids_in_saved_state_baseline_or_journal_fail_safely_and_allow_disk_rebuild() {
     fn var(out: &mut Vec<u8>, mut value: u64) {
         while value >= 128 {
@@ -459,13 +544,21 @@ fn recovery_archives_exact_projection_preimage_and_rebuild_clears_it() {
     store.rooms.lock().unwrap().remove(&document.id);
     drop(room);
     let before = vec![b'x', 0xf0, 0x9f];
+    let target_state: Vec<u8> = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT state FROM docs WHERE id=?", [&document.id], |row| {
+            row.get(0)
+        })
+        .unwrap();
     store
         .db
         .lock()
         .unwrap()
         .execute(
-            "UPDATE docs SET write_before_hash=?,write_before=? WHERE id=?",
-            params!["exact-preimage-hash", before, document.id],
+            "UPDATE docs SET write_before_hash=?,write_before=?,write_state=? WHERE id=?",
+            params!["exact-preimage-hash", before, target_state, document.id],
         )
         .unwrap();
     let bytes = fs::read(store.root.join("test.md")).unwrap();
@@ -475,18 +568,212 @@ fn recovery_archives_exact_projection_preimage_and_rebuild_clears_it() {
         Some("exact-preimage-hash")
     );
     assert_eq!(BASE64.decode(bundle.write_before.unwrap()).unwrap(), before);
+    assert_eq!(
+        BASE64.decode(bundle.write_state.unwrap()).unwrap(),
+        target_state
+    );
     rebuild_document(&store, &document.id, RebuildSource::Disk).unwrap();
     let cleared: bool = store
         .db
         .lock()
         .unwrap()
         .query_row(
-            "SELECT write_before_hash IS NULL AND write_before IS NULL FROM docs WHERE id=?",
+            "SELECT write_before_hash IS NULL AND write_before IS NULL AND write_state IS NULL FROM docs WHERE id=?",
             [&document.id],
             |row| row.get(0),
         )
         .unwrap();
     assert!(cleared);
+}
+
+#[test]
+fn explicit_conflict_recovery_archives_both_branches_before_applying_the_owner_choice() {
+    for choice in [RebuildSource::Durable, RebuildSource::Disk] {
+        let accepted = "Accepted browser branch\n";
+        let desktop = "Conflicting desktop branch\n";
+        let (_directory, store, document) = fixture(accepted);
+        let room = store.room(&document).unwrap();
+        room.lock()
+            .unwrap()
+            .flush_to_disk(&store, &document)
+            .unwrap();
+        store.rooms.lock().unwrap().remove(&document.id);
+        drop(room);
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET write_intent=2,write_target=?,write_state=state WHERE id=?",
+                params![accepted.as_bytes(), document.id],
+            )
+            .unwrap();
+        fs::write(store.root.join("test.md"), desktop).unwrap();
+        let result = rebuild_document(&store, &document.id, choice).unwrap();
+        let bundle: Value =
+            serde_json::from_slice(&fs::read(store.data.join(result.archive)).unwrap()).unwrap();
+        assert_eq!(bundle["writeIntent"], true);
+        assert_eq!(bundle["writeConflict"], true);
+        assert_eq!(bundle["filesystemSource"], desktop);
+        let original = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        original
+            .transact_mut()
+            .apply_update(
+                security::decode_update(&BASE64.decode(bundle["state"].as_str().unwrap()).unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            original
+                .get_or_insert_text("content")
+                .get_string(&original.transact()),
+            accepted
+        );
+        let chosen = if matches!(choice, RebuildSource::Durable) {
+            accepted
+        } else {
+            desktop
+        };
+        assert_eq!(
+            fs::read_to_string(store.root.join("test.md")).unwrap(),
+            chosen
+        );
+        assert!(!result.collaboration_epoch.is_empty());
+        let room = store.room(&document).unwrap();
+        assert_eq!(room_text(&room.lock().unwrap()), chosen);
+        assert!(!room.lock().unwrap().conflicted());
+    }
+}
+
+#[test]
+fn accepted_conflict_recovery_preserves_and_repairs_an_incomplete_utf8_file() {
+    let (_directory, store, document) = fixture("Accepted source\r\n");
+    let room = store.room(&document).unwrap();
+    room.lock()
+        .unwrap()
+        .flush_to_disk(&store, &document)
+        .unwrap();
+    store.rooms.lock().unwrap().remove(&document.id);
+    drop(room);
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET write_intent=2,write_target=?,write_state=state WHERE id=?",
+            params![b"Accepted source\r\n".as_slice(), document.id],
+        )
+        .unwrap();
+    let torn = [b'A', 0xf0, 0x9f];
+    fs::write(store.root.join("test.md"), torn).unwrap();
+    let result = rebuild_document(&store, &document.id, RebuildSource::Durable).unwrap();
+    let bundle: Value =
+        serde_json::from_slice(&fs::read(store.data.join(result.archive)).unwrap()).unwrap();
+    assert_eq!(
+        BASE64
+            .decode(bundle["filesystemBytes"].as_str().unwrap())
+            .unwrap(),
+        torn
+    );
+    assert!(bundle["filesystemSource"].is_null());
+    assert_eq!(
+        fs::read(store.root.join("test.md")).unwrap(),
+        b"Accepted source\r\n"
+    );
+}
+
+#[test]
+fn failed_explicit_accepted_recovery_keeps_both_branches_and_conflict_across_restart() {
+    let accepted = "Accepted browser branch\n";
+    let desktop = "Original conflicting desktop branch\n";
+    let (directory, store, document) = fixture(accepted);
+    let room = store.room(&document).unwrap();
+    room.lock()
+        .unwrap()
+        .flush_to_disk(&store, &document)
+        .unwrap();
+    store.rooms.lock().unwrap().remove(&document.id);
+    drop(room);
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET write_intent=2,write_target=?,write_state=state WHERE id=?",
+            params![accepted.as_bytes(), document.id],
+        )
+        .unwrap();
+    fs::write(store.root.join("test.md"), desktop).unwrap();
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_recovery BEFORE UPDATE OF collaboration_epoch ON docs
+            BEGIN SELECT RAISE(ABORT,'fixture final recovery failure'); END;",
+        )
+        .unwrap();
+    assert!(rebuild_document(&store, &document.id, RebuildSource::Durable).is_err());
+    assert_eq!(
+        fs::read_to_string(store.root.join("test.md")).unwrap(),
+        accepted
+    );
+    let original_archive = fs::read_dir(store.data.join("recovery"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .unwrap();
+    let archived: Value = serde_json::from_slice(&fs::read(&original_archive).unwrap()).unwrap();
+    assert_eq!(archived["filesystemSource"], desktop);
+    assert_eq!(archived["writeConflict"], true);
+    let (intent, epoch): (i64, String) = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_intent,collaboration_epoch FROM docs WHERE id=?",
+            [&document.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(intent, 2);
+    assert!(epoch.is_empty());
+    drop(store);
+    let reopened = Store::open(
+        directory.path().join("docs"),
+        directory.path().join("state"),
+        "http://localhost:3477".into(),
+    )
+    .unwrap();
+    reopened.recover_pending().unwrap();
+    let room = reopened.room(&document).unwrap();
+    assert!(room.lock().unwrap().conflicted());
+    assert_eq!(room_text(&room.lock().unwrap()), accepted);
+    assert_eq!(
+        fs::read_to_string(reopened.root.join("test.md")).unwrap(),
+        accepted
+    );
+    drop(room);
+    reopened
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_recovery")
+        .unwrap();
+    let result = rebuild_document(&reopened, &document.id, RebuildSource::Durable).unwrap();
+    assert!(!result.collaboration_epoch.is_empty());
+    let preserved: Value = serde_json::from_slice(&fs::read(original_archive).unwrap()).unwrap();
+    assert_eq!(preserved["filesystemSource"], desktop);
+    assert_eq!(
+        room_text(&reopened.room(&document).unwrap().lock().unwrap()),
+        accepted
+    );
 }
 
 #[tokio::test]
@@ -502,7 +789,7 @@ async fn removed_document_recovery_keeps_pending_edits_private_without_reading_a
             0,
             "Accepted pending edit. ",
         );
-        room.save.edited();
+        room.engine.edited();
         store.store_room(&document, &mut room).unwrap();
     }
     store

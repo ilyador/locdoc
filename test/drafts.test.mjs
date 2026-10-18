@@ -213,6 +213,104 @@ test("an upload keeps its originating session alive after navigation", async () 
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(destroyed, true);
 });
+test("retaining a session while its final draft flush is pending cancels retirement", async () => {
+  const doc = seed(),
+    baseline = clone(doc),
+    key = crypto.randomUUID(),
+    drafts = journal(doc, key);
+  let destroyed = false;
+  const retired = Promise.withResolvers();
+  const provider = {
+    wsconnected: false,
+    awareness: { setLocalState() {} },
+    destroy() {
+      destroyed = true;
+      retired.resolve();
+    },
+  };
+  const flushed = Promise.withResolvers();
+  const continueFlush = Promise.withResolvers();
+  const realFlush = drafts.flush.bind(drafts);
+  drafts.flush = async () => {
+    await realFlush();
+    flushed.resolve();
+    await continueFlush.promise;
+  };
+  const session = documentSession("origin", doc, provider, drafts);
+  doc.getText("content").insert(5, " before navigation");
+  session.leave();
+  await flushed.promise;
+  const release = session.retain();
+  continueFlush.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    destroyed,
+    false,
+    "a successful retain must keep the document and its outbox alive",
+  );
+  insertAttachment(doc, captureInsertion(doc), " after upload");
+  await drafts.flush();
+  release();
+  await retired.promise;
+  assert.equal(destroyed, true);
+  const recovered = new DraftJournal(baseline, key);
+  try {
+    await recovered.restore(true);
+    assert.equal(
+      baseline.getText("content").toString(),
+      "Hello before navigation after upload",
+    );
+    await recovered.acknowledge(recovered.checkpoint());
+  } finally {
+    recovered.dispose();
+    baseline.destroy();
+  }
+});
+test("session retirement persists edits that arrive during the final draft transaction", async () => {
+  const doc = seed(),
+    baseline = clone(doc),
+    key = crypto.randomUUID(),
+    drafts = journal(doc, key);
+  let destroyed = false;
+  const retired = Promise.withResolvers();
+  const provider = {
+    wsconnected: false,
+    awareness: { setLocalState() {} },
+    destroy() {
+      destroyed = true;
+      retired.resolve();
+    },
+  };
+  const flushed = Promise.withResolvers();
+  const continueFlush = Promise.withResolvers();
+  const realFlush = drafts.flush.bind(drafts);
+  drafts.flush = async () => {
+    await realFlush();
+    flushed.resolve();
+    await continueFlush.promise;
+  };
+  const session = documentSession("origin", doc, provider, drafts);
+  doc.getText("content").insert(5, " first");
+  session.leave();
+  await flushed.promise;
+  doc.getText("content").insert(doc.getText("content").length, " latest");
+  continueFlush.resolve();
+  await retired.promise;
+  assert.equal(destroyed, true);
+  const recovered = new DraftJournal(baseline, key);
+  try {
+    await recovered.restore(true);
+    assert.equal(
+      baseline.getText("content").toString(),
+      "Hello first latest",
+      "retirement must not mistake an older transaction for the latest draft",
+    );
+    await recovered.acknowledge(recovered.checkpoint());
+  } finally {
+    recovered.dispose();
+    baseline.destroy();
+  }
+});
 test("malformed remote user metadata cannot crash avatars or inject styles", () => {
   for (const value of [
     null,

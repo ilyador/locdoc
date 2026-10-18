@@ -56,8 +56,8 @@ fn accepted_edit(store: &Store, document: &Document, room: &Arc<Mutex<Room>>, so
 
 fn interrupted_projection(store: &Store, document: &Document, room: &Arc<Mutex<Room>>) {
     let mut room = room.lock().unwrap();
-    let intended = text::render(&room_text(&room), room.save.ending());
-    room.save.prepare_write(intended.into_bytes());
+    let intended = text::render(&room_text(&room), room.engine.ending());
+    room.freeze_projection(intended.into_bytes());
     store.store_room(document, &mut room).unwrap();
 }
 
@@ -81,7 +81,7 @@ fn interrupted_projection_uses_its_frozen_target_after_newer_prepend_or_replace(
             let torn = b"Original line and f";
             fs::write(store.root.join(&document.path), torn).unwrap();
             accepted_edit(&store, &document, &room, latest);
-            assert!(room.lock().unwrap().save.interrupted());
+            assert!(room.lock().unwrap().engine.interrupted());
             let store = if restart {
                 drop(room);
                 drop(store);
@@ -108,7 +108,7 @@ fn interrupted_projection_uses_its_frozen_target_after_newer_prepend_or_replace(
             ));
             assert_eq!(fs::read(archived).unwrap(), torn);
             assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
-            assert!(!room.lock().unwrap().save.needs_projection());
+            assert!(!room.lock().unwrap().engine.needs_projection());
         }
     }
 }
@@ -148,7 +148,7 @@ fn a_failed_commit_after_recovering_a_frozen_projection_remains_restart_safe() {
         fs::read_to_string(store.root.join(&document.path)).unwrap(),
         latest
     );
-    assert!(room.lock().unwrap().save.needs_projection());
+    assert!(room.lock().unwrap().engine.needs_projection());
     while let Ok(message) = received.try_recv() {
         assert!(!matches!(
             Message::decode_v1(&message).unwrap(),
@@ -197,5 +197,5 @@ fn a_failed_commit_after_recovering_a_frozen_projection_remains_restart_safe() {
     let room = store.room(&document).unwrap();
     assert_eq!(room_text(&room.lock().unwrap()), latest);
     assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
-    assert!(!room.lock().unwrap().save.needs_projection());
+    assert!(!room.lock().unwrap().engine.needs_projection());
 }

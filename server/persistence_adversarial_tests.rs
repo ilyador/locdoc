@@ -95,7 +95,7 @@ fn accepted_updates_are_durable_before_broadcast_but_receipts_wait_for_projectio
             Message::Custom(122, _)
         ));
     }
-    assert_eq!(room.lock().unwrap().save.receipts.len(), 1);
+    assert_eq!(room.lock().unwrap().engine.receipts.len(), 1);
     store.persist(&document, &mut room.lock().unwrap()).unwrap();
     let mut completed = vec![];
     while let Ok(bytes) = receiver.try_recv() {
@@ -268,11 +268,11 @@ fn legacy_unicode_line_endings_share_migration_ids_with_the_desktop_baseline() {
         {
             let room = room.lock().unwrap();
             assert_eq!(room_text(&room), "X😀one\ntwo\nthree");
-            assert_eq!(room.save.source(), "😀one\ntwo\nthree");
-            let desktop = decoded(room.save.baseline());
-            assert_eq!(source(&desktop), room.save.source());
+            assert_eq!(room.engine.source(), "😀one\ntwo\nthree");
+            let desktop = decoded(room.engine.baseline());
+            assert_eq!(source(&desktop), room.engine.source());
             let vector = desktop.transact().state_vector();
-            apply_text(&desktop, room.save.source(), "😀one\nTWO\nthree");
+            apply_text(&desktop, room.engine.source(), "😀one\nTWO\nthree");
             let diff = desktop.transact().encode_state_as_update_v1(&vector);
             let verifier = decoded(
                 &room
@@ -363,7 +363,7 @@ fn failed_post_fsync_commit_keeps_projection_pending_and_receipts_unacknowledged
         fs::read_to_string(store.root.join("test.md")).unwrap(),
         "Before browser"
     );
-    assert!(room.lock().unwrap().save.needs_projection());
+    assert!(room.lock().unwrap().engine.needs_projection());
     let intent: bool = store
         .db
         .lock()
@@ -391,7 +391,7 @@ fn failed_post_fsync_commit_keeps_projection_pending_and_receipts_unacknowledged
         .execute_batch("DROP TRIGGER fail_baseline;")
         .unwrap();
     assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
-    assert!(!room.lock().unwrap().save.needs_projection());
+    assert!(!room.lock().unwrap().engine.needs_projection());
     let completed = std::iter::from_fn(|| receiver.try_recv().ok())
         .filter_map(|bytes| {
             if let Message::Custom(127, value) = Message::decode_v1(&bytes).unwrap() {
@@ -422,8 +422,8 @@ fn new_browser_edits_preserve_a_blocked_interrupted_write_intent() {
     .unwrap();
     {
         let mut r = room.lock().unwrap();
-        let target = text::render(&room_text(&r), r.save.ending()).into_bytes();
-        r.save.prepare_write(target);
+        let target = text::render(&room_text(&r), r.engine.ending()).into_bytes();
+        r.freeze_projection(target);
         store.store_room(&document, &mut r).unwrap();
     }
     fs::write(store.root.join("test.md"), "Old text f").unwrap();
@@ -442,8 +442,8 @@ fn new_browser_edits_preserve_a_blocked_interrupted_write_intent() {
         &mut peer,
     )
     .unwrap();
-    assert!(room.lock().unwrap().save.interrupted());
-    assert!(room.lock().unwrap().save.waiting());
+    assert!(room.lock().unwrap().engine.interrupted());
+    assert!(room.lock().unwrap().engine.waiting());
     let intent: bool = store
         .db
         .lock()
@@ -464,8 +464,8 @@ fn new_browser_edits_preserve_a_blocked_interrupted_write_intent() {
         fs::read_to_string(store.root.join("test.md")).unwrap(),
         "Old text first second"
     );
-    assert!(!room.lock().unwrap().save.interrupted());
-    assert!(!room.lock().unwrap().save.waiting());
+    assert!(!room.lock().unwrap().engine.interrupted());
+    assert!(!room.lock().unwrap().engine.waiting());
 }
 
 #[test]
@@ -496,11 +496,11 @@ fn bootstrap_cannot_expose_a_desktop_import_that_failed_its_sql_commit() {
     assert_eq!(payload["content"], "Before and desktop");
     // A read retries the rejected journal commit, without bypassing the
     // projection retry cadence. Its status must remain honest until fsync.
-    if room.lock().unwrap().save.needs_projection() {
+    if room.lock().unwrap().engine.needs_projection() {
         assert_eq!(payload["diskSaving"], true);
         store.persist(&document, &mut room.lock().unwrap()).unwrap();
     }
-    assert!(!room.lock().unwrap().save.needs_projection());
+    assert!(!room.lock().unwrap().engine.needs_projection());
 }
 
 #[test]
@@ -520,7 +520,7 @@ fn opening_an_unchanged_synced_document_does_not_rewrite_its_baseline() {
     for _ in 0..3 {
         let payload = document_payload(&store, &headers, &document, &Access::default()).unwrap();
         assert_eq!(payload["content"], "Already fsynced\n");
-        assert!(!room.lock().unwrap().save.needs_projection());
+        assert!(!room.lock().unwrap().engine.needs_projection());
     }
     assert_eq!(
         store.db.lock().unwrap().total_changes(),
@@ -572,7 +572,7 @@ fn unchanged_visible_text_still_commits_new_crdt_identity_before_a_receipt() {
     .encode_v1();
     process_frame(&store, &document, &room, &frame, true, true, &mut peer).unwrap();
     assert_eq!(room_text(&room.lock().unwrap()), "Same source");
-    assert!(room.lock().unwrap().save.needs_projection());
+    assert!(room.lock().unwrap().engine.needs_projection());
     let receipt = uuid::Uuid::new_v4().to_string();
     process_frame(
         &store,
@@ -619,5 +619,5 @@ fn unchanged_visible_text_still_commits_new_crdt_identity_before_a_receipt() {
         decoded(&before).transact().state_vector(),
         decoded(&after).transact().state_vector()
     );
-    assert!(room.lock().unwrap().save.receipts.is_empty());
+    assert!(room.lock().unwrap().engine.receipts.is_empty());
 }

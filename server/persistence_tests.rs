@@ -128,14 +128,13 @@ fn first_mixed_ending_projection_recovers_its_exact_prewrite_bytes_after_a_crash
         let mut room = r.lock().unwrap();
         let target = text::projection(
             room.awareness.doc(),
-            room.save.baseline(),
-            room.save.source(),
+            room.engine.baseline(),
+            room.engine.source(),
             &room_text(&room),
-            room.save.ending(),
+            room.engine.ending(),
         )
         .unwrap();
-        room.save
-            .prepare_observed_write(target.into_bytes(), original.as_bytes());
+        room.freeze_observed_projection(target.into_bytes(), original.as_bytes());
         s.store_room(&d, &mut room).unwrap();
         let (digest, preimage): (String, Option<Vec<u8>>) =
             s.db.lock()
@@ -186,14 +185,13 @@ fn repeated_crashes_preserve_exact_torn_preimages_when_new_edits_retarget_the_wr
         let mut room = r.lock().unwrap();
         let target = text::projection(
             room.awareness.doc(),
-            room.save.baseline(),
-            room.save.source(),
+            room.engine.baseline(),
+            room.engine.source(),
             &room_text(&room),
-            room.save.ending(),
+            room.engine.ending(),
         )
         .unwrap();
-        room.save
-            .prepare_observed_write(target.into_bytes(), original.as_bytes());
+        room.freeze_observed_projection(target.into_bytes(), original.as_bytes());
         s.store_room(&d, &mut room).unwrap();
     }
     let mut first_torn = original.as_bytes().to_vec();
@@ -214,16 +212,15 @@ fn repeated_crashes_preserve_exact_torn_preimages_when_new_edits_retarget_the_wr
         let mut room = r.lock().unwrap();
         expected = text::projection(
             room.awareness.doc(),
-            room.save.baseline(),
-            room.save.source(),
+            room.engine.baseline(),
+            room.engine.source(),
             &room_text(&room),
-            room.save.ending(),
+            room.engine.ending(),
         )
         .unwrap();
-        room.save
-            .prepare_observed_write(expected.as_bytes().to_vec(), &first_torn);
+        room.freeze_observed_projection(expected.as_bytes().to_vec(), &first_torn);
         s.store_room(&d, &mut room).unwrap();
-        assert_eq!(room.save.before(), Some(first_torn.as_slice()));
+        assert_eq!(room.engine.before(), Some(first_torn.as_slice()));
     }
     let mut second_torn = first_torn;
     second_torn[0] = expected.as_bytes()[0];
@@ -314,7 +311,7 @@ fn delete_only_deltas_survive_restarts_and_checkpoint_compaction() {
         apply(&s, &d, &r, 1, 0, "x");
         s.persist(&d, &mut r.lock().unwrap()).unwrap();
     }
-    assert!(r.lock().unwrap().journal.len() < 128);
+    assert!(r.lock().unwrap().journal_len() < 128);
     let expected = room_text(&r.lock().unwrap());
     drop(r);
     drop(s);
@@ -385,8 +382,8 @@ fn startup_recovery_repairs_torn_utf8_and_preserves_exact_observed_bytes() {
     apply(&s, &d, &r, 0, 8, "😀 intended");
     {
         let mut room = r.lock().unwrap();
-        let target = text::render(&room_text(&room), room.save.ending()).into_bytes();
-        room.save.prepare_write(target);
+        let target = text::render(&room_text(&room), room.engine.ending()).into_bytes();
+        room.freeze_projection(target);
         s.store_room(&d, &mut room).unwrap();
     }
     // A process interruption after only the first two bytes of a UTF-8 scalar.
@@ -412,7 +409,7 @@ fn startup_recovery_repairs_torn_utf8_and_preserves_exact_observed_bytes() {
     assert_eq!(fs::read(archive).unwrap(), observed);
 }
 #[test]
-fn desktop_save_after_an_interruption_merges_with_the_durable_browser_intent() {
+fn desktop_save_after_an_interruption_preserves_both_branches_for_owner_recovery() {
     let (dir, s) = fixture();
     let path = s.root.join("after-crash.md");
     fs::write(&path, "First\nLast\n").unwrap();
@@ -422,8 +419,8 @@ fn desktop_save_after_an_interruption_merges_with_the_durable_browser_intent() {
     apply(&s, &d, &r, 6, 0, "Browser\n");
     {
         let mut room = r.lock().unwrap();
-        let target = text::render(&room_text(&room), room.save.ending()).into_bytes();
-        room.save.prepare_write(target);
+        let target = text::render(&room_text(&room), room.engine.ending()).into_bytes();
+        room.freeze_projection(target);
         s.store_room(&d, &mut room).unwrap();
     }
     fs::write(&path, "First\nDesktop last\n").unwrap();
@@ -436,9 +433,48 @@ fn desktop_save_after_an_interruption_merges_with_the_durable_browser_intent() {
     )
     .unwrap();
     s.recover_pending().unwrap();
-    let actual = fs::read_to_string(&path).unwrap();
-    assert!(actual.contains("Browser\n"));
-    assert!(actual.contains("Desktop last\n"));
+    let desktop = "First\nDesktop last\n";
+    let accepted = "First\nBrowser\nLast\n";
+    assert_eq!(fs::read_to_string(&path).unwrap(), desktop);
+    let room = s.room(&d).unwrap();
+    assert_eq!(room_text(&room.lock().unwrap()), accepted);
+    assert_eq!(
+        room_text(&room.lock().unwrap())
+            .matches("Browser\n")
+            .count(),
+        1
+    );
+    assert!(room.lock().unwrap().conflicted());
+    assert!(!s.persist(&d, &mut room.lock().unwrap()).unwrap());
+    let phase: i64 =
+        s.db.lock()
+            .unwrap()
+            .query_row("SELECT write_intent FROM docs WHERE id=?", [&d.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+    assert_eq!(
+        phase, 2,
+        "The unresolved causal base must be a durable conflict"
+    );
+    let protected: Vec<String> =
+        s.db.lock()
+            .unwrap()
+            .prepare("SELECT content FROM revisions WHERE doc=? AND kind='recovery'")
+            .unwrap()
+            .query_map([&d.id], |row| row.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+    assert!(protected.iter().any(|source| source == accepted));
+    assert!(protected.iter().any(|source| source == desktop));
+    let archive = s.data.join("recovery").join(format!(
+        "{}-{}.bin",
+        d.id,
+        hex::encode(Sha256::digest(desktop.as_bytes()))
+    ));
+    assert_eq!(fs::read(archive).unwrap(), desktop.as_bytes());
+    assert_eq!(fs::read_to_string(&path).unwrap(), desktop);
 }
 #[test]
 fn repeated_desktop_autosaves_do_not_replace_the_only_browser_recovery_generation() {

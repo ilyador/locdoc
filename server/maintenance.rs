@@ -43,7 +43,9 @@ pub(super) struct RecoveryBundle {
     state: Option<String>,
     disk_state: Option<String>,
     write_intent: bool,
+    write_conflict: bool,
     write_target: Option<String>,
+    write_state: Option<String>,
     write_before_hash: Option<String>,
     write_before: Option<String>,
     line_ending: String,
@@ -53,6 +55,8 @@ pub(super) struct RecoveryBundle {
     filesystem_source: Option<String>,
     filesystem_error: Option<String>,
     live_state: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pending_comments: Vec<Value>,
     versions: Vec<RecoveryVersion>,
 }
 
@@ -116,10 +120,11 @@ fn conflict(message: &str) -> ApiError {
 struct RecoveryState {
     state: Option<Vec<u8>>,
     disk_state: Option<Vec<u8>>,
-    intent: bool,
+    intent: i64,
     ending: String,
     epoch: String,
     target: Option<Vec<u8>>,
+    target_state: Option<Vec<u8>>,
     before_hash: Option<String>,
     before: Option<Vec<u8>>,
 }
@@ -137,7 +142,7 @@ fn capture(
     history: bool,
 ) -> Result<RecoveryBundle> {
     const STORED: &str = "SELECT state,disk_state,write_intent,line_ending,
-        collaboration_epoch,write_target,write_before_hash,write_before
+        collaboration_epoch,write_target,write_state,write_before_hash,write_before
         FROM docs WHERE id=?";
     let db = store.db.lock().unwrap();
     let RecoveryState {
@@ -147,6 +152,7 @@ fn capture(
         ending,
         epoch,
         target,
+        target_state,
         before_hash,
         before,
     } = db.query_row(STORED, [&document.id], |row| {
@@ -157,8 +163,9 @@ fn capture(
             ending: row.get(3)?,
             epoch: row.get(4)?,
             target: row.get(5)?,
-            before_hash: row.get(6)?,
-            before: row.get(7)?,
+            target_state: row.get(6)?,
+            before_hash: row.get(7)?,
+            before: row.get(8)?,
         })
     })?;
     let updates = db
@@ -212,8 +219,10 @@ fn capture(
         collaboration_epoch: epoch,
         state: state.map(|bytes| BASE64.encode(bytes)),
         disk_state: disk_state.map(|bytes| BASE64.encode(bytes)),
-        write_intent: intent,
+        write_intent: intent != 0,
+        write_conflict: intent == 2 || live.is_some_and(Room::conflicted),
         write_target: target.map(|bytes| BASE64.encode(bytes)),
+        write_state: target_state.map(|bytes| BASE64.encode(bytes)),
         write_before_hash: before_hash,
         write_before: before.map(|bytes| BASE64.encode(bytes)),
         line_ending: ending,
@@ -230,13 +239,27 @@ fn capture(
                     .encode_state_as_update_v1(&StateVector::default()),
             )
         }),
+        pending_comments: live.map(Room::pending_comment_metadata).unwrap_or_default(),
         versions,
     })
 }
 
 fn read_file(store: &Store, document: &Document) -> Result<(PathBuf, DiskFile, Vec<u8>)> {
+    read_guarded_file(store, document, false)
+}
+
+fn read_guarded_file(
+    store: &Store,
+    document: &Document,
+    writable: bool,
+) -> Result<(PathBuf, DiskFile, Vec<u8>)> {
     let path = store.safe(&document.path, false)?;
-    let mut file = DiskFile::open_read(&path)?.ok_or_else(|| conflict(
+    let opened = if writable {
+        DiskFile::open(&path)?
+    } else {
+        DiskFile::open_read(&path)?
+    };
+    let mut file = opened.ok_or_else(|| conflict(
         "The desktop file is unavailable or still being saved. Finish that save before rebuilding.",
     ))?;
     let source = file.read_bytes()?;
@@ -334,8 +357,10 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
             ));
         }
     };
-    let mut rooms = store.rooms.lock().unwrap();
     let mut live = loaded.as_ref().map(|room| room.lock().unwrap());
+    // Never wait for a document while holding the cache map. A rename may
+    // hold that document while retiring another cached identity.
+    let mut rooms = store.rooms.lock().unwrap();
     if let Some(room) = loaded.as_ref()
         && (live.as_ref().unwrap().tx.receiver_count() != 0 || Arc::strong_count(room) > 2)
     {
@@ -343,24 +368,35 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
             "Close all document tabs before rebuilding collaboration history.",
         ));
     }
+    let explicit_projection =
+        matches!(choice, RebuildSource::Durable) && live.as_deref().is_some_and(Room::conflicted);
     if matches!(choice, RebuildSource::Durable) {
         let room = live.as_mut().unwrap();
         security::validate_document(room.awareness.doc()).map_err(|_| conflict(
             "Stored collaboration data is not plain text. Export recovery data, then explicitly choose the desktop file to rebuild.",
         ))?;
-        if !store.persist(&document, room)? {
+        if !explicit_projection && !room.flush_to_disk(store, &document)? {
             return Err(conflict(
                 "The current edits are waiting for the desktop file. Finish its save before rebuilding.",
             ));
         }
     }
-    let (path, file, bytes) = read_file(store, &document)?;
-    let raw = String::from_utf8(bytes.clone()).map_err(|_| conflict(
-        "The desktop file is not complete UTF-8. Export its recovery bytes and repair the file before rebuilding.",
-    ))?;
+    let (path, mut file, bytes) = read_guarded_file(store, &document, explicit_projection)?;
+    let raw = match String::from_utf8(bytes.clone()) {
+        Ok(raw) => raw,
+        // The owner chose durable text, not the incomplete external bytes.
+        // They are still archived exactly before replacement; only the line
+        // ending preference falls back to its last known value.
+        Err(_) if explicit_projection => String::new(),
+        Err(_) => {
+            return Err(conflict(
+                "The desktop file is not complete UTF-8. Export its recovery bytes and repair the file before rebuilding.",
+            ));
+        }
+    };
     let chosen = if matches!(choice, RebuildSource::Durable) {
         let current = security::validate_document(live.as_ref().unwrap().awareness.doc())?;
-        if current != text::canonical(&raw) {
+        if !explicit_projection && current != text::canonical(&raw) {
             return Err(conflict(
                 "The desktop file changed during recovery. Retry to reconcile it first.",
             ));
@@ -375,6 +411,17 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
         return Err(conflict(
             "The desktop file changed. Recovery was archived; retry after the save finishes.",
         ));
+    }
+    if explicit_projection {
+        // The owner explicitly selected accepted edits over the conflicting
+        // desktop save. Preserve both originals before touching the same inode.
+        let ending = text::ending(&raw, &bundle.line_ending);
+        file.write(&text::render(&chosen, &ending))?;
+        if !file.intact() || !file.is_current(&path) {
+            return Err(conflict(
+                "The desktop file changed during recovery. Its originals were archived; retry after its save finishes.",
+            ));
+        }
     }
     let fresh = Doc::with_options(Options {
         offset_kind: OffsetKind::Utf16,
@@ -407,8 +454,20 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
         .unwrap_or_default();
     let mut db = store.db.lock().unwrap();
     let tx = db.transaction()?;
-    tx.execute("UPDATE docs SET state=?,disk_state=?,write_intent=0,write_target=NULL,write_before_hash=NULL,write_before=NULL,line_ending=?,line_ending_migrated=0,browser_generation=0,protected_generation=0,collaboration_epoch=? WHERE id=? AND active=1",
-        params![state, state, text::ending(&raw, &bundle.line_ending), epoch, id])?;
+    const REBUILD_DOCUMENT: &str = "UPDATE docs SET state=?,disk_state=?,write_intent=0,
+        write_target=NULL,write_state=NULL,write_before_hash=NULL,write_before=NULL,
+        line_ending=?,line_ending_migrated=0,browser_generation=0,protected_generation=0,
+        collaboration_epoch=? WHERE id=? AND active=1";
+    tx.execute(
+        REBUILD_DOCUMENT,
+        params![
+            state,
+            state,
+            text::ending(&raw, &bundle.line_ending),
+            epoch,
+            id
+        ],
+    )?;
     tx.execute("DELETE FROM doc_updates WHERE doc=?", [id])?;
     tx.execute("DELETE FROM comments WHERE doc=?", [id])?;
     for row in &restored {

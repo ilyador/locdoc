@@ -21,7 +21,7 @@ fn durable_source(s: &Store, d: &Document, room: &Arc<Mutex<Room>>) -> Result<St
     let mut room = room.lock().unwrap();
     // Admission and reading use separate lock acquisitions. An intervening
     // failed import/edit must commit before its text can appear in a preview.
-    s.store_room(d, &mut room)?;
+    room.ensure_committed(s, d)?;
     Ok(room_text(&room))
 }
 

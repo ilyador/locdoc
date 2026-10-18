@@ -53,7 +53,8 @@ Object.assign(globalThis, { WebSocket: FixtureSocket });
 const { renderHook, act, waitFor, cleanup } =
   await import("@testing-library/react");
 const { useDocument } = await import("../src/use-document");
-const { hasUnstoredDrafts } = await import("../src/drafts");
+const { DraftJournal, archiveOwnerDrafts, hasUnstoredDrafts } =
+  await import("../src/drafts");
 const originalFetch = globalThis.fetch;
 let fetchCount = 0;
 function fixture(edit = true): Document {
@@ -134,6 +135,105 @@ test("read-only document opens with IndexedDB blocked without creating a storage
   } finally {
     Object.assign(globalThis, { indexedDB: saved });
   }
+});
+
+test("a conflicted bootstrap opens accepted text read-only and preserves an older browser draft without replay", async () => {
+  const doc = { ...fixture(), diskConflict: true };
+  const edited = new Y.Doc();
+  Y.applyUpdate(edited, Buffer.from(doc.state, "base64"));
+  const outbox = new DraftJournal(edited, `owner/${doc.id}`);
+  await outbox.restore(true);
+  outbox.bind("server");
+  edited.getText("content").insert(17, " offline draft");
+  await outbox.flush();
+  outbox.dispose();
+  edited.destroy();
+  respond(doc);
+  const { result } = renderHook(() => useDocument(doc.id, true, doc));
+  await waitFor(() => assert.ok(result.current.session?.provider.wsconnected));
+  const session = result.current.session!;
+  await act(async () => {
+    session.provider.synced = true;
+  });
+  assert.equal(result.current.doc?.edit, false);
+  assert.equal(result.current.status, "Recovery needed");
+  assert.equal(session.ydoc.getText("content").toString(), "Accepted document");
+  assert.equal(session.drafts.pending, false);
+  const saved = await archiveOwnerDrafts(doc.id);
+  assert.equal(
+    saved.length,
+    1,
+    "recovery must retain the original browser outbox",
+  );
+  assert.ok(Array.isArray(saved[0].state));
+  const recovered = new Y.Doc();
+  try {
+    Y.applyUpdate(recovered, Buffer.from(doc.state, "base64"));
+    Y.applyUpdate(recovered, Uint8Array.from(saved[0].state));
+    assert.equal(
+      recovered.getText("content").toString(),
+      "Accepted document offline draft",
+    );
+  } finally {
+    recovered.destroy();
+  }
+  assert.equal(fetchCount, 0, "a conflict must not start a reload loop");
+});
+
+test("a live conflict freezes editing while retaining pending drafts and ignoring stale save receipts", async () => {
+  const doc = fixture();
+  respond(doc);
+  const { result } = renderHook(() => useDocument(doc.id, true, doc));
+  await waitFor(() => assert.ok(result.current.session?.provider.wsconnected));
+  const session = result.current.session!;
+  await act(async () => {
+    session.ydoc.getText("content").insert(17, " pending draft");
+    await session.drafts.flush();
+  });
+  const socket = session.provider.ws as unknown as FixtureSocket;
+  const checkpoint = socket.messages
+    .map((bytes) => createDecoder(bytes))
+    .find((decoder) => readVarUint(decoder) === 124);
+  assert.ok(checkpoint);
+  const receipt = readVarString(checkpoint);
+  const connections = FixtureSocket.sockets.length;
+  const messages = socket.messages.length;
+  await act(async () => serverMessage(session, 121, "3"));
+  assert.ok(
+    result.current.session === session,
+    "conflict keeps the live draft session",
+  );
+  assert.equal(result.current.doc?.edit, false);
+  assert.equal(result.current.doc?.diskConflict, true);
+  assert.equal(result.current.status, "Recovery needed");
+  await act(async () => {
+    serverMessage(session, 127, receipt);
+    serverMessage(session, 121, "0");
+    serverMessage(session, 125, "Recovery required");
+    serverMessage(session, 120, "Recovery required");
+    session.provider.synced = true;
+  });
+  assert.equal(session.drafts.pending, true);
+  assert.equal(session.drafts.stored, true);
+  assert.equal(
+    result.current.recovery.length,
+    0,
+    "conflict must not quarantine the draft",
+  );
+  assert.equal(result.current.status, "Recovery needed");
+  assert.equal(
+    session.ydoc.getText("content").toString(),
+    "Accepted document pending draft",
+  );
+  assert.equal(
+    socket.messages.length,
+    messages,
+    "read-only sync must not send a new checkpoint",
+  );
+  assert.equal(FixtureSocket.sockets.length, connections);
+  assert.equal(session.provider.wsconnected, true);
+  assert.equal(fetchCount, 0);
+  assert.equal((await archiveOwnerDrafts(doc.id)).length, 1);
 });
 
 test("a permanent rejection opens a fresh accepted session and exposes the original draft for download", async () => {

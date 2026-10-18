@@ -2,26 +2,59 @@
 //! for one busy document must not exhaust storage capacity for every other one.
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Condvar, Mutex, Weak},
 };
+
+fn keyed<T: Default>(registry: &Mutex<HashMap<String, Weak<T>>>, id: &str) -> Arc<T> {
+    let mut entries = registry.lock().unwrap();
+    if entries.len() >= 256 {
+        entries.retain(|_, value| value.strong_count() != 0);
+    }
+    let gate = entries
+        .get(id)
+        .and_then(Weak::upgrade)
+        .unwrap_or_else(|| Arc::new(T::default()));
+    entries.insert(id.to_owned(), Arc::downgrade(&gate));
+    gate
+}
 
 #[derive(Default)]
 pub(super) struct Documents(Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>);
 impl Documents {
     pub(super) async fn acquire(&self, id: String) -> tokio::sync::OwnedMutexGuard<()> {
-        let gate = {
-            let mut documents = self.0.lock().unwrap();
-            if documents.len() >= 256 {
-                documents.retain(|_, value| value.strong_count() != 0);
-            }
-            let gate = documents
-                .get(&id)
-                .and_then(Weak::upgrade)
-                .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
-            documents.insert(id, Arc::downgrade(&gate));
-            gate
-        };
-        gate.lock_owned().await
+        keyed(&self.0, &id).lock_owned().await
+    }
+}
+
+/// Cold room construction can block on a file or decode substantial history.
+/// Keep one constructor per document without holding the global cache map or
+/// recursively acquiring the caller's asynchronous document admission.
+#[derive(Default)]
+pub(super) struct RoomLoads(Mutex<HashMap<String, Weak<Load>>>);
+
+#[derive(Default)]
+struct Load {
+    active: Mutex<bool>,
+    available: Condvar,
+}
+
+pub(super) struct LoadGuard(Arc<Load>);
+impl RoomLoads {
+    pub(super) fn acquire(&self, id: &str) -> LoadGuard {
+        let gate = keyed(&self.0, id);
+        let mut active = gate.active.lock().unwrap();
+        while *active {
+            active = gate.available.wait(active).unwrap();
+        }
+        *active = true;
+        drop(active);
+        LoadGuard(gate)
+    }
+}
+impl Drop for LoadGuard {
+    fn drop(&mut self) {
+        *self.0.active.lock().unwrap() = false;
+        self.0.available.notify_one();
     }
 }
 
@@ -30,6 +63,33 @@ mod tests {
     use super::*;
     use crate::{Store, doc_job, job};
     use std::time::Duration;
+
+    #[test]
+    fn blocking_load_admission_is_per_document_and_released_by_its_owner() {
+        let loads = Arc::new(RoomLoads::default());
+        let first = loads.acquire("same");
+        let (started, ready) = std::sync::mpsc::channel();
+        let (entered, completion) = std::sync::mpsc::channel();
+        let waiting = loads.clone();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let _second = waiting.acquire("same");
+            entered.send(()).unwrap();
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let unrelated = loads.acquire("another");
+        assert!(completion.try_recv().is_err());
+        drop(unrelated);
+        drop(first);
+        let completed = completion.recv_timeout(Duration::from_secs(2));
+        worker.join().unwrap();
+        assert!(completed.is_ok());
+        // Completed document IDs are weak entries, not permanent room handles.
+        for index in 0..512 {
+            drop(loads.acquire(&format!("document-{index}")));
+        }
+        assert!(loads.0.lock().unwrap().len() < 256);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_peers_on_one_document_leave_workers_for_other_documents() {

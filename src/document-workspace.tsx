@@ -181,6 +181,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     if (currentFooterStatus === footerStatus) return;
     if (
       currentFooterStatus.startsWith("Offline") ||
+      currentFooterStatus === "Recovery needed" ||
       currentFooterStatus === "Unable to open document"
     ) {
       setFooterStatus(currentFooterStatus);
@@ -191,6 +192,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   }, [currentFooterStatus, footerStatus]);
   const statusWarning =
     footerStatus.startsWith("Offline") ||
+    footerStatus === "Recovery needed" ||
     footerStatus === "Unable to open document";
   const [newPath, setNewPath] = useState("");
   const [createFormat, setCreateFormat] = useState<DocumentFormat>("markdown");

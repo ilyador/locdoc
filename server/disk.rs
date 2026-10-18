@@ -6,6 +6,45 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 const F_SETSIG: libc::c_int = 10; // Linux fcntl ABI; not exported by libc.
 
+/// File fsync does not persist directory entries. Sync each directory whose
+/// child may have been created, stopping at the workspace root.
+pub(super) fn sync_directories(directory: &Path, root: &Path) -> Result<()> {
+    let mut current = directory;
+    loop {
+        fs::File::open(current)?.sync_all()?;
+        if current == root {
+            return Ok(());
+        }
+        current = current
+            .parent()
+            .filter(|parent| parent.starts_with(root))
+            .ok_or_else(|| bad("Directory is outside the documents folder."))?;
+    }
+}
+
+/// Atomic same-filesystem rename without std::fs::rename's overwrite behavior.
+/// Linux is also required by the document writer's inode leases.
+pub(super) fn rename_new(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let source = CString::new(source.as_os_str().as_bytes())?;
+    let destination = CString::new(destination.as_os_str().as_bytes())?;
+    let result = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            destination.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 /// Held for the Store lifetime. SQLite transactions alone cannot serialize two
 /// independent CRDT/file projection coordinators over the same state folder.
 pub(super) struct StateLock(fs::File);
@@ -157,6 +196,28 @@ impl Drop for DiskFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn atomic_renames_preserve_the_inode_and_never_replace_a_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.md");
+        let destination = directory.path().join("destination.md");
+        fs::write(&source, "Original").unwrap();
+        fs::write(&destination, "Unrelated").unwrap();
+        let inode = fs::metadata(&source).unwrap().ino();
+        assert_eq!(
+            rename_new(&source, &destination).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "Original");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "Unrelated");
+        fs::remove_file(&destination).unwrap();
+        let held = fs::File::open(&source).unwrap();
+        rename_new(&source, &destination).unwrap();
+        sync_directories(directory.path(), directory.path()).unwrap();
+        assert!(!source.exists());
+        assert_eq!(held.metadata().unwrap().ino(), inode);
+        assert_eq!(fs::metadata(destination).unwrap().ino(), inode);
+    }
     #[test]
     fn recovery_reads_preserve_exact_bytes_while_normal_reads_require_utf8() {
         let dir = tempfile::tempdir().unwrap();

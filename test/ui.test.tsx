@@ -314,6 +314,15 @@ test("the visible footer suppresses short remote saves but shows a sustained sav
   await waitFor(() => assert.equal(footer.textContent, "Saved to disk"), {
     timeout: 3500,
   });
+  await act(async () => status("3"));
+  assert.equal(footer.textContent, "Recovery needed");
+  assert.equal(footer.classList.contains("has-warning"), true);
+  assert.equal(
+    screen
+      .getByRole("textbox", { name: "Markdown document" })
+      .getAttribute("contenteditable"),
+    "false",
+  );
 });
 async function chooseB() {
   fireEvent.click(screen.getByRole("button", { name: "b .md", exact: true }));

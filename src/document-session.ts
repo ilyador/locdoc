@@ -53,6 +53,14 @@ export function documentSession(
         setTimeout(() => void retire(), 1000);
         return;
       }
+      // A retained upload or a newer local edit may arrive while IndexedDB is
+      // committing. Recheck ownership and durability after that asynchronous
+      // boundary before destroying the only live copy of the document.
+      if (disposed || references) return;
+      if (drafts.pending && !drafts.stored) {
+        setTimeout(() => void retire(), 0);
+        return;
+      }
       disposed = true;
       drafts.dispose();
       provider.destroy();

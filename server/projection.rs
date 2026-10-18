@@ -22,18 +22,7 @@ impl Coordinator {
             let Ok(d) = s.doc(&id) else {
                 continue;
             };
-            if self.changed.remove(&id)
-                && !r
-                    .save
-                    .observed_file(disk::Stamp::read(&s.root.join(&d.path)))
-            {
-                r.save.desktop_changed();
-            }
-            if r.save.needs_projection()
-                && r.save.projection_due()
-                && let Err(error) = s.project(&d, &mut r)
-            {
-                r.waiting();
+            if let Err(error) = r.visit_filesystem(s, &d, self.changed.remove(&id)) {
                 tracing::warn!("pending disk save failed: {error}");
             }
         }
@@ -100,8 +89,15 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
         let mut coordinator = Coordinator::default();
         let mut missing_after = Some(Instant::now() + settle);
         let mut next_sweep = Instant::now();
+        let mut next_identity_recovery = Instant::now() + Duration::from_secs(1);
         loop {
             if Instant::now() >= next_sweep {
+                if Instant::now() >= next_identity_recovery {
+                    if let Err(error) = s.retry_file_operations() {
+                        tracing::warn!("file operation recovery pending: {error}");
+                    }
+                    next_identity_recovery = Instant::now() + Duration::from_secs(1);
+                }
                 let rescan = overflow.swap(false, Ordering::Relaxed);
                 if rescan {
                     missing_after = Some(Instant::now() + settle);
@@ -262,7 +258,7 @@ mod tests {
             let mut room = ready_room.lock().unwrap();
             let source = room_text(&room);
             apply_text(room.awareness.doc(), &source, "Accepted browser edit\n");
-            room.save.edited();
+            room.engine.edited();
             store.store_room(&ready, &mut room).unwrap();
         }
         fs::write(store.root.join(&busy.path), "Complete desktop save\n").unwrap();
@@ -312,13 +308,14 @@ mod tests {
         );
 
         let mut held = room.lock().unwrap();
-        held.save.request();
-        held.save.projection_result(&Err(bad("Retry later")), false);
-        assert!(!held.save.projection_due());
+        held.engine.request();
+        held.engine
+            .projection_result(&Err(bad("Retry later")), false);
+        assert!(!held.engine.projection_due());
         drop(held);
         coordinator.changed.insert(busy.id.clone());
         coordinator.sweep(&store, false);
-        assert!(room.lock().unwrap().save.needs_projection());
-        assert!(!room.lock().unwrap().save.projection_due());
+        assert!(room.lock().unwrap().engine.needs_projection());
+        assert!(!room.lock().unwrap().engine.projection_due());
     }
 }

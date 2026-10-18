@@ -614,7 +614,7 @@ impl super::Store {
             created = true;
             file.write_all(bytes)?;
             file.sync_all()?;
-            std::fs::File::open(parent)?.sync_all()?;
+            super::disk::sync_directories(parent, &self.root)?;
             Ok(())
         })();
         if result.is_err() {
@@ -706,7 +706,7 @@ mod tests {
             Message::decode_v1(&replies[0]).unwrap(),
             Message::Custom(122, _)
         ));
-        assert!(room.lock().unwrap().save.receipts.is_empty());
+        assert!(room.lock().unwrap().engine.receipts.is_empty());
         store.persist(&document, &mut room.lock().unwrap()).unwrap();
         assert_eq!(peer.held_receipt.as_deref(), Some(receipt.as_str()));
         // Even a causally complete independent incremental update cannot release
@@ -753,14 +753,14 @@ mod tests {
         assert!(!peer.awaiting_sync);
         assert!(peer.held_receipt.is_none());
         assert_eq!(
-            room.lock().unwrap().save.receipts.get(&peer.id),
+            room.lock().unwrap().engine.receipts.get(&peer.id),
             Some(&receipt)
         );
         let accepted = room_text(&room.lock().unwrap());
         assert!(accepted.contains(" first second"));
         assert!(accepted.contains("independent "));
         assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
-        assert!(room.lock().unwrap().save.receipts.is_empty());
+        assert!(room.lock().unwrap().engine.receipts.is_empty());
         assert_eq!(
             std::fs::read_to_string(store.root.join(&document.path)).unwrap(),
             accepted

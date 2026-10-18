@@ -3,17 +3,30 @@
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug)]
+struct WriteIntent {
+    bytes: Arc<[u8]>,
+    // Legacy intents may predate frozen causal state. New writes always carry
+    // the state whose visible text produced bytes, independent of later edits.
+    state: Option<Arc<[u8]>>,
+    before_hash: Option<String>,
+    before: Option<Arc<[u8]>>,
+}
+
+#[derive(Clone, Debug)]
 enum Phase {
     Synced,
     Pending,
     Blocked,
-    Interrupted(Arc<[u8]>),
-    InterruptedBlocked(Arc<[u8]>),
+    Interrupted(Arc<WriteIntent>),
+    InterruptedBlocked(Arc<WriteIntent>),
+    Conflict(Arc<WriteIntent>),
 }
 impl Phase {
-    fn target(&self) -> Option<&Arc<[u8]>> {
+    fn intent(&self) -> Option<&Arc<WriteIntent>> {
         match self {
-            Self::Interrupted(target) | Self::InterruptedBlocked(target) => Some(target),
+            Self::Interrupted(target)
+            | Self::InterruptedBlocked(target)
+            | Self::Conflict(target) => Some(target),
             _ => None,
         }
     }
@@ -24,16 +37,15 @@ impl Phase {
 
 #[derive(Clone, Debug)]
 struct Metadata {
-    target: Option<Arc<[u8]>>,
-    before_hash: Option<String>,
-    before: Option<Arc<[u8]>>,
+    intent: Option<Arc<WriteIntent>>,
+    intent_code: u8,
     ending: Arc<str>,
     migrated: bool,
     generation: i64,
     protected: i64,
 }
 
-fn same_target(left: Option<&Arc<[u8]>>, right: Option<&Arc<[u8]>>) -> bool {
+fn same_intent(left: Option<&Arc<WriteIntent>>, right: Option<&Arc<WriteIntent>>) -> bool {
     match (left, right) {
         (Some(a), Some(b)) => Arc::ptr_eq(a, b),
         (None, None) => true,
@@ -48,6 +60,8 @@ pub(super) struct Loaded {
     pub ending: String,
     pub migrated: bool,
     pub target: Option<Arc<[u8]>>,
+    pub target_state: Option<Arc<[u8]>>,
+    pub conflicted: bool,
     pub before_hash: Option<String>,
     pub before: Option<Arc<[u8]>>,
     pub generation: i64,
@@ -59,8 +73,6 @@ pub(super) struct SaveState {
     source: String,
     baseline: Arc<[u8]>,
     ending: Arc<str>,
-    before_hash: Option<String>,
-    before: Option<Arc<[u8]>>,
     migrated: bool,
     generation: i64,
     protected: i64,
@@ -75,15 +87,25 @@ impl SaveState {
     pub fn loaded(value: Loaded) -> Self {
         Self {
             phase: match value.target {
-                Some(target) => Phase::Interrupted(target),
+                Some(bytes) => {
+                    let intent = Arc::new(WriteIntent {
+                        bytes,
+                        state: value.target_state,
+                        before_hash: value.before_hash,
+                        before: value.before,
+                    });
+                    if value.conflicted {
+                        Phase::Conflict(intent)
+                    } else {
+                        Phase::Interrupted(intent)
+                    }
+                }
                 None => Phase::Pending,
             },
             source: value.source,
             baseline: value.baseline,
             durable_baseline: value.persisted_baseline,
             ending: value.ending.into(),
-            before_hash: value.before_hash,
-            before: value.before,
             migrated: value.migrated,
             generation: value.generation,
             protected: value.protected,
@@ -95,10 +117,10 @@ impl SaveState {
         }
     }
     pub fn projection_due(&self) -> bool {
-        self.projection.due(std::time::Instant::now())
+        !self.conflicted() && self.projection.due(std::time::Instant::now())
     }
     pub fn projection_delayed(&self, large: bool) -> bool {
-        !self.projection_due() && (large || self.projection.failures != 0)
+        self.conflicted() || (!self.projection_due() && (large || self.projection.failures != 0))
     }
     pub fn projection_result(&mut self, result: &crate::Result<bool>, large: bool) {
         self.projection.finished(
@@ -124,7 +146,22 @@ impl SaveState {
         self.phase.blocked()
     }
     pub fn interrupted(&self) -> bool {
-        self.phase.target().is_some()
+        self.phase.intent().is_some()
+    }
+    pub fn conflicted(&self) -> bool {
+        matches!(self.phase, Phase::Conflict(_))
+    }
+    pub fn conflict(&mut self) {
+        if let Some(intent) = self.phase.intent() {
+            self.phase = Phase::Conflict(intent.clone());
+        }
+    }
+    pub fn intent_code(&self) -> u8 {
+        match self.phase {
+            Phase::Conflict(_) => 2,
+            Phase::Interrupted(_) | Phase::InterruptedBlocked(_) => 1,
+            _ => 0,
+        }
     }
     pub fn source(&self) -> &str {
         &self.source
@@ -161,53 +198,68 @@ impl SaveState {
     }
     /// An unavailable file never discards an interrupted write intent.
     pub fn block(&mut self) {
-        self.phase = match self.phase.target() {
+        if self.conflicted() {
+            return;
+        }
+        self.phase = match self.phase.intent() {
             Some(target) => Phase::InterruptedBlocked(target.clone()),
             None => Phase::Blocked,
         };
     }
     #[cfg(test)]
-    pub fn prepare_write(&mut self, target: Vec<u8>) {
+    pub fn prepare_write(&mut self, target: Vec<u8>, target_state: Vec<u8>) {
         let before = crate::text::render(&self.source, &self.ending);
-        self.prepare_observed_write(target, before.as_bytes());
+        self.prepare_observed_write(target, target_state, before.as_bytes());
     }
-    pub fn prepare_observed_write(&mut self, target: Vec<u8>, before: &[u8]) {
+    pub fn prepare_observed_write(
+        &mut self,
+        target: Vec<u8>,
+        target_state: Vec<u8>,
+        before: &[u8],
+    ) {
         use sha2::Digest;
-        self.before_hash = Some(hex::encode(sha2::Sha256::digest(before)));
+        let before_hash = Some(hex::encode(sha2::Sha256::digest(before)));
         // Normal writes reconstruct their exact preimage from the baseline and
         // separator layout. A retry may instead start from a torn byte image;
         // retain that exceptional preimage before attempting another overwrite.
         let baseline = crate::text::render(&self.source, &self.ending);
-        self.before = (baseline.as_bytes() != before).then(|| before.into());
-        self.phase = Phase::Interrupted(target.into());
+        let before = (baseline.as_bytes() != before).then(|| before.into());
+        self.phase = Phase::Interrupted(Arc::new(WriteIntent {
+            bytes: target.into(),
+            state: Some(target_state.into()),
+            before_hash,
+            before,
+        }));
     }
     pub fn before_hash(&self) -> Option<&str> {
-        self.before_hash.as_deref()
+        self.phase
+            .intent()
+            .and_then(|intent| intent.before_hash.as_deref())
     }
     pub fn before(&self) -> Option<&[u8]> {
-        self.before.as_deref()
+        self.phase
+            .intent()
+            .and_then(|intent| intent.before.as_deref())
     }
     pub fn target(&self) -> Option<&[u8]> {
-        self.phase.target().map(|target| target.as_ref())
+        self.phase.intent().map(|intent| intent.bytes.as_ref())
+    }
+    pub fn target_state(&self) -> Option<&[u8]> {
+        self.phase
+            .intent()
+            .and_then(|intent| intent.state.as_deref())
     }
     pub fn target_changed(&self) -> bool {
-        !same_target(
-            self.phase.target(),
+        !same_intent(
+            self.phase.intent(),
             self.durable_metadata
                 .as_ref()
-                .and_then(|meta| meta.target.as_ref()),
-        ) || !same_target(
-            self.before.as_ref(),
-            self.durable_metadata
-                .as_ref()
-                .and_then(|meta| meta.before.as_ref()),
+                .and_then(|meta| meta.intent.as_ref()),
         )
     }
     /// A complete external save supersedes an old, interrupted file image.
     pub fn external_save(&mut self) {
         self.phase = Phase::Pending;
-        self.before_hash = None;
-        self.before = None;
     }
     pub fn observe_ending(&mut self, raw: &str) {
         let ending = crate::text::ending(raw, &self.ending);
@@ -219,14 +271,15 @@ impl SaveState {
         self.source = source;
         self.baseline = baseline.into();
         self.phase = Phase::Pending;
-        self.before_hash = None;
-        self.before = None;
     }
     /// The file is fsynced, but not acknowledged until committed() succeeds.
     pub fn projected(&mut self, source: String, baseline: Vec<u8>) {
         self.imported(source, baseline);
     }
     pub fn complete(&mut self) {
+        if self.conflicted() {
+            return;
+        }
         debug_assert!(
             !self.needs_commit(),
             "projection must be committed before acknowledgment"
@@ -238,9 +291,8 @@ impl SaveState {
     }
     fn metadata(&self) -> Metadata {
         Metadata {
-            target: self.phase.target().cloned(),
-            before_hash: self.before_hash.clone(),
-            before: self.before.clone(),
+            intent: self.phase.intent().cloned(),
+            intent_code: self.intent_code(),
             ending: self.ending.clone(),
             migrated: self.migrated,
             generation: self.generation,
@@ -251,7 +303,7 @@ impl SaveState {
         self.baseline_changed()
             || self.durable_metadata.as_ref().is_none_or(|meta| {
                 (!Arc::ptr_eq(&meta.ending, &self.ending) && meta.ending != self.ending)
-                    || meta.before_hash != self.before_hash
+                    || meta.intent_code != self.intent_code()
                     || meta.migrated != self.migrated
                     || meta.generation != self.generation
                     || meta.protected != self.protected
@@ -314,6 +366,8 @@ mod tests {
             ending: "lf".into(),
             migrated: false,
             target: intent.then(|| Arc::from(b"intended".as_slice())),
+            target_state: intent.then(|| Arc::from([3])),
+            conflicted: false,
             before_hash: None,
             before: None,
             generation: 2,
@@ -330,7 +384,7 @@ mod tests {
         s.edited();
         assert_eq!(s.generation(), 3);
         assert!(s.needs_projection());
-        s.prepare_write(b"new".to_vec());
+        s.prepare_write(b"new".to_vec(), vec![2]);
         assert!(s.interrupted());
         assert!(s.needs_commit());
         s.committed();
@@ -372,6 +426,65 @@ mod tests {
         s.observe_ending("desktop\r\n");
         assert_eq!(s.ending(), "crlf");
         assert!(s.needs_commit());
+    }
+    #[test]
+    fn frozen_write_state_survives_new_edits_and_blocking_until_projection_commits() {
+        let mut s = state(false);
+        s.committed();
+        s.prepare_observed_write(b"target".to_vec(), vec![4, 5], b"old");
+        assert_eq!(s.target(), Some(b"target".as_slice()));
+        assert_eq!(s.target_state(), Some([4, 5].as_slice()));
+        s.committed();
+        s.edited();
+        s.block();
+        assert_eq!(s.target_state(), Some([4, 5].as_slice()));
+        assert!(s.needs_commit());
+        s.committed();
+        assert!(!s.target_changed());
+        // The same bytes may have a different CRDT identity after an undo or
+        // reinsert. That causal change must still be committed with the intent.
+        s.prepare_observed_write(b"target".to_vec(), vec![6, 7], b"old");
+        assert!(s.target_changed());
+        assert!(s.needs_commit());
+        assert_eq!(s.target_state(), Some([6, 7].as_slice()));
+        s.committed();
+        s.projected("target".into(), vec![6, 7]);
+        assert!(s.needs_commit());
+        s.committed();
+        s.complete();
+        assert!(s.target().is_none());
+        assert!(s.target_state().is_none());
+    }
+    #[test]
+    fn conflicting_file_images_remain_frozen_until_an_explicit_resolution() {
+        let mut s = state(true);
+        s.committed();
+        s.conflict();
+        assert!(s.conflicted());
+        assert_eq!(s.intent_code(), 2);
+        assert!(!s.target_changed());
+        assert!(s.needs_commit(), "the conflict flag must be durable");
+        s.committed();
+        s.block();
+        s.edited();
+        s.desktop_changed();
+        assert!(s.conflicted());
+        assert!(!s.projection_due());
+        assert!(s.projection_delayed(false));
+        assert_eq!(s.target(), Some(b"intended".as_slice()));
+        assert_eq!(s.target_state(), Some([3].as_slice()));
+        s.committed();
+        assert!(!s.needs_commit());
+        s.complete();
+        assert!(
+            s.conflicted(),
+            "a normal completion cannot resolve ambiguity"
+        );
+        s.external_save();
+        assert!(!s.conflicted());
+        assert_eq!(s.intent_code(), 0);
+        assert!(s.needs_commit());
+        assert!(s.target_state().is_none());
     }
     #[test]
     fn journal_limits_both_bytes_and_count() {

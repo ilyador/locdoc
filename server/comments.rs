@@ -754,23 +754,9 @@ pub(super) fn rebuild_metadata(
     rebuilt
 }
 
-// Commit source state and its metadata together before attempting Markdown I/O.
+#[cfg(test)]
 fn commit(s: &Store, d: &Document, r: &mut Room, rows: &[Value]) -> Result<()> {
-    let changed = !r.pending_updates.lock().unwrap().is_empty();
-    if changed {
-        r.save.edited();
-    }
-    s.commit_room(d, r, rows)?;
-    if changed {
-        r.publish_projection();
-    }
-    Ok(())
-}
-fn project(s: &Store, d: &Document, r: &mut Room) {
-    if let Err(error) = s.project(d, r) {
-        r.waiting();
-        tracing::warn!("comment projection pending: {error}");
-    }
+    r.accept_test_command(s, d, rows)
 }
 
 fn insert(r: &Room, at: u32, value: &str) {
@@ -845,36 +831,32 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
         candidate.insert_str(insertion.at, &insertion.encoded);
         planned.push((index, insertion, c));
     }
-    for (index, insertion, mut c) in planned {
-        let source = room_text(r);
-        let at = utf16(&source, insertion.at);
-        let prefix = &insertion.encoded[..insertion.marker - insertion.at];
-        insert(r, at, &insertion.encoded);
-        c["source"] = relative(r, at + prefix.encode_utf16().count() as u32, Assoc::After);
-        meta[index] = c;
-    }
-    if let Err(error) = commit(s, d, r, meta) {
-        apply_text(r.awareness.doc(), &room_text(r), &original);
-        return Err(error);
-    }
-    project(s, d, r);
+    r.edit(s, d, |room| {
+        for (index, insertion, mut c) in planned {
+            let source = room_text(room);
+            let at = utf16(&source, insertion.at);
+            let prefix = &insertion.encoded[..insertion.marker - insertion.at];
+            insert(room, at, &insertion.encoded);
+            c["source"] = relative(
+                room,
+                at + prefix.encode_utf16().count() as u32,
+                Assoc::After,
+            );
+            meta[index] = c;
+        }
+        meta.to_vec()
+    })?;
     Ok(())
 }
 fn load(s: &Store, d: &Document, r: &mut Room) -> Result<(String, Vec<Thread>, Vec<Value>)> {
-    if let Err(error) = s.project(d, r) {
-        r.waiting();
-        tracing::warn!("comment projection pending: {error}");
-        // Imports may have reached the live CRDT before their failed commit.
-        // Only continue from source whose journal/metadata are durable.
-        s.store_room(d, r)?;
-    }
+    r.reconcile(s, d)?;
     let mut meta = metadata(s, &d.id)?;
     migrate(s, d, r, &mut meta)?;
     let source = room_text(r);
     let threads = parse(&source);
     let (values, changed) = thread_values(r, &source, &threads, &meta, &d.id);
     if !changed.is_empty() {
-        s.commit_room(d, r, &changed)?;
+        r.edit(s, d, |_| changed)?;
     }
     Ok((source, threads, values))
 }
@@ -950,7 +932,11 @@ pub(super) async fn add(
                 .iter()
                 .find(|c| c["requestId"] == *request && c["guest"] == guest)
         {
-            return Ok(Json(browser_auth::comment_value(c.clone(), owner || editor, Some(&guest))));
+            return Ok(Json(browser_auth::comment_value(
+                c.clone(),
+                owner || editor,
+                Some(&guest),
+            )));
         }
         if threads.len() >= 2000 {
             return Err(bad("This document has reached its comment limit."));
@@ -986,15 +972,30 @@ pub(super) async fn add(
         if source.len() + encoded.len() > 5 * MB {
             return Err(bad("Document exceeds 5 MB."));
         }
-        insert(&r, at, &encoded);
-        let c = json!({"id":uuid::Uuid::new_v4().to_string(),"body":b.body.trim(),"name":b.name.trim(),"guest":guest,"quote":b.quote.map(|v|v.chars().take(500).collect::<String>()),"anchor":b.anchor,"source":relative(&r,marker,Assoc::After),"created":now(),"resolved":false,"replies":[],"requestId":b.request_id});
-        if let Err(error) = commit(s, &d, &mut r, std::slice::from_ref(&c)) {
-            apply_text(r.awareness.doc(), &room_text(&r), &source);
-            return Err(error);
-        }
-        project(s, &d, &mut r);
-        Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))))
-    }).await
+        let rows = r.edit(s, &d, |room| {
+            insert(room, at, &encoded);
+            vec![json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "body": b.body.trim(),
+                "name": b.name.trim(),
+                "guest": guest,
+                "quote": b.quote.map(|v| v.chars().take(500).collect::<String>()),
+                "anchor": b.anchor,
+                "source": relative(room, marker, Assoc::After),
+                "created": now(),
+                "resolved": false,
+                "replies": [],
+                "requestId": b.request_id
+            })]
+        })?;
+        let c = rows.into_iter().next().unwrap();
+        Ok(Json(browser_auth::comment_value(
+            c,
+            owner || editor,
+            Some(&guest),
+        )))
+    })
+    .await
 }
 #[derive(Deserialize)]
 pub(super) struct Edit {
@@ -1023,6 +1024,7 @@ pub(super) async fn edit(
             .position(|v| v["id"] == cid)
             .ok_or_else(|| bad("Comment not found."))?;
         let mut c = rows[index].clone();
+        let mut insertion = None;
         if let Some(resolved) = b.resolved {
             if !owner && !editor && c["guest"] != guest {
                 return Err(denied());
@@ -1085,7 +1087,7 @@ pub(super) async fn edit(
                     "This conversation moved into a Markdown block. Move it outside that block before replying.",
                 ));
             }
-            insert(&r, utf16(&source, threads[index].to), &encoded);
+            insertion = Some((utf16(&source, threads[index].to), encoded));
             c["replies"]
                 .as_array_mut()
                 .unwrap()
@@ -1095,11 +1097,13 @@ pub(super) async fn edit(
             }
             c["replyRequests"] = json!(requests);
         }
-        if let Err(error) = commit(s, &d, &mut r, std::slice::from_ref(&c)) {
-            apply_text(r.awareness.doc(), &room_text(&r), &source);
-            return Err(error);
-        }
-        project(s, &d, &mut r);
+        let values = r.edit(s, &d, |room| {
+            if let Some((at, encoded)) = insertion {
+                insert(room, at, &encoded);
+            }
+            vec![c]
+        })?;
+        let c = values.into_iter().next().unwrap();
         Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))))
     }).await
 }
@@ -1760,7 +1764,7 @@ mod tests {
         );
         commit(&s, &d, &mut r, &[]).unwrap();
         s.persist(&d, &mut r).unwrap();
-        assert!(r.save.unprotected());
+        assert!(r.engine.unprotected());
         let accepted = room_text(&r);
         fs::write(s.root.join(&d.path), source).unwrap();
         s.persist(&d, &mut r).unwrap();
