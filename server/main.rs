@@ -1,3 +1,4 @@
+mod browser_auth;
 mod comments;
 mod disk;
 mod documents;
@@ -8,9 +9,13 @@ mod maintenance;
 mod persistence_adversarial_tests;
 #[cfg(test)]
 mod persistence_tests;
+mod save;
+#[cfg(test)]
+mod save_adversarial_tests;
 mod security;
 mod social;
 mod text;
+mod validation;
 mod web;
 use disk::DiskFile;
 
@@ -43,10 +48,12 @@ use subtle::ConstantTimeEq;
 use tokio::sync::broadcast;
 use tower_http::services::ServeDir;
 use yrs::{
-    Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
+    Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact,
     sync::{Awareness, DefaultProtocol, Message, Protocol, SyncMessage},
-    updates::{decoder::Decode, encoder::Encode},
+    updates::encoder::Encode,
 };
+#[cfg(test)]
+use yrs::{Update, updates::decoder::Decode};
 
 const MB: usize = 1_000_000;
 const DOC_LIMIT: usize = 50 * MB;
@@ -133,6 +140,7 @@ struct StoredRoom {
     state: Option<Vec<u8>>,
     baseline: Option<Vec<u8>>,
     intent: bool,
+    target: Option<Vec<u8>>,
     ending: String,
     migrated: bool,
     browser_generation: i64,
@@ -140,23 +148,11 @@ struct StoredRoom {
 }
 struct Room {
     awareness: Awareness,
+    validation: validation::Validated,
     tx: broadcast::Sender<Vec<u8>>,
-    last_disk: String,
-    line_ending: String,
-    line_ending_migrated: bool,
-    disk_state: Arc<[u8]>,
-    persisted: Arc<[u8]>,
+    save: save::SaveState,
     pending_updates: Arc<Mutex<Vec<Vec<u8>>>>,
-    journal_len: usize,
-    persisted_disk: Arc<[u8]>,
-    persisted_intent: bool,
-    snapshot_at: i64,
-    browser_generation: i64,
-    protected_generation: i64,
-    disk_dirty: bool,
-    disk_waiting: bool,
-    recovering: bool,
-    receipts: HashMap<uuid::Uuid, String>,
+    journal: save::Journal,
     usage: Option<usize>,
     pending_media: HashSet<String>,
 }
@@ -244,6 +240,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS trusted_references(doc TEXT NOT NULL,reference TEXT NOT NULL,PRIMARY KEY(doc,reference));
    CREATE TABLE IF NOT EXISTS fonts(family TEXT PRIMARY KEY,css TEXT NOT NULL);")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS doc_updates(seq INTEGER PRIMARY KEY AUTOINCREMENT,doc TEXT NOT NULL,content BLOB NOT NULL); CREATE INDEX IF NOT EXISTS doc_updates_document ON doc_updates(doc,seq);")?;
+        browser_auth::migrate(&db)?;
         documents::migrate(&db)?;
         folders::migrate(&db)?;
         Ok(Arc::new(Self {
@@ -281,17 +278,7 @@ impl Store {
         {
             return true;
         }
-        cookie(h, "locdoc_owner").is_some_and(|s| {
-            self.db
-                .lock()
-                .unwrap()
-                .query_row(
-                    "SELECT 1 FROM sessions WHERE hash=? AND expires>?",
-                    params![hash(&s), now()],
-                    |r| r.get::<_, i64>(0),
-                )
-                .is_ok()
-        })
+        browser_auth::session(self, h).is_some()
     }
     fn access(&self, h: &HeaderMap, d: &Document, a: &Access) -> Result<(bool, bool)> {
         if self.owner(h) {
@@ -411,7 +398,10 @@ impl Store {
     }
 
     fn usage(&self, d: &Document, content: &str) -> usize {
-        let mut files: HashSet<PathBuf> = Self::references(content)
+        self.reference_usage(d, &Self::references(content))
+    }
+    fn reference_usage(&self, d: &Document, references: &HashSet<String>) -> usize {
+        let mut files: HashSet<PathBuf> = references
             .iter()
             .filter_map(|p| self.media_path(d, p).ok())
             .collect();
@@ -444,11 +434,15 @@ impl Store {
     fn room(&self, d: &Document) -> Result<Arc<Mutex<Room>>> {
         self.seed_active_media(d)?;
         let mut rooms = self.rooms.lock().unwrap();
-        if let Some(r) = rooms.get(&d.id) {
-            return Ok(r.clone());
+        if let Some(r) = rooms.get(&d.id).cloned() {
+            drop(rooms);
+            self.store_room(d, &mut r.lock().unwrap())?;
+            return Ok(r);
         }
         if rooms.len() >= 64 {
-            rooms.retain(|_, r| Arc::strong_count(r) > 1 || r.lock().unwrap().disk_dirty);
+            rooms.retain(|_, r| {
+                Arc::strong_count(r) > 1 || r.lock().unwrap().save.needs_projection()
+            });
         }
         if rooms.len() >= 128 {
             return Err(ApiError(
@@ -456,11 +450,11 @@ impl Store {
                 "Too many active documents. Try again shortly.".into(),
             ));
         }
-        let StoredRoom { state:saved, baseline, intent:recovering, ending:mut line_ending, migrated:mut line_ending_migrated, browser_generation, protected_generation } =
+        let StoredRoom { state:saved, baseline, intent:recovering, target, ending:mut line_ending, migrated:mut line_ending_migrated, browser_generation, protected_generation } =
             self.db.lock().unwrap().query_row(
-                "SELECT state,disk_state,write_intent,line_ending,line_ending_migrated,browser_generation,protected_generation FROM docs WHERE id=?",
+                "SELECT state,disk_state,write_intent,line_ending,line_ending_migrated,browser_generation,protected_generation,write_target FROM docs WHERE id=?",
                 [&d.id],
-                |r| Ok(StoredRoom { state:r.get(0)?, baseline:r.get(1)?, intent:r.get(2)?, ending:r.get(3)?, migrated:r.get(4)?, browser_generation:r.get(5)?, protected_generation:r.get(6)? }),
+                |r| Ok(StoredRoom { state:r.get(0)?, baseline:r.get(1)?, intent:r.get(2)?, ending:r.get(3)?, migrated:r.get(4)?, browser_generation:r.get(5)?, protected_generation:r.get(6)?, target:r.get(7)? }),
             )?;
         let updates: Vec<Vec<u8>> = {
             let db = self.db.lock().unwrap();
@@ -474,7 +468,9 @@ impl Store {
         });
         if let Some(bytes) = &saved {
             doc.transact_mut()
-                .apply_update(Update::decode_v1(bytes).map_err(|_| bad("Invalid saved state."))?)
+                .apply_update(
+                    security::decode_update(bytes).map_err(|_| bad("Invalid saved state."))?,
+                )
                 .map_err(|_| bad("Invalid saved state."))?;
         } else {
             let mut file = DiskFile::open_read(&self.safe(&d.path, false)?)?
@@ -487,7 +483,9 @@ impl Store {
         }
         for update in &updates {
             doc.transact_mut()
-                .apply_update(Update::decode_v1(update).map_err(|_| bad("Invalid saved update."))?)
+                .apply_update(
+                    security::decode_update(update).map_err(|_| bad("Invalid saved update."))?,
+                )
                 .map_err(|_| bad("Invalid saved update."))?;
         }
         let original = doc
@@ -517,7 +515,7 @@ impl Store {
         disk_doc
             .transact_mut()
             .apply_update(
-                Update::decode_v1(&disk_state).map_err(|_| bad("Invalid disk baseline."))?,
+                security::decode_update(&disk_state).map_err(|_| bad("Invalid disk baseline."))?,
             )
             .map_err(|_| bad("Invalid disk baseline."))?;
         let before_normalizing = disk_doc.transact().state_vector();
@@ -529,7 +527,8 @@ impl Store {
                 .encode_state_as_update_v1(&before_normalizing);
             doc.transact_mut()
                 .apply_update(
-                    Update::decode_v1(&delta).map_err(|_| bad("Invalid line-ending migration."))?,
+                    security::decode_update(&delta)
+                        .map_err(|_| bad("Invalid line-ending migration."))?,
                 )
                 .map_err(|_| bad("Invalid line-ending migration."))?;
         }
@@ -555,38 +554,46 @@ impl Store {
         let (tx, _) = broadcast::channel(256);
         let pending_updates = Arc::new(Mutex::new(Vec::new()));
         let pending = pending_updates.clone();
+        let validation = validation::Validated::new(&doc)?;
+        let validation_updates = validation.updates();
         doc.observe_update_v1("durable-outbox", move |_, event| {
             pending.lock().unwrap().push(event.update.clone());
+            validation_updates.push(&event.update);
         })
         .map_err(|_| bad("Cannot observe document updates."))?;
+        let write_target = recovering.then(|| {
+            target
+                .unwrap_or_else(|| {
+                    text::render(&text::canonical(&original), &line_ending).into_bytes()
+                })
+                .into()
+        });
         let r = Arc::new(Mutex::new(Room {
             awareness: Awareness::new(doc),
+            validation,
             tx,
-            last_disk: disk.clone(),
-            line_ending,
-            line_ending_migrated,
-            persisted_disk,
-            persisted_intent: recovering,
-            disk_state,
-            persisted: if original.contains('\r') || migrated_baseline {
-                Vec::new()
-            } else {
-                saved.unwrap_or_default()
-            }
-            .into(),
+            save: save::SaveState::loaded(save::Loaded {
+                source: disk,
+                baseline: disk_state,
+                persisted_baseline: persisted_disk,
+                ending: line_ending,
+                migrated: line_ending_migrated,
+                target: write_target,
+                generation: browser_generation,
+                protected: protected_generation,
+            }),
+            journal: save::Journal::loaded(
+                original.contains('\r') || migrated_baseline || saved.is_none(),
+                updates.len(),
+                updates.iter().map(Vec::len).sum(),
+            ),
             pending_updates,
-            journal_len: updates.len(),
-            snapshot_at: 0,
-            browser_generation,
-            protected_generation,
-            disk_dirty: true,
-            disk_waiting: false,
-            recovering,
-            receipts: HashMap::new(),
             usage: None,
             pending_media: HashSet::new(),
         }));
         rooms.insert(d.id.clone(), r.clone());
+        drop(rooms);
+        self.store_room(d, &mut r.lock().unwrap())?;
         Ok(r)
     }
     fn archive_observed(&self, d: &Document, bytes: &[u8]) -> Result<()> {
@@ -677,46 +684,44 @@ impl Store {
         // A client may have queued an update just before an owner rename.
         let current = self.doc(&d.id)?;
         let d = &current;
-        if now() - r.snapshot_at >= 30 {
-            self.snapshot(d, &r.last_disk, false)?;
-            r.snapshot_at = now();
+        if now() - r.save.snapshot_at >= 30 {
+            self.snapshot(d, r.save.source(), false)?;
+            r.save.snapshot_at = now();
         }
-        r.disk_dirty = true;
-        // The database is a durable outbox, not an assumption that Markdown was
-        // already written. Its separate baseline survives an open desktop writer
-        // and a server restart without replaying desktop changes at wrong offsets.
-        self.store_room(d, r, r.recovering)?;
+        let was_waiting = r.save.waiting();
+        let was_synced = !r.save.needs_projection() && r.pending_updates.lock().unwrap().is_empty();
+        r.save.request();
+        // Accepted updates are durable before examining the filesystem. An
+        // interrupted projection retains its intent even when new edits arrive.
+        self.store_room(d, r)?;
         let path = match self.safe(&d.path, false) {
             Ok(path) => path,
             Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => {
-                r.waiting(true);
+                r.waiting();
                 return Ok(false);
             }
             Err(error) => return Err(error),
         };
-        let writer = if r.recovering || room_text(r) != r.last_disk {
+        let writer = if !was_synced && (r.save.interrupted() || room_text(r) != r.save.source()) {
             DiskFile::open(&path)?
         } else {
             None
         };
         let Some(mut file) = (match writer {
             Some(file) => Some(file),
-            // Open readers must not block importing a completed desktop save.
-            // A read lease still excludes every existing or arriving writer.
+            // A read lease excludes desktop writers, but permits importing a
+            // completed save while an unrelated reader still has the file open.
             None => DiskFile::open_read(&path)?,
         }) else {
-            r.waiting(true);
+            r.waiting();
             return Ok(false);
         };
         let observed = file.read_bytes()?;
-        let old_projection = text::render(&r.last_disk, &r.line_ending);
-        let intended_projection = text::render(&room_text(r), &r.line_ending);
-        let recoverable = r.recovering
-            && text::interrupted(
-                old_projection.as_bytes(),
-                intended_projection.as_bytes(),
-                &observed,
-            );
+        let old_projection = text::render(r.save.source(), r.save.ending());
+        let recoverable = r
+            .save
+            .target()
+            .is_some_and(|target| text::interrupted(old_projection.as_bytes(), target, &observed));
         let raw_disk = match String::from_utf8(observed.clone()) {
             Ok(source) => source,
             Err(_) if recoverable => String::from_utf8_lossy(&observed).into_owned(),
@@ -726,31 +731,35 @@ impl Store {
                 ));
             }
         };
-        if r.recovering && observed != intended_projection.as_bytes() {
-            // Preserve exact bytes, including torn UTF-8. The content-addressed
-            // archive is idempotent across retries and never replaces user data.
+        if r.save.target().is_some_and(|target| observed != target) {
             self.archive_observed(d, &observed)?;
             self.snapshot(d, &text::canonical(&raw_disk), true)?;
             if !recoverable {
-                // A complete desktop save made since the crash has its own
-                // changes. Merge it from the old disk baseline instead of
-                // overwriting it with the interrupted browser intent.
-                r.recovering = false;
+                // A complete desktop save after the crash is merged from the
+                // previous causal baseline, never overwritten as a torn image.
+                r.save.external_save();
             }
         }
-        r.line_ending = text::ending(&raw_disk, &r.line_ending);
+        r.save.observe_ending(&raw_disk);
         let disk = text::canonical(&raw_disk);
-        if !r.recovering && disk != r.last_disk {
-            // An external editor supplies no causal version for a whole-file
-            // replacement. Keep accepted browser edits before importing its diff,
-            // even when this save falls inside the normal snapshot interval.
-            if r.browser_generation != r.protected_generation {
-                self.snapshot(d, &room_text(r), true)?;
-                r.protected_generation = r.browser_generation;
+        if was_synced && disk == r.save.source() {
+            // A read of an unchanged, already fsynced document must not create
+            // another full baseline and SQLite fsync. Source-identical edits
+            // still take the normal path because their CRDT journal is pending.
+            if !file.is_current(&path) || !file.intact() {
+                r.waiting();
+                return Ok(false);
             }
-            self.grant_new_references(d, &r.last_disk, &disk)?;
-            // Apply the desktop diff to the exact CRDT baseline it was based on,
-            // then merge that update with any browser changes already in memory.
+            self.store_room(d, r)?; // persist an external line-ending change
+            r.save.complete();
+            return Ok(true);
+        }
+        if !r.save.interrupted() && disk != r.save.source() {
+            if r.save.unprotected() {
+                self.snapshot(d, &room_text(r), true)?;
+                r.save.protect();
+            }
+            self.grant_new_references(d, r.save.source(), &disk)?;
             let baseline = Doc::with_options(Options {
                 offset_kind: OffsetKind::Utf16,
                 ..Options::default()
@@ -758,11 +767,12 @@ impl Store {
             baseline
                 .transact_mut()
                 .apply_update(
-                    Update::decode_v1(&r.disk_state).map_err(|_| bad("Invalid disk baseline."))?,
+                    security::decode_update(r.save.baseline())
+                        .map_err(|_| bad("Invalid disk baseline."))?,
                 )
                 .map_err(|_| bad("Invalid disk baseline."))?;
             let baseline_vector = baseline.transact().state_vector();
-            apply_text(&baseline, &r.last_disk, &disk);
+            apply_text(&baseline, r.save.source(), &disk);
             let desktop_update = baseline
                 .transact()
                 .encode_state_as_update_v1(&baseline_vector);
@@ -770,48 +780,46 @@ impl Store {
                 .doc()
                 .transact_mut()
                 .apply_update(
-                    Update::decode_v1(&desktop_update)
+                    security::decode_update(&desktop_update)
                         .map_err(|_| bad("Invalid desktop update."))?,
                 )
                 .map_err(|_| bad("Invalid desktop update."))?;
-            r.last_disk = disk.clone();
-            r.disk_state = baseline
-                .transact()
-                .encode_state_as_update_v1(&StateVector::default())
-                .into();
-            // Imported source and its causal baseline must survive a crash
-            // before another browser can observe the import.
-            self.store_room(d, r, false)?;
+            r.save.imported(
+                disk.clone(),
+                baseline
+                    .transact()
+                    .encode_state_as_update_v1(&StateVector::default()),
+            );
+            // Source and causal baseline must survive before peers see imports.
+            self.store_room(d, r)?;
         }
-        let text = room_text(r);
-        self.settle_uploads(d, &text)?;
-        if text != disk && !file.writable() {
-            // Import and broadcast desktop changes now, but retain queued
-            // browser writes durably until exclusive projection is possible.
-            self.store_room(d, r, r.recovering)?;
-            r.waiting(true);
+        let source = room_text(r);
+        self.settle_uploads(d, &source)?;
+        if source != disk && !file.writable() {
+            self.store_room(d, r)?;
+            r.waiting();
             return Ok(false);
         }
-        // Persist the intended full text BEFORE touching the file. A crash in
-        // write/truncate/fsync is repaired from this intent on the next open.
         if !file.is_current(&path) || !file.intact() {
-            r.waiting(true);
+            r.waiting();
             return Ok(false);
         }
-        self.store_room(d, r, text != disk)?;
-        if !file.intact() {
-            self.store_room(d, r, r.recovering)?;
-            r.waiting(true);
-            return Ok(false);
-        }
-        if text != disk {
-            r.recovering = true;
-            file.write(&text::render(&text, &r.line_ending))?;
+        if source != disk {
+            // Intent is its own durable phase. Any error after this transition
+            // is retried as an interrupted write, including SQL/fsync errors.
+            r.save
+                .prepare_write(text::render(&source, r.save.ending()).into_bytes());
+            self.store_room(d, r)?;
+            if !file.intact() {
+                r.waiting();
+                return Ok(false);
+            }
+            file.write(&text::render(&source, r.save.ending()))?;
         }
         if !file.is_current(&path) {
-            r.recovering = false;
-            self.store_room(d, r, false)?;
-            r.waiting(true);
+            r.save.external_save();
+            self.store_room(d, r)?;
+            r.waiting();
             return Ok(false);
         }
         let state = r
@@ -819,33 +827,30 @@ impl Store {
             .doc()
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        r.last_disk = text;
-        r.disk_state = state.into();
-        r.recovering = false;
-        self.store_room(d, r, false)?;
-        r.disk_dirty = false;
-        let usage = self.usage(d, &r.last_disk);
+        r.save.projected(source, state);
+        self.store_room(d, r)?;
+        r.save.complete();
+        let usage = self.usage(d, r.save.source());
         if r.usage != Some(usage) {
             r.usage = Some(usage);
             let _ =
                 r.tx.send(Message::Custom(123, usage.to_string().into_bytes()).encode_v1());
         }
-        for (_, receipt) in r.receipts.drain() {
+        for (_, receipt) in r.save.receipts.drain() {
             let _ =
                 r.tx.send(Message::Custom(127, receipt.into_bytes()).encode_v1());
         }
-        r.waiting(false);
+        if was_waiting {
+            let _ = r.tx.send(Message::Custom(121, b"0".to_vec()).encode_v1());
+        }
         Ok(true)
     }
-    fn store_room(&self, d: &Document, r: &mut Room, intent: bool) -> Result<()> {
-        self.commit_room(d, r, intent, &[])
+    fn store_room(&self, d: &Document, r: &mut Room) -> Result<()> {
+        self.commit_room(d, r, &[])
     }
-    fn commit_room(&self, d: &Document, r: &mut Room, intent: bool, rows: &[Value]) -> Result<()> {
-        // Accepted CRDT deltas are the durable outbox. Small edits append small
-        // transactions; full checkpoints are bounded maintenance work, not a
-        // prerequisite for every keystroke. Disk baselines remain independent.
+    fn commit_room(&self, d: &Document, r: &mut Room, rows: &[Value]) -> Result<()> {
         let mut pending = r.pending_updates.lock().unwrap();
-        let checkpoint = r.persisted.is_empty() || (r.journal_len + pending.len() >= 128);
+        let checkpoint = r.journal.checkpoint(&pending);
         let state = checkpoint.then(|| {
             r.awareness
                 .doc()
@@ -854,13 +859,13 @@ impl Store {
         });
         if pending.is_empty()
             && !checkpoint
-            && Arc::ptr_eq(&r.disk_state, &r.persisted_disk)
-            && intent == r.persisted_intent
+            && !r.save.needs_commit()
             && rows.is_empty()
             && r.pending_media.is_empty()
         {
             return Ok(());
         }
+        let current_references = r.validation.references(r.awareness.doc())?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         if let Some(state) = &state {
@@ -874,34 +879,32 @@ impl Store {
                 )?;
             }
         }
-        if !Arc::ptr_eq(&r.disk_state, &r.persisted_disk) {
+        if r.save.baseline_changed() {
             tx.execute(
                 "UPDATE docs SET disk_state=? WHERE id=?",
-                params![r.disk_state.as_ref(), d.id],
+                params![r.save.baseline(), d.id],
             )?;
         }
-        tx.execute(
-            "UPDATE docs SET write_intent=?,line_ending=?,line_ending_migrated=?,browser_generation=?,protected_generation=? WHERE id=?",
-            params![intent, r.line_ending, r.line_ending_migrated, r.browser_generation, r.protected_generation, d.id],
-        )?;
-        for c in rows {
-            tx.execute("INSERT INTO comments(id,doc,guest,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", params![c["id"].as_str(),d.id,c["guest"].as_str().unwrap_or(""),c.to_string()])?;
+        if r.save.target_changed() {
+            tx.execute(
+                "UPDATE docs SET write_target=? WHERE id=?",
+                params![r.save.target(), d.id],
+            )?;
         }
-        self.commit_active_media(&tx, d, &room_text(r), &r.pending_media)?;
+        tx.execute("UPDATE docs SET write_intent=?,line_ending=?,line_ending_migrated=?,browser_generation=?,protected_generation=? WHERE id=?",
+            params![r.save.interrupted(), r.save.ending(), r.save.migrated(), r.save.generation(), r.save.protected(), d.id])?;
+        for c in rows {
+            tx.execute("INSERT INTO comments(id,doc,guest,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET guest=excluded.guest,data=excluded.data", params![c["id"].as_str(),d.id,c["guest"].as_str().unwrap_or(""),c.to_string()])?;
+        }
+        self.commit_media_references(&tx, d, &current_references, &r.pending_media)?;
         tx.commit()?;
         r.pending_media.clear();
-        if let Some(state) = state {
-            r.persisted = state.into();
-            r.journal_len = 0;
-        } else {
-            r.journal_len += pending.len();
-        }
+        r.journal.committed(checkpoint, &pending);
+        r.save.committed();
         for delta in pending.drain(..) {
             let _ =
                 r.tx.send(Message::Sync(SyncMessage::Update(delta)).encode_v1());
         }
-        r.persisted_disk = r.disk_state.clone();
-        r.persisted_intent = intent;
         Ok(())
     }
     fn settle_uploads(&self, d: &Document, content: &str) -> Result<()> {
@@ -925,15 +928,16 @@ impl Store {
     }
 }
 impl Room {
-    fn waiting(&mut self, waiting: bool) {
-        if self.disk_waiting != waiting {
-            self.disk_waiting = waiting;
+    fn waiting(&mut self) {
+        if !self.save.waiting() {
+            self.save.block();
             let _ = self
                 .tx
-                .send(Message::Custom(121, if waiting { b"1" } else { b"0" }.to_vec()).encode_v1());
+                .send(Message::Custom(121, b"1".to_vec()).encode_v1());
         }
     }
 }
+
 fn room_text(r: &Room) -> String {
     r.awareness
         .doc()
@@ -1022,8 +1026,9 @@ fn configuration_extra(s: &Store, h: &HeaderMap, extra: Value) -> Response {
     let guest = cookie(h, "locdoc_guest")
         .filter(|x| x.len() == 64)
         .unwrap_or_else(token);
-    let mut value = json!({"owner":s.owner(h),"root":if s.owner(h){s.root.to_string_lossy().to_string()}else{String::new()},"guest":hash(&guest),"publicUrl":s.public_url,"limits":{"image":5*MB,"video":20*MB,"document":DOC_LIMIT}});
-    if s.owner(h) {
+    let owner = s.owner(h);
+    let mut value = json!({"owner":owner,"root":if owner{s.root.to_string_lossy().to_string()}else{String::new()},"guest":hash(&guest),"publicUrl":s.public_url,"limits":{"image":5*MB,"video":20*MB,"document":DOC_LIMIT}});
+    if owner {
         value["ownerName"] = json!(s.owner_name);
     }
     value
@@ -1035,11 +1040,7 @@ fn configuration_extra(s: &Store, h: &HeaderMap, extra: Value) -> Response {
         header::SET_COOKIE,
         format!(
             "locdoc_guest={guest}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000{}",
-            if s.public_url.starts_with("https")
-                && h.get(header::HOST)
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|x| !x.starts_with("localhost") && !x.starts_with("127.0.0.1"))
-            {
+            if browser_auth::cookie_session(s, h) {
                 "; Secure"
             } else {
                 ""
@@ -1048,6 +1049,7 @@ fn configuration_extra(s: &Store, h: &HeaderMap, extra: Value) -> Response {
         .parse()
         .unwrap(),
     );
+    browser_auth::migrate_cookie(s, h, &mut res);
     res
 }
 async fn config(State(s): State<App>, h: HeaderMap) -> Response {
@@ -1064,26 +1066,14 @@ async fn login(State(s): State<App>, h: HeaderMap, Json(b): Json<Login>) -> Resu
     }
     let t = token();
     s.db.lock().unwrap().execute(
-        "INSERT INTO sessions(hash,expires) VALUES(?,?)",
-        params![hash(&t), now() + 365 * 86400],
+        "INSERT INTO sessions(hash,expires,transport) VALUES(?,?,?)",
+        params![
+            hash(&t),
+            now() + 365 * 86400,
+            browser_auth::transport(&s, &h)
+        ],
     )?;
-    let mut res = Json(json!({"ok":true})).into_response();
-    let secure = if h
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|x| x.starts_with("localhost") || x.starts_with("127.0.0.1"))
-    {
-        ""
-    } else {
-        "; Secure"
-    };
-    res.headers_mut().insert(
-        header::SET_COOKIE,
-        format!("locdoc_owner={t}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000{secure}")
-            .parse()
-            .unwrap(),
-    );
-    Ok(res)
+    Ok(browser_auth::login_response(&s, &h, &t))
 }
 async fn issue_ticket(State(s): State<App>, h: HeaderMap) -> Result<Json<Value>> {
     let local = h
@@ -1122,41 +1112,22 @@ async fn redeem(State(s): State<App>, h: HeaderMap, Json(b): Json<Redeem>) -> Re
     }
     let t = token();
     db.execute(
-        "INSERT INTO sessions(hash,expires) VALUES(?,?)",
-        params![hash(&t), now() + 365 * 86400],
+        "INSERT INTO sessions(hash,expires,transport) VALUES(?,?,?)",
+        params![
+            hash(&t),
+            now() + 365 * 86400,
+            browser_auth::transport(&s, &h)
+        ],
     )?;
-    let secure = if h
-        .get(header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h.starts_with("127.0.0.1:") || h.starts_with("localhost:"))
-    {
-        ""
-    } else {
-        "; Secure"
-    };
-    let mut res = Json(json!({"ok":true})).into_response();
-    res.headers_mut().insert(
-        header::SET_COOKIE,
-        format!("locdoc_owner={t}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000{secure}")
-            .parse()
-            .unwrap(),
-    );
-    Ok(res)
+    Ok(browser_auth::login_response(&s, &h, &t))
 }
 async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
-    if let Some(t) = cookie(&h, "locdoc_owner") {
+    if let Some(digest) = browser_auth::session(&s, &h) {
         s.db.lock()
             .unwrap()
-            .execute("DELETE FROM sessions WHERE hash=?", [hash(&t)])?;
+            .execute("DELETE FROM sessions WHERE hash=?", [digest])?;
     }
-    let mut res = Json(json!({"ok":true})).into_response();
-    res.headers_mut().insert(
-        header::SET_COOKIE,
-        "locdoc_owner=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
-            .parse()
-            .unwrap(),
-    );
-    Ok(res)
+    Ok(browser_auth::logout_response())
 }
 #[derive(Serialize)]
 struct Entry {
@@ -1267,8 +1238,11 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
     let room = s.room(d)?;
     let mut room = room.lock().unwrap();
     if let Err(error) = s.persist(d, &mut room) {
-        room.waiting(true);
+        room.waiting();
         tracing::warn!("durable document opened with projection pending: {error}");
+        // A failed desktop import may have changed the in-memory CRDT. Never
+        // expose that candidate in a bootstrap until its retry is durable.
+        s.store_room(d, &mut room)?;
     }
     let content = room_text(&room);
     let state = room
@@ -1283,7 +1257,7 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         None
     };
     Ok(
-        json!({"id":d.id,"path":if owner{d.path.clone()}else{Path::new(&d.path).file_name().unwrap().to_string_lossy().to_string()},"owner":owner,"edit":edit,"permission":if owner{d.permission.as_str()}else if edit{"edit"}else{"view"},"shareUrl":link,"usage":usage,"modified":s.safe(&d.path,false).ok().and_then(|path| fs::metadata(path).ok()).and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|d|d.as_secs()),"content":content,"state":BASE64.encode(state),"diskPending":room.disk_waiting,"lineEndingMigrated":room.line_ending_migrated,"collaborationEpoch":s.epoch(&d.id)?}),
+        json!({"id":d.id,"path":if owner{d.path.clone()}else{Path::new(&d.path).file_name().unwrap().to_string_lossy().to_string()},"owner":owner,"edit":edit,"permission":if owner{d.permission.as_str()}else if edit{"edit"}else{"view"},"shareUrl":link,"usage":usage,"modified":s.safe(&d.path,false).ok().and_then(|path| fs::metadata(path).ok()).and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|d|d.as_secs()),"content":content,"state":BASE64.encode(state),"diskPending":room.save.waiting(),"lineEndingMigrated":room.save.migrated(),"collaborationEpoch":s.epoch(&d.id)?,"mediaToken":if owner {browser_auth::media_token(s,h,&d.id)} else {None}}),
     )
 }
 async fn document(
@@ -1513,22 +1487,28 @@ async fn media(
     h: HeaderMap,
 ) -> Result<Response> {
     let d = s.doc(&id)?;
-    let (owner, _) = s.access(
-        &h,
-        &d,
-        &Access {
-            token: q.token,
-            ..Access::default()
-        },
-    )?;
+    let capability = q
+        .token
+        .as_deref()
+        .is_some_and(|token| browser_auth::media_allowed(&s, &d.id, token));
+    let owner = capability
+        || s.access(
+            &h,
+            &d,
+            &Access {
+                token: q.token,
+                ..Access::default()
+            },
+        )?
+        .0;
     let path = s.media_path(&d, &q.path)?;
-    if !owner {
+    if !owner || capability {
         let text = fs::read_to_string(s.safe(&d.path, false)?)?;
         let allowed = Store::references(&text)
             .iter()
             .filter_map(|p| s.media_path(&d, p).ok())
             .any(|p| p == path);
-        if !allowed || !s.active_attachment_allowed(&d, &path) {
+        if !allowed || (!capability && !s.active_attachment_allowed(&d, &path)) {
             return Err(denied());
         }
     }
@@ -1740,7 +1720,11 @@ async fn websocket(
     };
     let target = d.clone();
     let r = job(s.clone(), move |s| s.room(&target)).await?;
+    let protocols = browser_auth::websocket_protocol(&h)
+        .into_iter()
+        .collect::<Vec<_>>();
     Ok(ws
+        .protocols(protocols)
         .max_message_size(6 * MB)
         .on_upgrade(move |socket| async move {
             let _visitor = visitor;
@@ -1795,7 +1779,7 @@ async fn socket_loop(
     let initial = {
         let r = room.lock().unwrap();
         let mut v = vec![
-            Message::Custom(121, if r.disk_waiting { b"1" } else { b"0" }.to_vec()).encode_v1(),
+            Message::Custom(121, if r.save.waiting() { b"1" } else { b"0" }.to_vec()).encode_v1(),
             Message::Sync(SyncMessage::SyncStep1(
                 r.awareness.doc().transact().state_vector(),
             ))
@@ -1871,7 +1855,7 @@ async fn socket_loop(
     }
     {
         let mut r = room.lock().unwrap();
-        r.receipts.remove(&peer.id);
+        r.save.receipts.remove(&peer.id);
         for client in &peer.clients {
             r.awareness.remove_state(*client);
         }
@@ -1992,6 +1976,10 @@ fn process_frame(
         }
     }
     let mut r = room.lock().unwrap();
+    // A previous SQLite failure may have left accepted deltas queued in the
+    // authoritative room. No bootstrap, receipt or sync response may expose
+    // them until its durable outbox has committed successfully.
+    s.store_room(d, &mut r)?;
     if let Message::Custom(124, ref payload) = message {
         if !edit || payload.len() != 36 || uuid::Uuid::try_parse_ascii(payload).is_err() {
             return Err(denied());
@@ -2004,13 +1992,13 @@ fn process_frame(
             peer.held_receipt = Some(receipt);
             return Ok(vec![Message::Custom(122, payload.clone()).encode_v1()]);
         }
-        if !r.disk_dirty {
+        if !r.save.needs_projection() {
             return Ok(vec![Message::Custom(127, payload.clone()).encode_v1()]);
         }
-        if !r.receipts.contains_key(&peer.id) && r.receipts.len() >= 128 {
+        if !r.save.receipts.contains_key(&peer.id) && r.save.receipts.len() >= 128 {
             return Err(bad("Too many pending save checkpoints."));
         }
-        r.receipts.insert(peer.id, receipt);
+        r.save.receipts.insert(peer.id, receipt);
         return Ok(vec![Message::Custom(122, payload.clone()).encode_v1()]);
     }
     if mutation
@@ -2023,93 +2011,67 @@ fn process_frame(
         return Ok(vec![]);
     }
     let mut approved_media = HashSet::new();
-    if mutation {
-        let preview = Doc::with_options(Options {
-            offset_kind: OffsetKind::Utf16,
-            ..Options::default()
-        });
-        let current = r
-            .awareness
-            .doc()
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default());
-        preview
-            .transact_mut()
-            .apply_update(Update::decode_v1(&current).map_err(|_| bad("Invalid state"))?)
-            .map_err(|_| bad("Invalid state"))?;
-        if let Message::Sync(SyncMessage::SyncStep2(ref update) | SyncMessage::Update(ref update)) =
-            message
-        {
-            preview
-                .transact_mut()
-                .apply_update(Update::decode_v1(update).map_err(|_| bad("Invalid update"))?)
-                .map_err(|_| bad("Invalid update"))?;
-        }
-        let unresolved = {
-            let txn = preview.transact();
-            (
-                txn.store().pending_update().is_some(),
-                txn.store().pending_ds().is_some(),
-            )
+    if let Message::Sync(SyncMessage::SyncStep2(ref update) | SyncMessage::Update(ref update)) =
+        message
+    {
+        let checked = {
+            let Room {
+                validation,
+                awareness,
+                ..
+            } = &mut *r;
+            validation.check(awareness.doc(), update)?
         };
-        if unresolved.0 || unresolved.1 {
-            // Reconnects can deliver a live delta before its missing draft
-            // predecessors. Keep it out of the authoritative room and request
-            // a complete causal reply instead of permanently rejecting it.
+        let validation::Check::Valid { before, after } = checked else {
+            // A reconnect may deliver a delta before its causal predecessors.
+            // The speculative replica is discarded; authoritative state stays
+            // clean while the peer supplies a complete synchronization reply.
             peer.awaiting_sync = true;
-            tracing::debug!(
-                pending_insert = unresolved.0,
-                pending_delete = unresolved.1,
-                "Requesting synchronization dependencies"
-            );
             return Ok(vec![
                 Message::Sync(SyncMessage::SyncStep1(
                     r.awareness.doc().transact().state_vector(),
                 ))
                 .encode_v1(),
             ]);
-        }
-        let content = security::validate_document(&preview)?;
-        if content.contains('\r') {
-            return Err(bad(
-                "Document updates must use LF line endings. Reload to keep editing.",
-            ));
-        }
-        if preview
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default())
-            .len()
-            > 20 * MB
-        {
-            return Err(bad("Document collaboration history is too large."));
-        }
-        if !owner {
-            approved_media =
-                s.validate_references(d, &room_text(&r), &content, &mut peer.media_paths)?;
-        }
-        if content.len() > 5 * MB {
-            return Err(bad("Document exceeds 5 MB."));
-        }
-        if s.usage(d, &content) > DOC_LIMIT && s.usage(d, &content) > s.usage(d, &room_text(&r)) {
-            return Err(bad("Document exceeds its 50 MB attachment limit."));
+        };
+        let media_check: Result<()> = (|| {
+            if !owner {
+                approved_media =
+                    s.validate_reference_sets(d, &before, &after, &mut peer.media_paths)?;
+            }
+            if before != after {
+                let usage = s.reference_usage(d, &after);
+                if usage > DOC_LIMIT && usage > s.reference_usage(d, &before) {
+                    return Err(bad("Document exceeds its 50 MB attachment limit."));
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = media_check {
+            r.validation.reject();
+            return Err(error);
         }
     }
     let before_updates = r.pending_updates.lock().unwrap().len();
-    let response = DefaultProtocol
-        .handle_message(&mut r.awareness, message)
-        .map_err(|_| bad("Invalid sync update."))?;
+    let response = match DefaultProtocol.handle_message(&mut r.awareness, message) {
+        Ok(response) => response,
+        Err(_) => {
+            r.validation.reject();
+            return Err(bad("Invalid sync update."));
+        }
+    };
     if mutation {
         if r.pending_updates.lock().unwrap().len() > before_updates {
-            r.browser_generation += 1;
+            r.save.edited();
         }
 
         r.pending_media.extend(approved_media);
-        r.disk_dirty = true;
-        s.store_room(d, &mut r, false)?;
+        r.save.request();
+        s.store_room(d, &mut r)?;
         if peer.awaiting_sync {
             peer.awaiting_sync = false;
             if let Some(receipt) = peer.held_receipt.take() {
-                r.receipts.insert(peer.id, receipt);
+                r.save.receipts.insert(peer.id, receipt);
             }
         }
         // Projection is coalesced by the coordinator. Broadcast immediately
@@ -2159,13 +2121,13 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                 for (id, room) in rooms {
                     let mut r = room.lock().unwrap();
                     if rescan {
-                        r.disk_dirty = true;
+                        r.save.request();
                     }
-                    if r.disk_dirty
+                    if r.save.needs_projection()
                         && let Ok(d) = s.doc(&id)
                         && let Err(error) = s.persist(&d, &mut r)
                     {
-                        r.waiting(true);
+                        r.waiting();
                         tracing::warn!("pending disk save failed: {error}");
                     }
                 }
@@ -2210,13 +2172,13 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                     let room = s.rooms.lock().unwrap().get(&d.id).cloned();
                     if let Some(room) = room {
                         let mut r = room.lock().unwrap();
-                        if !r.disk_dirty
+                        if !r.save.needs_projection()
                             && fs::read_to_string(&p).is_ok_and(|source| {
-                                text::canonical(&source) != r.last_disk
-                                    || text::ending(&source, &r.line_ending) != r.line_ending
+                                text::canonical(&source) != r.save.source()
+                                    || text::ending(&source, r.save.ending()) != r.save.ending()
                             })
                         {
-                            r.disk_dirty = true;
+                            r.save.request();
                         }
                     }
                 }
@@ -2285,11 +2247,11 @@ fn restore_document(s: &Store, id: String, revision: String) -> Result<Value> {
             "Finish the desktop save before restoring a version.".into(),
         ));
     }
-    s.snapshot(&d, &r.last_disk, true)?;
+    s.snapshot(&d, r.save.source(), true)?;
     let content = text::canonical(&content);
-    apply_text(r.awareness.doc(), &r.last_disk, &content);
-    r.browser_generation += 1;
-    s.grant_new_references(&d, &r.last_disk, &content)?;
+    apply_text(r.awareness.doc(), r.save.source(), &content);
+    r.save.edited();
+    s.grant_new_references(&d, r.save.source(), &content)?;
     s.persist(&d, &mut r)?;
     Ok(json!({"ok":true}))
 }
@@ -2691,7 +2653,7 @@ mod tests {
             fs::read_to_string(&path).unwrap(),
             "Another completed desktop save Browser addition."
         );
-        assert!(room.lock().unwrap().receipts.is_empty());
+        assert!(room.lock().unwrap().save.receipts.is_empty());
     }
     #[test]
     fn pending_browser_edits_and_the_disk_baseline_survive_restart_with_a_writer_open() {
@@ -2746,7 +2708,9 @@ mod tests {
                 8,
                 " committed browser text",
             );
-            s.store_room(&d, &mut r, true).unwrap();
+            let target = text::render(&room_text(&r), r.save.ending()).into_bytes();
+            r.save.prepare_write(target);
+            s.store_room(&d, &mut r).unwrap();
         }
         fs::write(&path, "Original committed").unwrap();
         drop(room);
@@ -2872,10 +2836,10 @@ mod tests {
             );
             fs::write(s.root.join("unicode.md"), "a👋c").unwrap();
             s.persist(&d, &mut r).unwrap();
-            assert_eq!(r.last_disk, "🌍a👋c");
+            assert_eq!(r.save.source(), "🌍a👋c");
         }
         s.rooms.lock().unwrap().remove(&d.id);
-        assert_eq!(s.room(&d).unwrap().lock().unwrap().last_disk, "🌍a👋c");
+        assert_eq!(s.room(&d).unwrap().lock().unwrap().save.source(), "🌍a👋c");
     }
     fn store() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
@@ -2889,7 +2853,13 @@ mod tests {
     }
     #[tokio::test]
     async fn public_owner_ticket_sets_a_secure_cookie() {
-        let (_dir, s) = store();
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            dir.path().join("docs"),
+            dir.path().join("state"),
+            "https://notes.example.com".into(),
+        )
+        .unwrap();
         let t = token();
         s.db.lock()
             .unwrap()
@@ -2987,11 +2957,14 @@ mod tests {
             s.persist(&d, &mut r).unwrap();
             fs::write(s.root.join("test.md"), "Start\nDesktop change 👋\n").unwrap();
             s.persist(&d, &mut r).unwrap();
-            assert_eq!(r.last_disk, "Start\nDesktop change 👋\n");
+            assert_eq!(r.save.source(), "Start\nDesktop change 👋\n");
         }
         s.rooms.lock().unwrap().remove(&d.id);
         let room = s.room(&d).unwrap();
-        assert_eq!(room.lock().unwrap().last_disk, "Start\nDesktop change 👋\n");
+        assert_eq!(
+            room.lock().unwrap().save.source(),
+            "Start\nDesktop change 👋\n"
+        );
     }
     #[test]
     fn owner_access_overrides_public_permissions() {

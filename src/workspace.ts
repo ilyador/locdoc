@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { hasUnstoredDrafts } from "./drafts";
 import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
-import { api, send } from "./api";
+import { api, ownerSession, send } from "./api";
 import { normalizePresence } from "./presence";
 import {
   sharedToken,
@@ -125,16 +125,18 @@ export function useWorkspace() {
     }
     const open = async () => {
       if (sharedToken) {
-        const response = await (window.__locdocOpen ||
-          fetch(
-            `/api/open/${encodeURIComponent(sharedToken)}${location.search}`,
-          ));
-        if (!response)
-          throw new Error(
-            "Could not connect. Check your connection and reload.",
-          );
-        const data = await response.json();
-        if (!response.ok)
+        const response = ownerSession()
+          ? null
+          : await (window.__locdocOpen ||
+              fetch(
+                `/api/open/${encodeURIComponent(sharedToken)}${location.search}`,
+              ));
+        const data = response
+          ? await response.json()
+          : await api<Config & { document: Document | null; entries: Entry[] }>(
+              `/api/open/${encodeURIComponent(sharedToken)}${location.search}`,
+            );
+        if (response && !response.ok)
           throw new Error(data.error || "This sharing link is unavailable.");
         setInitialDocument(data.document);
         folderView.current = !!data.folder;

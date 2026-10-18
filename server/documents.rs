@@ -145,6 +145,7 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     for (name, definition) in [
         ("disk_state", "BLOB"),
         ("write_intent", "INTEGER NOT NULL DEFAULT 0"),
+        ("write_target", "BLOB"),
         ("line_ending", "TEXT NOT NULL DEFAULT 'lf'"),
         ("line_ending_migrated", "INTEGER NOT NULL DEFAULT 0"),
         ("browser_generation", "INTEGER NOT NULL DEFAULT 0"),
@@ -441,7 +442,10 @@ impl Store {
             if let Some(room) = room {
                 let room = room.lock().unwrap();
                 let source = room_text(&room);
-                if room.disk_dirty || room.recovering || source != room.last_disk {
+                if room.save.needs_projection()
+                    || room.save.interrupted()
+                    || source != room.save.source()
+                {
                     self.snapshot(&self.doc(id)?, &source, true)?;
                 }
             }

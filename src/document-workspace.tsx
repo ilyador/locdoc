@@ -522,7 +522,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               </>
             )
           }
-          canResolve={!!doc?.edit || currentComment.guest === config?.guest}
+          canResolve={!!doc?.edit || !!currentComment.canResolve}
           onReply={(body) =>
             updateComment(currentComment.id, {
               body,
@@ -1060,7 +1060,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         editable={doc.edit}
                         id={doc.id}
                         scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
-                        token={sharedToken}
+                        token={doc.mediaToken || sharedToken}
                         path={doc.path}
                         entries={entries}
                         onLink={setLinkTarget}

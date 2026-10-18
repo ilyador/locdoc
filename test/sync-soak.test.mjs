@@ -96,6 +96,47 @@ test(
       if (r.headers.get("set-cookie"))
         cookie = r.headers.get("set-cookie").split(";")[0];
       const data = await r.json();
+      if (r.status === 409 && body?.anchor) {
+        // Keep a bounded causal diagnosis if a long-run comment fails. Never
+        // format a Y.Doc/store graph or complete source in assertion output.
+        const position = (ydoc, selected) => {
+          const absolute = Y.createAbsolutePositionFromRelativePosition(
+            Y.createRelativePositionFromJSON(selected), ydoc,
+          );
+          return absolute?.index ?? null;
+        };
+        data.causal = {
+          peers: peers.map((peer) => ({
+            synced: peer.provider.synced,
+            connected: peer.provider.wsconnected,
+            socket: peer.provider.ws?.readyState ?? null,
+            length: peer.text.length,
+            from: position(peer.ydoc, body.anchor.start),
+            to: position(peer.ydoc, body.anchor.end),
+            pendingClients: peer.ydoc.store.pendingStructs?.missing.size ?? 0,
+            pendingDeletes: peer.ydoc.store.pendingDs?.byteLength ?? 0,
+          })),
+          errors: errors.slice(-8).map((error) => String(error).slice(0, 180)),
+        };
+        try {
+          const response = await fetch(`${base}/api/docs/${doc.id}`, {
+            headers: { Authorization: `Bearer ${key}`, Cookie: cookie },
+            signal: AbortSignal.timeout(3000),
+          });
+          if (response.ok) {
+            const snapshot = await response.json();
+            const accepted = new Y.Doc();
+            try {
+              Y.applyUpdate(accepted, Buffer.from(snapshot.state, "base64"));
+              data.causal.server = {
+                length: accepted.getText("content").length,
+                from: position(accepted, body.anchor.start),
+                to: position(accepted, body.anchor.end),
+              };
+            } finally { accepted.destroy(); }
+          } else data.causal.serverStatus = response.status;
+        } catch { data.causal.serverUnavailable = true; }
+      }
       assert.equal(r.status, 200, JSON.stringify(data));
       return data;
     }

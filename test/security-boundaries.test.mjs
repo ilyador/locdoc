@@ -187,6 +187,54 @@ test("untrusted allocation counts are rejected without destabilizing other reque
   ])
     await rejected(doc, new Uint8Array(frame));
 });
+test("zero-length synchronization structures cannot be accepted or broadcast", async () => {
+  const doc = await create("zero-structs.md");
+  const observer = new WebSocket(
+    `${base.replace("http", "ws")}/ws/${doc.id}?token=${doc.token}&client=plain-text-v2`,
+  );
+  let published = 0;
+  observer.on("message", (bytes) => {
+    const decoder = decoding.createDecoder(new Uint8Array(bytes));
+    if (
+      decoding.readVarUint(decoder) === 0 &&
+      decoding.readVarUint(decoder) === 2
+    )
+      published++;
+  });
+  await once(observer, "open");
+  try {
+    const root = [...Buffer.from("content")];
+    for (const update of [
+      [1, 1, 43, 0, 0, 0, 0], // GC length zero
+      [1, 1, 43, 0, 10, 0, 0], // Skip length zero
+      [1, 1, 43, 0, 1, 1, 7, ...root, 0, 0], // Deleted length zero
+      [1, 1, 43, 0, 4, 1, 7, ...root, 0, 0], // String length zero
+      [1, 0, 43, 0, 0], // Empty client struct group
+      [0, 1, 43, 1, 0, 0], // Zero delete interval
+      [0, 1, 43, 0], // Empty client delete group
+    ]) {
+      await rejected(doc, updateFrame(new Uint8Array(update)));
+      const current = await request(`/api/docs/${doc.id}`);
+      assert.equal(current.content, doc.content);
+      const state = new Y.Doc();
+      Y.applyUpdate(state, Buffer.from(current.state, "base64"));
+      assert.equal(state.getText("content").toString(), doc.content);
+      state.destroy();
+    }
+    await delay(100);
+    assert.equal(
+      published,
+      0,
+      "Rejected structures must never enter the durable broadcast outbox",
+    );
+    assert.equal(
+      await readFile(join(dir, "docs/zero-structs.md"), "utf8"),
+      doc.content,
+    );
+  } finally {
+    observer.terminate();
+  }
+});
 test("hidden embeds, attributes, alternate roots and map data cannot enter the shared source", async () => {
   const doc = await create("schema.md");
   for (const mutate of [

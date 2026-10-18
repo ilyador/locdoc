@@ -95,7 +95,7 @@ fn accepted_updates_are_durable_before_broadcast_but_receipts_wait_for_projectio
             Message::Custom(122, _)
         ));
     }
-    assert_eq!(room.lock().unwrap().receipts.len(), 1);
+    assert_eq!(room.lock().unwrap().save.receipts.len(), 1);
     store.persist(&document, &mut room.lock().unwrap()).unwrap();
     let mut completed = vec![];
     while let Ok(bytes) = receiver.try_recv() {
@@ -268,11 +268,11 @@ fn legacy_unicode_line_endings_share_migration_ids_with_the_desktop_baseline() {
         {
             let room = room.lock().unwrap();
             assert_eq!(room_text(&room), "X😀one\ntwo\nthree");
-            assert_eq!(room.last_disk, "😀one\ntwo\nthree");
-            let desktop = decoded(&room.disk_state);
-            assert_eq!(source(&desktop), room.last_disk);
+            assert_eq!(room.save.source(), "😀one\ntwo\nthree");
+            let desktop = decoded(room.save.baseline());
+            assert_eq!(source(&desktop), room.save.source());
             let vector = desktop.transact().state_vector();
-            apply_text(&desktop, &room.last_disk, "😀one\nTWO\nthree");
+            apply_text(&desktop, room.save.source(), "😀one\nTWO\nthree");
             let diff = desktop.transact().encode_state_as_update_v1(&vector);
             let verifier = decoded(
                 &room
@@ -325,4 +325,293 @@ fn legacy_unicode_line_endings_share_migration_ids_with_the_desktop_baseline() {
             format!("X😀one{ending}TWO{ending}three")
         );
     }
+}
+
+#[test]
+fn failed_post_fsync_commit_keeps_projection_pending_and_receipts_unacknowledged() {
+    let (_dir, store, document) = fixture("Before");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    let mut peer = Peer::default();
+    process_frame(
+        &store,
+        &document,
+        &room,
+        &append_frame(&room, " browser"),
+        true,
+        true,
+        &mut peer,
+    )
+    .unwrap();
+    let receipt = uuid::Uuid::new_v4().to_string();
+    process_frame(
+        &store,
+        &document,
+        &room,
+        &Message::Custom(124, receipt.as_bytes().to_vec()).encode_v1(),
+        true,
+        true,
+        &mut peer,
+    )
+    .unwrap();
+    let mut receiver = room.lock().unwrap().tx.subscribe();
+    store.db.lock().unwrap().execute_batch(
+        "CREATE TRIGGER fail_baseline BEFORE UPDATE OF disk_state ON docs BEGIN SELECT RAISE(ABORT,'test baseline commit outage'); END;"
+    ).unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).is_err());
+    assert_eq!(
+        fs::read_to_string(store.root.join("test.md")).unwrap(),
+        "Before browser"
+    );
+    assert!(room.lock().unwrap().save.needs_projection());
+    let intent: bool = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_intent FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        intent,
+        "Accepted intent must survive the failed final commit"
+    );
+    while let Ok(bytes) = receiver.try_recv() {
+        assert!(
+            !matches!(Message::decode_v1(&bytes).unwrap(), Message::Custom(127, _)),
+            "A failed baseline commit cannot acknowledge a save"
+        );
+    }
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_baseline;")
+        .unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    assert!(!room.lock().unwrap().save.needs_projection());
+    let completed = std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter_map(|bytes| {
+            if let Message::Custom(127, value) = Message::decode_v1(&bytes).unwrap() {
+                Some(value)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed, vec![receipt.into_bytes()]);
+}
+
+#[test]
+fn new_browser_edits_preserve_a_blocked_interrupted_write_intent() {
+    let (_dir, store, document) = fixture("Old text");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    let mut peer = Peer::default();
+    process_frame(
+        &store,
+        &document,
+        &room,
+        &append_frame(&room, " first"),
+        true,
+        true,
+        &mut peer,
+    )
+    .unwrap();
+    {
+        let mut r = room.lock().unwrap();
+        let target = text::render(&room_text(&r), r.save.ending()).into_bytes();
+        r.save.prepare_write(target);
+        store.store_room(&document, &mut r).unwrap();
+    }
+    fs::write(store.root.join("test.md"), "Old text f").unwrap();
+    let writer = fs::OpenOptions::new()
+        .append(true)
+        .open(store.root.join("test.md"))
+        .unwrap();
+    assert!(!store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    process_frame(
+        &store,
+        &document,
+        &room,
+        &append_frame(&room, " second"),
+        true,
+        true,
+        &mut peer,
+    )
+    .unwrap();
+    assert!(room.lock().unwrap().save.interrupted());
+    assert!(room.lock().unwrap().save.waiting());
+    let intent: bool = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_intent FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        intent,
+        "A newer durable edit must not erase an interrupted write"
+    );
+    drop(writer);
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(
+        fs::read_to_string(store.root.join("test.md")).unwrap(),
+        "Old text first second"
+    );
+    assert!(!room.lock().unwrap().save.interrupted());
+    assert!(!room.lock().unwrap().save.waiting());
+}
+
+#[test]
+fn bootstrap_cannot_expose_a_desktop_import_that_failed_its_sql_commit() {
+    let (_dir, store, document) = fixture("Before");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", store.key).parse().unwrap(),
+    );
+    store.db.lock().unwrap().execute_batch(
+        "CREATE TRIGGER fail_bootstrap_import BEFORE INSERT ON doc_updates BEGIN SELECT RAISE(ABORT,'test import storage outage'); END;"
+    ).unwrap();
+    fs::write(store.root.join("test.md"), "Before and desktop").unwrap();
+    assert!(
+        document_payload(&store, &headers, &document, &Access::default()).is_err(),
+        "An uncommitted desktop import must not escape through the bootstrap"
+    );
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_bootstrap_import;")
+        .unwrap();
+    let payload = document_payload(&store, &headers, &document, &Access::default()).unwrap();
+    assert_eq!(payload["content"], "Before and desktop");
+    assert!(!room.lock().unwrap().save.needs_projection());
+}
+
+#[test]
+fn opening_an_unchanged_synced_document_does_not_rewrite_its_baseline() {
+    let (_dir, store, document) = fixture("Already fsynced\n");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", store.key).parse().unwrap(),
+    );
+    store.db.lock().unwrap().execute_batch(
+        "CREATE TRIGGER reject_redundant_baseline BEFORE UPDATE OF disk_state ON docs BEGIN SELECT RAISE(ABORT,'test baseline writes unavailable'); END;"
+    ).unwrap();
+    let before = store.db.lock().unwrap().total_changes();
+    for _ in 0..3 {
+        let payload = document_payload(&store, &headers, &document, &Access::default()).unwrap();
+        assert_eq!(payload["content"], "Already fsynced\n");
+        assert!(!room.lock().unwrap().save.needs_projection());
+    }
+    assert_eq!(
+        store.db.lock().unwrap().total_changes(),
+        before,
+        "Clean document reads must not issue redundant writes"
+    );
+    fs::write(store.root.join("test.md"), "Already fsynced\r\n").unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    let ending: String = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT line_ending FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ending, "crlf");
+}
+
+#[test]
+fn unchanged_visible_text_still_commits_new_crdt_identity_before_a_receipt() {
+    let (_dir, store, document) = fixture("Same source");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    let before: Vec<u8> = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT disk_state FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut peer = Peer::default();
+    let client = decoded(&before);
+    let vector = client.transact().state_vector();
+    let source = client.get_or_insert_text("content");
+    {
+        let mut txn = client.transact_mut();
+        source.remove_range(&mut txn, 0, 11);
+        source.insert(&mut txn, 0, "Same source");
+    }
+    let frame = Message::Sync(SyncMessage::Update(
+        client.transact().encode_state_as_update_v1(&vector),
+    ))
+    .encode_v1();
+    process_frame(&store, &document, &room, &frame, true, true, &mut peer).unwrap();
+    assert_eq!(room_text(&room.lock().unwrap()), "Same source");
+    assert!(room.lock().unwrap().save.needs_projection());
+    let receipt = uuid::Uuid::new_v4().to_string();
+    process_frame(
+        &store,
+        &document,
+        &room,
+        &Message::Custom(124, receipt.as_bytes().to_vec()).encode_v1(),
+        true,
+        true,
+        &mut peer,
+    )
+    .unwrap();
+    let mut received = room.lock().unwrap().tx.subscribe();
+    store.db.lock().unwrap().execute_batch(
+        "CREATE TRIGGER reject_identity_baseline BEFORE UPDATE OF disk_state ON docs BEGIN SELECT RAISE(ABORT,'test baseline identity outage'); END;"
+    ).unwrap();
+    assert!(
+        store.persist(&document, &mut room.lock().unwrap()).is_err(),
+        "A source-identical CRDT replacement still needs its baseline commit"
+    );
+    while let Ok(frame) = received.try_recv() {
+        assert!(!matches!(
+            Message::decode_v1(&frame).unwrap(),
+            Message::Custom(127, _)
+        ));
+    }
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_identity_baseline;")
+        .unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    let after: Vec<u8> = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT disk_state FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        decoded(&before).transact().state_vector(),
+        decoded(&after).transact().state_vector()
+    );
+    assert!(room.lock().unwrap().save.receipts.is_empty());
 }

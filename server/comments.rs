@@ -5,7 +5,7 @@ use super::*;
 use std::{ops::Range, sync::LazyLock};
 use yrs::{Assoc, IndexedSequence, StickyIndex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MessageText {
     name: String,
     body: String,
@@ -188,7 +188,54 @@ fn doc_relative(doc: &Doc, index: u32, assoc: Assoc) -> Value {
 fn relative(r: &Room, index: u32, assoc: Assoc) -> Value {
     doc_relative(r.awareness.doc(), index, assoc)
 }
+fn index_shape(value: &Value) -> bool {
+    let Some(fields) = value.as_object() else {
+        return false;
+    };
+    let mut scope = false;
+    for (key, value) in fields {
+        match key.as_str() {
+            "item" | "type" if !value.is_null() => {
+                let Some(id) = value.as_object() else {
+                    return false;
+                };
+                if id.len() != 2
+                    || !id
+                        .get("client")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|client| client <= 9_007_199_254_740_991)
+                    || !id
+                        .get("clock")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|clock| clock <= u32::MAX as u64)
+                {
+                    return false;
+                }
+                scope = true;
+            }
+            "tname" if !value.is_null() => {
+                if !value.as_str().is_some_and(|name| name.len() <= 100) {
+                    return false;
+                }
+                scope = true;
+            }
+            "assoc" if !value.is_null() => {
+                if !matches!(value.as_i64(), Some(-1 | 0)) {
+                    return false;
+                }
+            }
+            "item" | "type" | "tname" | "assoc" => {}
+            _ => return false,
+        }
+    }
+    scope
+}
 fn doc_offset(doc: &Doc, value: &Value) -> Option<u32> {
+    // yrs ClientID's serde constructor assumes JavaScript's 53-bit bound.
+    // Guard every ID (including unused alternative scopes) before invoking it.
+    if !index_shape(value) {
+        return None;
+    }
     let sticky: StickyIndex = serde_json::from_value(value.clone()).ok()?;
     let text = doc.get_or_insert_text("content");
     let txn = doc.transact();
@@ -201,33 +248,60 @@ fn offset(r: &Room, value: &Value) -> Option<u32> {
     doc_offset(r.awareness.doc(), value)
 }
 fn validate_anchor(anchor: &Value) -> Result<()> {
-    if anchor.to_string().len() > 2048
-        || serde_json::from_value::<StickyIndex>(anchor["start"].clone()).is_err()
-        || serde_json::from_value::<StickyIndex>(anchor["end"].clone()).is_err()
+    if !anchor.as_object().is_some_and(|fields| fields.len() == 2)
+        || !index_shape(&anchor["start"])
+        || !index_shape(&anchor["end"])
     {
         return Err(bad("Invalid comment anchor."));
     }
     Ok(())
 }
-async fn await_anchor(room: &Arc<Mutex<Room>>, anchor: &Value) -> Result<()> {
-    // An HTTP comment can overtake its selected characters on the WebSocket.
-    // Wait briefly for that causal update without holding the room lock or
-    // waiting for a desktop file to become writable.
-    for _ in 0..12 {
-        {
-            if let Ok(r) = room.try_lock()
-                && offset(&r, &anchor["start"]).is_some()
-                && offset(&r, &anchor["end"]).is_some()
+fn anchor_pending() -> ApiError {
+    ApiError(
+        StatusCode::CONFLICT,
+        "This passage has not synced yet. Wait a moment and post again.".into(),
+    )
+}
+fn anchor_ready(r: &Room, anchor: &Value) -> bool {
+    offset(r, &anchor["start"]).is_some() && offset(r, &anchor["end"]).is_some()
+}
+async fn await_anchor(s: App, room: &Arc<Mutex<Room>>, anchor: &Value) -> Result<()> {
+    // HTTP may overtake its selected WebSocket characters. Subscribe and check
+    // atomically, then await committed source updates without occupying a
+    // worker or repeatedly competing for a busy room's lock.
+    let wait = async {
+        let target = room.clone();
+        let selected = anchor.clone();
+        let (ready, mut updates) = job(s.clone(), move |_| {
+            let r = target.lock().unwrap();
+            Ok((anchor_ready(&r, &selected), r.tx.subscribe()))
+        })
+        .await?;
+        if ready {
+            return Ok(());
+        }
+        loop {
+            match updates.recv().await {
+                Ok(update) if !update.starts_with(&[0, 2]) => continue,
+                Err(broadcast::error::RecvError::Closed) => return Err(anchor_pending()),
+                // Lag may have skipped precisely the update we need. Check
+                // current accepted state instead of waiting for another one.
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            }
+            let target = room.clone();
+            let selected = anchor.clone();
+            if job(s.clone(), move |_| {
+                Ok(anchor_ready(&target.lock().unwrap(), &selected))
+            })
+            .await?
             {
                 return Ok(());
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    Err(ApiError(
-        StatusCode::CONFLICT,
-        "This passage has not synced yet. Wait a moment and post again.".into(),
-    ))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), wait)
+        .await
+        .unwrap_or_else(|_| Err(anchor_pending()))
 }
 fn parser(source: &str) -> pulldown_cmark::Parser<'_> {
     pulldown_cmark::Parser::new_ext(
@@ -390,12 +464,11 @@ fn thread_value(
     source: &str,
     threads: &[Thread],
     t: &Thread,
-    meta: &[Value],
+    stored: Option<&Value>,
     doc_id: &str,
 ) -> Value {
     let start = utf16(source, t.from);
     let marker = relative(r, start, Assoc::After);
-    let stored = meta.iter().find(|c| c["source"]["item"] == marker["item"]);
     let mut c = stored.cloned().unwrap_or_else(|| {
         let passage = preceding_passage(source, threads, t.from);
         let (from, end) = (passage.start, passage.end);
@@ -432,8 +505,142 @@ fn thread_value(
     c
 }
 
+fn stored_messages(row: &Value) -> Option<Vec<MessageText>> {
+    let mut messages = Vec::new();
+    let mut push = |value: &Value| {
+        let name = value["name"].as_str()?;
+        let body = value["body"].as_str()?;
+        valid(body, name).then(|| {
+            messages.push(MessageText {
+                name: name.to_string(),
+                body: body.to_string(),
+            });
+        })
+    };
+    push(row)?;
+    for reply in row["replies"].as_array()? {
+        push(reply)?;
+    }
+    Some(messages)
+}
+fn source_id(marker: &Value) -> Option<(u64, u64)> {
+    Some((
+        marker["item"]["client"].as_u64()?,
+        marker["item"]["clock"].as_u64()?,
+    ))
+}
+fn reanchor_moved(
+    r: &Room,
+    source: &str,
+    threads: &[Thread],
+    thread: &Thread,
+    previous: &Value,
+    value: &mut Value,
+) {
+    let quote = previous["quote"].as_str().filter(|quote| !quote.is_empty());
+    let matching = (|| {
+        let from = offset(r, &previous["anchor"]["start"])?;
+        let to = offset(r, &previous["anchor"]["end"])?;
+        if from >= to {
+            return None;
+        }
+        let selected = &source[byte(source, from)?..byte(source, to)?];
+        Some(quote.is_none_or(|quote| reading_source(selected).starts_with(quote)))
+    })()
+    .unwrap_or(false);
+    if matching {
+        return;
+    }
+    let passage = quote
+        .and_then(|quote| unique_passage(source, threads, quote))
+        .unwrap_or_else(|| preceding_passage(source, threads, thread.from));
+    value["quote"] = json!(&source[passage.clone()]);
+    value["anchor"] = json!({
+        "start": relative(r, utf16(source, passage.start), Assoc::After),
+        "end": relative(r, utf16(source, passage.end), Assoc::Before),
+    });
+}
+
+// A raw cut/paste creates new CRDT items. Reattach dates/resolution only when
+// the complete conversation is unique on both sides and the original marker
+// is gone. Copies, duplicate conversations, altered replies and literal/code
+// records never acquire another thread's metadata. This is document-local;
+// author privileges and idempotency receipts never follow recreated text.
+fn thread_values(
+    r: &Room,
+    source: &str,
+    threads: &[Thread],
+    meta: &[Value],
+    doc_id: &str,
+) -> (Vec<Value>, Vec<Value>) {
+    let markers: Vec<_> = threads
+        .iter()
+        .map(|thread| relative(r, utf16(source, thread.from), Assoc::After))
+        .collect();
+    let signatures: Vec<_> = meta.iter().map(stored_messages).collect();
+    let mut metadata_signatures = HashMap::<&[MessageText], (usize, usize)>::new();
+    let mut thread_counts = HashMap::<&[MessageText], usize>::new();
+    let mut by_marker = HashMap::new();
+    for (index, row) in meta.iter().enumerate() {
+        if let Some(id) = source_id(&row["source"]) {
+            by_marker.entry(id).or_insert(index);
+        }
+    }
+    for (index, signature) in signatures.iter().enumerate() {
+        if let Some(signature) = signature {
+            let entry = metadata_signatures
+                .entry(signature.as_slice())
+                .or_insert((0, index));
+            entry.0 += 1;
+        }
+    }
+    for thread in threads {
+        *thread_counts.entry(&thread.messages).or_default() += 1;
+    }
+    let mut changed = Vec::new();
+    let values = threads
+        .iter()
+        .zip(markers)
+        .map(|(thread, marker)| {
+            let direct = source_id(&marker).and_then(|id| by_marker.get(&id).copied());
+            let moved = direct
+                .is_none()
+                .then(|| {
+                    let &(count, index) = metadata_signatures.get(thread.messages.as_slice())?;
+                    if count != 1 || thread_counts.get(thread.messages.as_slice()) != Some(&1) {
+                        return None;
+                    }
+                    let previous = &meta[index]["source"];
+                    previous["item"].as_object()?;
+                    // A marker can still exist inside a fence/escaped record or a
+                    // partially edited conversation. Such text has not been cut.
+                    let alive = offset(r, previous).is_some_and(|at| {
+                        relative(r, at, Assoc::After)["item"] == previous["item"]
+                    });
+                    (!alive).then_some(index)
+                })
+                .flatten();
+            let stored = direct.or(moved).map(|index| &meta[index]);
+            let mut value = thread_value(r, source, threads, thread, stored, doc_id);
+            if moved.is_some() {
+                value["guest"] = json!("");
+                value.as_object_mut().unwrap().remove("requestId");
+                value.as_object_mut().unwrap().remove("replyRequests");
+                reanchor_moved(r, source, threads, thread, stored.unwrap(), &mut value);
+            }
+            // Remember independent copies too. A later deletion of the first
+            // conversation must not turn an already-seen copy into a move.
+            if stored.is_none_or(|old| *old != value) {
+                changed.push(value.clone());
+            }
+            value
+        })
+        .collect();
+    (values, changed)
+}
+
 // Explicit owner maintenance may replace CRDT identities while keeping the
-// source. Normal editing never guesses identity from equal comment bodies.
+// source. Duplicate conversations still require their original source items.
 pub(super) fn rebuild_metadata(
     old: &Room,
     fresh: &Doc,
@@ -550,16 +757,13 @@ pub(super) fn rebuild_metadata(
 // Commit source state and its metadata together before attempting Markdown I/O.
 fn commit(s: &Store, d: &Document, r: &mut Room, rows: &[Value]) -> Result<()> {
     if !r.pending_updates.lock().unwrap().is_empty() {
-        r.browser_generation += 1;
+        r.save.edited();
     }
-    let intent = r.recovering;
-    s.commit_room(d, r, intent, rows)?;
-    r.disk_dirty = true;
-    Ok(())
+    s.commit_room(d, r, rows)
 }
 fn project(s: &Store, d: &Document, r: &mut Room) {
     if let Err(error) = s.persist(d, r) {
-        r.waiting(true);
+        r.waiting();
         tracing::warn!("comment projection pending: {error}");
     }
 }
@@ -657,10 +861,10 @@ fn load(s: &Store, d: &Document, r: &mut Room) -> Result<(String, Vec<Thread>, V
     migrate(s, d, r, &mut meta)?;
     let source = room_text(r);
     let threads = parse(&source);
-    let values = threads
-        .iter()
-        .map(|t| thread_value(r, &source, &threads, t, &meta, &d.id))
-        .collect();
+    let (values, changed) = thread_values(r, &source, &threads, &meta, &d.id);
+    if !changed.is_empty() {
+        s.commit_room(d, r, &changed)?;
+    }
     Ok((source, threads, values))
 }
 pub(super) async fn list(
@@ -671,10 +875,15 @@ pub(super) async fn list(
 ) -> Result<Json<Value>> {
     job(s, move |s| {
         let d = s.doc(&id)?;
-        s.access(&h, &d, &a)?;
+        let (owner, editor) = s.access(&h, &d, &a)?;
+        let guest = guest_id(&h).ok();
         let room = s.room(&d)?;
         let mut r = room.lock().unwrap();
         let (_, _, rows) = load(s, &d, &mut r)?;
+        let rows = rows
+            .into_iter()
+            .map(|row| browser_auth::comment_value(row, owner || editor, guest.as_deref()))
+            .collect::<Vec<_>>();
         Ok(Json(json!({"comments":rows})))
     })
     .await
@@ -718,11 +927,11 @@ pub(super) async fn add(
     })
     .await?;
     if let Some(anchor) = &b.anchor {
-        await_anchor(&room, anchor).await?;
+        await_anchor(s.clone(), &room, anchor).await?;
     }
     job(s, move |s| {
         let d = s.doc(&id)?;
-        s.access(&h, &d, &a)?;
+        let (owner, editor) = s.access(&h, &d, &a)?;
         let mut r = room.lock().unwrap();
         let (source, threads, rows) = load(s, &d, &mut r)?;
         if let Some(request) = &b.request_id
@@ -730,7 +939,7 @@ pub(super) async fn add(
                 .iter()
                 .find(|c| c["requestId"] == *request && c["guest"] == guest)
         {
-            return Ok(Json(c.clone()));
+            return Ok(Json(browser_auth::comment_value(c.clone(), owner || editor, Some(&guest))));
         }
         if threads.len() >= 2000 {
             return Err(bad("This document has reached its comment limit."));
@@ -773,7 +982,7 @@ pub(super) async fn add(
             return Err(error);
         }
         project(s, &d, &mut r);
-        Ok(Json(c))
+        Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))))
     }).await
 }
 #[derive(Deserialize)]
@@ -828,7 +1037,7 @@ pub(super) async fn edit(
                     .iter()
                     .any(|v| v["id"] == *request && v["guest"] == guest)
             {
-                return Ok(Json(c));
+                return Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))));
             }
             if c["replies"].as_array().unwrap().len() >= 200 {
                 return Err(bad("This thread has reached its reply limit."));
@@ -880,13 +1089,522 @@ pub(super) async fn edit(
             return Err(error);
         }
         project(s, &d, &mut r);
-        Ok(Json(c))
+        Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))))
     }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn causal_fixture() -> (
+        tempfile::TempDir,
+        App,
+        Document,
+        Arc<Mutex<Room>>,
+        Value,
+        Vec<u8>,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        fs::write(s.root.join("causal.md"), "Original.").unwrap();
+        let d = s.index_document("causal.md").unwrap();
+        let room = s.room(&d).unwrap();
+        s.persist(&d, &mut room.lock().unwrap()).unwrap();
+        let client = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        client
+            .transact_mut()
+            .apply_update(
+                Update::decode_v1(
+                    &room
+                        .lock()
+                        .unwrap()
+                        .awareness
+                        .doc()
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let before = client.transact().state_vector();
+        let text = client.get_or_insert_text("content");
+        let from = text.len(&client.transact());
+        text.insert(&mut client.transact_mut(), from, " Newly typed passage");
+        let to = text.len(&client.transact());
+        let anchor = json!({"start":doc_relative(&client,from,Assoc::After),"end":doc_relative(&client,to,Assoc::Before)});
+        let frame = Message::Sync(SyncMessage::Update(
+            client.transact().encode_state_as_update_v1(&before),
+        ))
+        .encode_v1();
+        (directory, s, d, room, anchor, frame)
+    }
+
+    async fn subscribed(room: &Arc<Mutex<Room>>) {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if room.lock().unwrap().tx.receiver_count() != 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("causal waiter must install its atomic subscription");
+    }
+
+    #[tokio::test]
+    async fn causal_comments_wait_for_the_commit_instead_of_exhausting_lock_samples() {
+        let (_directory, s, d, room, anchor, frame) = causal_fixture();
+        let target = room.clone();
+        let selected = anchor.clone();
+        let store = s.clone();
+        let pending = tokio::spawn(async move { await_anchor(store, &target, &selected).await });
+        subscribed(&room).await;
+        let (locked, acquired) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let busy_room = room.clone();
+        let coordinator = std::thread::spawn(move || {
+            let _guard = busy_room.lock().unwrap();
+            locked.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+        });
+        acquired.await.unwrap();
+        // Model a background projection holding this room beyond the old
+        // polling budget. The HTTP waiter occupies neither lock nor worker.
+        tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+        assert!(
+            !pending.is_finished(),
+            "a causally pending passage must not receive a false conflict after 300ms"
+        );
+        release.send(()).unwrap();
+        coordinator.join().unwrap();
+        process_frame(&s, &d, &room, &frame, true, true, &mut Peer::default()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let r = room.lock().unwrap();
+        assert!(anchor_ready(&r, &anchor));
+        assert_eq!(room_text(&r), "Original. Newly typed passage");
+    }
+
+    #[tokio::test]
+    async fn causal_comment_subscription_cannot_lose_an_immediate_or_lagged_commit() {
+        let (_directory, s, d, room, anchor, frame) = causal_fixture();
+        let target = room.clone();
+        let selected = anchor.clone();
+        let store = s.clone();
+        let pending = tokio::spawn(async move { await_anchor(store, &target, &selected).await });
+        subscribed(&room).await;
+        // This current-thread runtime cannot poll the waiter during the burst,
+        // so its bounded receiver must report lag before seeing the commit.
+        for _ in 0..300 {
+            room.lock()
+                .unwrap()
+                .tx
+                .send(Message::Custom(121, b"0".to_vec()).encode_v1())
+                .unwrap();
+        }
+        process_frame(&s, &d, &room, &frame, true, true, &mut Peer::default()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // A commit preceding registration must succeed from the atomic initial
+        // check, even though there will never be another update notification.
+        await_anchor(s, &room, &anchor).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nonexistent_comment_anchors_expire_without_inventing_a_fallback_passage() {
+        let (_directory, s, d, room, anchor, _frame) = causal_fixture();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            await_anchor(s.clone(), &room, &anchor),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().0, StatusCode::CONFLICT);
+        assert_eq!(room_text(&room.lock().unwrap()), "Original.");
+        assert_eq!(
+            fs::read_to_string(s.root.join(&d.path)).unwrap(),
+            "Original."
+        );
+        assert_eq!(room.lock().unwrap().tx.receiver_count(), 0);
+    }
+
+    #[test]
+    fn untrusted_anchor_ids_are_bounded_before_yrs_json_deserialization() {
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        apply_text(&doc, "", "A safe passage.");
+        let valid = doc_relative(&doc, 2, Assoc::After);
+        for bad_id in [
+            json!({"client":9_007_199_254_740_992u64,"clock":0}),
+            json!({"client":u64::MAX,"clock":0}),
+            json!({"client":-1,"clock":0}),
+            json!({"client":1.5,"clock":0}),
+            json!({"client":1,"clock":u64::from(u32::MAX)+1}),
+            json!({"client":1,"clock":-1}),
+        ] {
+            for field in ["item", "type"] {
+                let mut index = valid.clone();
+                index[field] = bad_id.clone();
+                assert!(!index_shape(&index));
+                assert_eq!(
+                    doc_offset(&doc, &index),
+                    None,
+                    "malformed persisted metadata is ignored without a panic or ID alias"
+                );
+                for anchor in [
+                    json!({"start":index,"end":valid}),
+                    json!({"start":valid,"end":index}),
+                ] {
+                    assert_eq!(
+                        validate_anchor(&anchor).unwrap_err().0,
+                        StatusCode::BAD_REQUEST
+                    );
+                }
+            }
+        }
+        let boundary =
+            json!({"item":{"client":9_007_199_254_740_991u64,"clock":u32::MAX},"assoc":0});
+        assert!(index_shape(&boundary));
+        assert_eq!(
+            doc_offset(&doc, &boundary),
+            None,
+            "an unknown but valid ID is merely unavailable"
+        );
+        assert!(validate_anchor(&json!({"start":valid,"end":valid})).is_ok());
+        assert_eq!(doc_offset(&doc, &valid), Some(2));
+    }
+
+    fn remembered_thread(r: &Room, source: &str, id: &str) -> Value {
+        let threads = parse(source);
+        let thread = &threads[0];
+        let mut row = thread_value(r, source, &threads, thread, None, id);
+        row["id"] = json!("remembered-thread");
+        row["created"] = json!(42);
+        row["resolved"] = json!(true);
+        row["guest"] = json!("original-author");
+        row["requestId"] = json!(uuid::Uuid::new_v4().to_string());
+        row["replyRequests"] =
+            json!([{"id":uuid::Uuid::new_v4().to_string(),"guest":"original-author"}]);
+        for reply in row["replies"].as_array_mut().unwrap() {
+            reply["created"] = json!(43);
+        }
+        row
+    }
+
+    fn delete_thread(r: &Room, source: &str, thread: &Thread) {
+        r.awareness
+            .doc()
+            .get_or_insert_text("content")
+            .remove_range(
+                &mut r.awareness.doc().transact_mut(),
+                utf16(source, thread.from),
+                utf16(source, thread.to) - utf16(source, thread.from),
+            );
+    }
+
+    #[test]
+    fn raw_cut_paste_preserves_unique_complete_conversation_metadata_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let docs = dir.path().join("docs");
+        let state = dir.path().join("state");
+        fs::create_dir(&docs).unwrap();
+        let s = Store::open(docs.clone(), state.clone(), "http://localhost:3477".into()).unwrap();
+        let d = s.create_document("cut-paste.md").unwrap();
+        let source = "Original passage.\n\n[[comment(Ana): A note]]\n[[comment(Alex): A reply]]\n\nDestination passage.";
+        fs::write(s.root.join(&d.path), source).unwrap();
+        let room = s.room(&d).unwrap();
+        {
+            let mut r = room.lock().unwrap();
+            let row = remembered_thread(&r, source, &d.id);
+            s.commit_room(&d, &mut r, &[row]).unwrap();
+            let thread = &parse(source)[0];
+            let raw = &source[thread.from..thread.to];
+            delete_thread(&r, source, thread);
+            let (_, threads, values) = load(&s, &d, &mut r).unwrap();
+            assert!(
+                threads.is_empty() && values.is_empty(),
+                "cut text stays absent"
+            );
+            let at = room_text(&r).encode_utf16().count() as u32;
+            insert(&r, at, &format!("\n\n{raw}"));
+            let (_, _, values) = load(&s, &d, &mut r).unwrap();
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0]["id"], "remembered-thread");
+            assert_eq!(values[0]["created"], 42);
+            assert_eq!(values[0]["resolved"], true);
+            assert_eq!(values[0]["replies"][0]["created"], 43);
+            assert_eq!(values[0]["guest"], "");
+            assert!(values[0].get("requestId").is_none());
+            assert!(values[0].get("replyRequests").is_none());
+            let selected_from = offset(&r, &values[0]["anchor"]["start"]).unwrap();
+            let selected_to = offset(&r, &values[0]["anchor"]["end"]).unwrap();
+            let current = room_text(&r);
+            assert_eq!(
+                &current
+                    [byte(&current, selected_from).unwrap()..byte(&current, selected_to).unwrap()],
+                "Original passage.",
+                "moving only records keeps their still-present selected passage"
+            );
+            let (_, _, repeated) = load(&s, &d, &mut r).unwrap();
+            assert_eq!(
+                repeated, values,
+                "reattachment is stable, not repeated on each read"
+            );
+        }
+        drop(room);
+        drop(s);
+        let s = Store::open(docs, state, "http://localhost:3477".into()).unwrap();
+        let room = s.room(&d).unwrap();
+        let mut r = room.lock().unwrap();
+        let (_, _, values) = load(&s, &d, &mut r).unwrap();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["id"], "remembered-thread");
+        assert_eq!(values[0]["created"], 42);
+        assert_eq!(values[0]["resolved"], true);
+        assert_eq!(values[0]["replies"][0]["created"], 43);
+    }
+
+    #[test]
+    fn failed_raw_reattachment_is_atomic_and_keeps_original_metadata_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        let s = Store::open(
+            dir.path().join("docs"),
+            dir.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        let d = s.create_document("metadata-retry.md").unwrap();
+        let source = "Passage.\n\n[[comment(Ana): A note]]\n[[comment(Alex): A reply]]";
+        fs::write(s.root.join(&d.path), source).unwrap();
+        let room = s.room(&d).unwrap();
+        let mut r = room.lock().unwrap();
+        let original = remembered_thread(&r, source, &d.id);
+        s.commit_room(&d, &mut r, std::slice::from_ref(&original))
+            .unwrap();
+        delete_thread(&r, source, &parse(source)[0]);
+        let end = room_text(&r).encode_utf16().count() as u32;
+        insert(
+            &r,
+            end,
+            "\n\n[[comment(Ana): A note]]\n[[comment(Alex): A reply]]",
+        );
+        s.db.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_comment_reattachment BEFORE UPDATE ON comments BEGIN SELECT RAISE(ABORT,'test comment metadata failure'); END;"
+        ).unwrap();
+        assert!(load(&s, &d, &mut r).is_err());
+        assert_eq!(metadata(&s, &d.id).unwrap(), vec![original]);
+        s.db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_comment_reattachment;")
+            .unwrap();
+        let (_, _, values) = load(&s, &d, &mut r).unwrap();
+        assert_eq!(values[0]["id"], "remembered-thread");
+        assert_eq!(values[0]["created"], 42);
+        assert_eq!(values[0]["resolved"], true);
+        assert_eq!(values[0]["guest"], "");
+        assert_eq!(metadata(&s, &d.id).unwrap(), values);
+    }
+
+    #[test]
+    fn moving_a_selected_passage_and_records_reanchors_the_original_quote() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        let s = Store::open(
+            dir.path().join("docs"),
+            dir.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        let d = s.create_document("move-passage.md").unwrap();
+        let source = "Passage selected.\n\n[[comment(Ana): A note]]\n\nA different paragraph.";
+        fs::write(s.root.join(&d.path), source).unwrap();
+        let room = s.room(&d).unwrap();
+        let mut r = room.lock().unwrap();
+        let mut row = remembered_thread(&r, source, &d.id);
+        row["quote"] = json!("selected");
+        row["anchor"] =
+            json!({"start":relative(&r,8,Assoc::After),"end":relative(&r,16,Assoc::Before)});
+        s.commit_room(&d, &mut r, &[row]).unwrap();
+        let cut_to = parse(source)[0].to;
+        r.awareness
+            .doc()
+            .get_or_insert_text("content")
+            .remove_range(
+                &mut r.awareness.doc().transact_mut(),
+                0,
+                utf16(source, cut_to),
+            );
+        let end = room_text(&r).encode_utf16().count() as u32;
+        insert(&r, end, &format!("\n\n{}", &source[..cut_to]));
+        let (current, _, values) = load(&s, &d, &mut r).unwrap();
+        assert_eq!(values[0]["id"], "remembered-thread");
+        assert_eq!(values[0]["created"], 42);
+        assert_eq!(values[0]["resolved"], true);
+        assert_eq!(values[0]["quote"], "selected");
+        let from = offset(&r, &values[0]["anchor"]["start"]).unwrap();
+        let to = offset(&r, &values[0]["anchor"]["end"]).unwrap();
+        assert!(from > end, "selection follows the moved passage");
+        assert_eq!(
+            &current[byte(&current, from).unwrap()..byte(&current, to).unwrap()],
+            "selected"
+        );
+    }
+
+    #[test]
+    fn raw_moves_do_not_guess_between_duplicates_changes_or_still_live_records() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        let s = Store::open(
+            dir.path().join("docs"),
+            dir.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        let original = "Passage.\n\n[[comment(Ana): A note]]\n[[comment(Alex): A reply]]";
+        let raw = "[[comment(Ana): A note]]\n[[comment(Alex): A reply]]";
+        for (name, replacement, old_duplicate, keep_original) in [
+            (
+                "changed-root",
+                raw.replace("A note", "Changed note"),
+                false,
+                false,
+            ),
+            (
+                "changed-reply",
+                raw.replace("A reply", "Changed reply"),
+                false,
+                false,
+            ),
+            ("new-duplicates", format!("{raw}\n\n{raw}"), false, false),
+            ("old-duplicates", raw.into(), true, false),
+            ("copy", format!("\n\n{raw}"), false, true),
+            (
+                "literal-original",
+                format!("```\n{original}\n```\n\n{raw}"),
+                false,
+                true,
+            ),
+        ] {
+            let d = s.create_document(&format!("{name}.md")).unwrap();
+            fs::write(s.root.join(&d.path), original).unwrap();
+            let room = s.room(&d).unwrap();
+            let r = room.lock().unwrap();
+            let mut meta = vec![remembered_thread(&r, original, &d.id)];
+            if old_duplicate {
+                let mut duplicate = meta[0].clone();
+                duplicate["id"] = json!("other-remembered-thread");
+                duplicate["source"] = json!({"item":{"client":12345,"clock":0},"assoc":0});
+                meta.push(duplicate);
+            }
+            if name == "literal-original" {
+                insert(&r, 0, "```\n");
+                let end = room_text(&r).encode_utf16().count() as u32;
+                insert(&r, end, &format!("\n```\n\n{raw}"));
+            } else if keep_original {
+                let end = original.encode_utf16().count() as u32;
+                insert(&r, end, &replacement);
+            } else {
+                delete_thread(&r, original, &parse(original)[0]);
+                let end = room_text(&r).encode_utf16().count() as u32;
+                insert(&r, end, &format!("\n\n{replacement}"));
+            }
+            let source = room_text(&r);
+            let threads = parse(&source);
+            let (values, _) = thread_values(&r, &source, &threads, &meta, &d.id);
+            let new = values.last().unwrap();
+            assert_ne!(
+                new["id"], "remembered-thread",
+                "{name}: recreated/copy text must stay independent"
+            );
+            assert_eq!(new["created"], 0, "{name}");
+            assert_eq!(new["resolved"], false, "{name}");
+            if name == "copy" {
+                assert_eq!(values[0]["id"], "remembered-thread");
+                assert_eq!(values[0]["created"], 42);
+            }
+        }
+    }
+
+    #[test]
+    fn simultaneous_raw_pastes_do_not_share_a_single_threads_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("docs")).unwrap();
+        let s = Store::open(
+            dir.path().join("docs"),
+            dir.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        let d = s.create_document("parallel-comments.md").unwrap();
+        let source = "Passage.\n\n[[comment(Ana): A note]]\n[[comment(Alex): A reply]]";
+        fs::write(s.root.join(&d.path), source).unwrap();
+        let room = s.room(&d).unwrap();
+        let r = room.lock().unwrap();
+        let row = remembered_thread(&r, source, &d.id);
+        let baseline = r
+            .awareness
+            .doc()
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let vector = r.awareness.doc().transact().state_vector();
+        let thread = &parse(source)[0];
+        let raw = &source[thread.from..thread.to];
+        for _ in 0..2 {
+            let peer = Doc::with_options(Options {
+                offset_kind: OffsetKind::Utf16,
+                ..Options::default()
+            });
+            peer.transact_mut()
+                .apply_update(Update::decode_v1(&baseline).unwrap())
+                .unwrap();
+            let text = peer.get_or_insert_text("content");
+            let mut txn = peer.transact_mut();
+            text.remove_range(
+                &mut txn,
+                utf16(source, thread.from),
+                utf16(source, thread.to) - utf16(source, thread.from),
+            );
+            let end = text.len(&txn);
+            text.insert(&mut txn, end, &format!("\n\n{raw}\n\n"));
+            let update = txn.encode_state_as_update_v1(&vector);
+            drop(txn);
+            r.awareness
+                .doc()
+                .transact_mut()
+                .apply_update(Update::decode_v1(&update).unwrap())
+                .unwrap();
+        }
+        let source = room_text(&r);
+        let threads = parse(&source);
+        assert_eq!(threads.len(), 2);
+        let (values, _) = thread_values(&r, &source, &threads, &[row], &d.id);
+        assert!(values.iter().all(|value| value["created"] == 0
+            && value["resolved"] == false
+            && value["id"] != "remembered-thread"));
+        assert_ne!(values[0]["id"], values[1]["id"]);
+    }
+
     fn planned(source: &str, at: usize) -> String {
         let plan = root_record(
             source,
@@ -1027,7 +1745,7 @@ mod tests {
         );
         commit(&s, &d, &mut r, &[]).unwrap();
         s.persist(&d, &mut r).unwrap();
-        assert!(r.browser_generation > r.protected_generation);
+        assert!(r.save.unprotected());
         let accepted = room_text(&r);
         fs::write(s.root.join(&d.path), source).unwrap();
         s.persist(&d, &mut r).unwrap();

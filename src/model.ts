@@ -23,6 +23,7 @@ export type Document = {
   diskPending?: boolean;
   lineEndingMigrated?: boolean;
   collaborationEpoch?: string;
+  mediaToken?: string | null;
 };
 export type Config = {
   owner: boolean;
@@ -36,7 +37,7 @@ export type Comment = {
   id: string;
   body: string;
   name: string;
-  guest: string;
+  canResolve: boolean;
   quote: string | null;
   anchor: Anchor | null;
   created: number;

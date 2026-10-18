@@ -35,6 +35,7 @@ pub(super) struct RecoveryBundle {
     state: Option<String>,
     disk_state: Option<String>,
     write_intent: bool,
+    write_target: Option<String>,
     line_ending: String,
     updates: Vec<RecoveryUpdate>,
     comments: Vec<RecoveryComment>,
@@ -71,6 +72,15 @@ fn conflict(message: &str) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
 
+struct RecoveryState {
+    state: Option<Vec<u8>>,
+    disk_state: Option<Vec<u8>>,
+    intent: bool,
+    ending: String,
+    epoch: String,
+    target: Option<Vec<u8>>,
+}
+
 fn capture(
     store: &Store,
     document: &Document,
@@ -78,12 +88,10 @@ fn capture(
     live: Option<&Room>,
 ) -> Result<RecoveryBundle> {
     let db = store.db.lock().unwrap();
-    let (state, disk_state, intent, ending, epoch): (
-        Option<Vec<u8>>, Option<Vec<u8>>, bool, String, String,
-    ) = db.query_row(
-        "SELECT state,disk_state,write_intent,line_ending,collaboration_epoch FROM docs WHERE id=? AND active=1",
+    let RecoveryState { state, disk_state, intent, ending, epoch, target } = db.query_row(
+        "SELECT state,disk_state,write_intent,line_ending,collaboration_epoch,write_target FROM docs WHERE id=? AND active=1",
         [&document.id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| Ok(RecoveryState { state: row.get(0)?, disk_state: row.get(1)?, intent: row.get(2)?, ending: row.get(3)?, epoch: row.get(4)?, target: row.get(5)? }),
     )?;
     let updates = db
         .prepare("SELECT seq,content FROM doc_updates WHERE doc=? ORDER BY seq")?
@@ -123,6 +131,7 @@ fn capture(
         state: state.map(|bytes| BASE64.encode(bytes)),
         disk_state: disk_state.map(|bytes| BASE64.encode(bytes)),
         write_intent: intent,
+        write_target: target.map(|bytes| BASE64.encode(bytes)),
         line_ending: ending,
         updates,
         comments,
@@ -280,7 +289,7 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
         .unwrap_or_default();
     let mut db = store.db.lock().unwrap();
     let tx = db.transaction()?;
-    tx.execute("UPDATE docs SET state=?,disk_state=?,write_intent=0,line_ending=?,line_ending_migrated=0,browser_generation=0,protected_generation=0,collaboration_epoch=? WHERE id=? AND active=1",
+    tx.execute("UPDATE docs SET state=?,disk_state=?,write_intent=0,write_target=NULL,line_ending=?,line_ending_migrated=0,browser_generation=0,protected_generation=0,collaboration_epoch=? WHERE id=? AND active=1",
         params![state, state, text::ending(&raw, &bundle.line_ending), epoch, id])?;
     tx.execute("DELETE FROM doc_updates WHERE doc=?", [id])?;
     tx.execute("DELETE FROM comments WHERE doc=?", [id])?;

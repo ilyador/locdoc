@@ -8,7 +8,7 @@ import {
   writeVarString,
   toUint8Array,
 } from "lib0/encoding";
-import { api, ApiError } from "./api";
+import { api, ApiError, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
 import { documentSession } from "./document-session";
 import { normalizePresence } from "./presence";
@@ -71,6 +71,9 @@ export function useDocument(
           id,
           ydoc,
           {
+            protocols: ownerSession()
+              ? [`locdoc-session.${ownerSession()}`]
+              : [],
             params: {
               client: "plain-text-v2",
               epoch: d.collaborationEpoch || "",

@@ -74,6 +74,10 @@ pub(super) fn origin_allowed(public_url: &str, bind: &str, headers: &HeaderMap) 
 /// Counts in hostile wire data must not become allocation sizes before the
 /// decoder discovers that their entries were never supplied.
 struct Wire<'a>(&'a [u8]);
+pub(super) enum TextMark {
+    Split(u64, u32),
+    Surrogate(u64, u32),
+}
 impl<'a> Wire<'a> {
     fn byte(&mut self) -> Result<u8> {
         let (byte, rest) = self.0.split_first().ok_or_else(invalid_frame)?;
@@ -114,9 +118,16 @@ impl<'a> Wire<'a> {
         std::str::from_utf8(self.buffer()?).map_err(|_| invalid_frame())
     }
     fn id(&mut self) -> Result<()> {
-        self.var()?;
+        self.client()?;
         self.number()?;
         Ok(())
+    }
+    fn client(&mut self) -> Result<u64> {
+        let client = self.var()?;
+        if client >= 1u64 << 53 {
+            return Err(invalid_frame());
+        }
+        Ok(client)
     }
     fn end(self) -> Result<()> {
         if self.0.is_empty() {
@@ -125,13 +136,17 @@ impl<'a> Wire<'a> {
             Err(invalid_frame())
         }
     }
-    fn text_update(mut self) -> Result<()> {
+    fn text_update(mut self, mut mark: impl FnMut(TextMark)) -> Result<()> {
         let clients = self.count(3)?;
         for _ in 0..clients {
             let blocks = self.count(1)?;
-            self.var()?;
+            if blocks == 0 {
+                return Err(invalid_frame());
+            }
+            let client = self.client()?;
             let mut clock = self.number()?;
             for _ in 0..blocks {
+                mark(TextMark::Split(client, clock));
                 let info = self.byte()?;
                 let len = match info {
                     0 | 10 => self.number()?, // collected or skipped source history
@@ -140,34 +155,69 @@ impl<'a> Wire<'a> {
                             return Err(invalid_frame());
                         }
                         if info & 128 != 0 {
-                            self.id()?;
+                            let client = self.client()?;
+                            let clock = self.number()?.checked_add(1).ok_or_else(invalid_frame)?;
+                            mark(TextMark::Split(client, clock));
                         }
                         if info & 64 != 0 {
-                            self.id()?;
+                            let client = self.client()?;
+                            let clock = self.number()?;
+                            mark(TextMark::Split(client, clock));
                         }
                         if info & 192 == 0 && (self.var()? != 1 || self.string()? != "content") {
                             return Err(invalid_frame());
                         }
                         match info & 31 {
                             1 => self.number()?, // deleted source characters
-                            4 => u32::try_from(self.string()?.encode_utf16().count())
-                                .map_err(|_| invalid_frame())?,
+                            4 => {
+                                let mut len = 0u32;
+                                for c in self.string()?.chars() {
+                                    if c.len_utf16() == 2 {
+                                        mark(TextMark::Surrogate(
+                                            client,
+                                            clock
+                                                .checked_add(len)
+                                                .and_then(|n| n.checked_add(1))
+                                                .ok_or_else(invalid_frame)?,
+                                        ));
+                                    }
+                                    len = len
+                                        .checked_add(c.len_utf16() as u32)
+                                        .ok_or_else(invalid_frame)?;
+                                }
+                                len
+                            }
                             _ => return Err(invalid_frame()),
                         }
                     }
                 };
+                // Every struct owns at least one clock. Yrs accepts a zero
+                // length GC block on decode/apply, then underflows len - 1
+                // while encoding it later. The same invariant covers every
+                // supported struct rather than singling out one wire tag.
+                if len == 0 {
+                    return Err(invalid_frame());
+                }
                 clock = clock.checked_add(len).ok_or_else(invalid_frame)?;
+                mark(TextMark::Split(client, clock));
             }
         }
         let clients = self.count(2)?;
         for _ in 0..clients {
-            self.var()?;
+            let client = self.client()?;
             let ranges = self.count(2)?;
+            if ranges == 0 {
+                return Err(invalid_frame());
+            }
             for _ in 0..ranges {
                 let clock = self.number()?;
-                clock
-                    .checked_add(self.number()?)
-                    .ok_or_else(invalid_frame)?;
+                let len = self.number()?;
+                if len == 0 {
+                    return Err(invalid_frame());
+                }
+                let end = clock.checked_add(len).ok_or_else(invalid_frame)?;
+                mark(TextMark::Split(client, clock));
+                mark(TextMark::Split(client, end));
             }
         }
         self.end()
@@ -175,6 +225,23 @@ impl<'a> Wire<'a> {
 }
 fn invalid_frame() -> ApiError {
     bad("Invalid or unsupported synchronization frame.")
+}
+
+pub(super) fn validate_text_update(bytes: &[u8]) -> Result<()> {
+    Wire(bytes).text_update(|_| {})
+}
+
+/// SQLite and recovery state are not assumed trustworthy. Run the same bounded
+/// plain-text/client-ID preflight as network frames before Yrs constructs IDs
+/// or allocates from encoded counts.
+pub(super) fn decode_update(bytes: &[u8]) -> Result<yrs::Update> {
+    use yrs::updates::decoder::Decode;
+    validate_text_update(bytes)?;
+    yrs::Update::decode_v1(bytes).map_err(|_| bad("Invalid document synchronization state."))
+}
+
+pub(super) fn text_marks(bytes: &[u8], mark: impl FnMut(TextMark)) -> Result<()> {
+    Wire(bytes).text_update(mark)
 }
 
 pub(super) fn decode_frame(bytes: &[u8]) -> Result<yrs::sync::Message> {
@@ -192,7 +259,7 @@ pub(super) fn decode_frame(bytes: &[u8]) -> Result<yrs::sync::Message> {
                     }
                     payload.end()?;
                 }
-                1 | 2 => payload.text_update()?,
+                1 | 2 => payload.text_update(|_| {})?,
                 _ => return Err(invalid_frame()),
             }
         }
@@ -270,23 +337,22 @@ const RETAINED_WORKSPACE_BYTES: i64 = 10_000 * super::MB as i64;
 const FREE_SPACE_FLOOR: u128 = 128 * super::MB as u128;
 
 impl super::Store {
-    pub(super) fn validate_references(
+    pub(super) fn validate_reference_sets(
         &self,
         doc: &super::Document,
-        before: &str,
-        after: &str,
+        previous: &std::collections::HashSet<String>,
+        current: &std::collections::HashSet<String>,
         media_paths: &mut std::collections::HashSet<std::path::PathBuf>,
     ) -> Result<std::collections::HashSet<String>> {
         let mut approved = std::collections::HashSet::new();
-        let previous = Self::references(before);
-        for reference in &previous {
+        for reference in previous {
             if let Ok(path) = self.media_path(doc, reference)
                 && self.active_attachment_allowed(doc, &path)
             {
                 media_paths.insert(path);
             }
         }
-        for reference in Self::references(after).difference(&previous) {
+        for reference in current.difference(previous) {
             let path = self.media_path(doc, reference).map_err(|_| denied())?;
             if media_paths.contains(&path) {
                 approved.insert(reference.clone());
@@ -381,6 +447,16 @@ impl super::Store {
         content: &str,
         approved: &std::collections::HashSet<String>,
     ) -> Result<()> {
+        self.commit_media_references(tx, doc, &Self::references(content), approved)
+    }
+
+    pub(super) fn commit_media_references(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        doc: &super::Document,
+        current: &std::collections::HashSet<String>,
+        approved: &std::collections::HashSet<String>,
+    ) -> Result<()> {
         // If migration could not lease the desktop file, the first accepted
         // source commit seals its conservative empty authorization. A later
         // browser projection must never be reinterpreted as a migration grant.
@@ -388,7 +464,6 @@ impl super::Store {
             "UPDATE docs SET media_initialized=1 WHERE id=? AND media_initialized=0",
             [&doc.id],
         )?;
-        let current = Self::references(content);
         let previous = tx
             .prepare("SELECT reference FROM active_media WHERE doc=?")?
             .query_map([&doc.id], |row| row.get::<_, String>(0))?
@@ -411,7 +486,7 @@ impl super::Store {
                     .and_then(|path| std::fs::canonicalize(self.root.join(path)).ok())
             })
             .collect::<std::collections::HashSet<_>>();
-        for reference in &current {
+        for reference in current {
             if approved.contains(reference)
                 || self
                     .media_path(doc, reference)
@@ -590,7 +665,7 @@ mod tests {
             Message::decode_v1(&replies[0]).unwrap(),
             Message::Custom(122, _)
         ));
-        assert!(room.lock().unwrap().receipts.is_empty());
+        assert!(room.lock().unwrap().save.receipts.is_empty());
         store.persist(&document, &mut room.lock().unwrap()).unwrap();
         assert_eq!(peer.held_receipt.as_deref(), Some(receipt.as_str()));
         // Even a causally complete independent incremental update cannot release
@@ -636,12 +711,15 @@ mod tests {
         .unwrap();
         assert!(!peer.awaiting_sync);
         assert!(peer.held_receipt.is_none());
-        assert_eq!(room.lock().unwrap().receipts.get(&peer.id), Some(&receipt));
+        assert_eq!(
+            room.lock().unwrap().save.receipts.get(&peer.id),
+            Some(&receipt)
+        );
         let accepted = room_text(&room.lock().unwrap());
         assert!(accepted.contains(" first second"));
         assert!(accepted.contains("independent "));
         assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
-        assert!(room.lock().unwrap().receipts.is_empty());
+        assert!(room.lock().unwrap().save.receipts.is_empty());
         assert_eq!(
             std::fs::read_to_string(store.root.join(&document.path)).unwrap(),
             accepted
@@ -786,17 +864,27 @@ mod tests {
         store.grant_new_references(&doc, "", image).unwrap();
         let mut connection = std::collections::HashSet::new();
         store
-            .validate_references(&doc, image, "removed", &mut connection)
+            .validate_reference_sets(
+                &doc,
+                &super::super::Store::references(image),
+                &super::super::Store::references("removed"),
+                &mut connection,
+            )
             .unwrap();
         store
-            .validate_references(&doc, "removed", image, &mut connection)
+            .validate_reference_sets(
+                &doc,
+                &super::super::Store::references("removed"),
+                &super::super::Store::references(image),
+                &mut connection,
+            )
             .unwrap();
         assert!(
             store
-                .validate_references(
+                .validate_reference_sets(
                     &doc,
-                    "removed",
-                    image,
+                    &super::super::Store::references("removed"),
+                    &super::super::Store::references(image),
                     &mut std::collections::HashSet::new()
                 )
                 .is_err()
@@ -805,7 +893,12 @@ mod tests {
             .write_upload(&doc, ".assets/new.png", b"uploaded")
             .unwrap();
         store
-            .validate_references(&doc, "removed", "![new](.assets/new.png)", &mut connection)
+            .validate_reference_sets(
+                &doc,
+                &super::super::Store::references("removed"),
+                &super::super::Store::references("![new](.assets/new.png)"),
+                &mut connection,
+            )
             .unwrap();
     }
     #[test]
@@ -1030,5 +1123,114 @@ mod tests {
         // Awareness: one client, id=1, clock=1, one byte of invalid JSON text.
         let frame = [1, 5, 1, 1, 1, 1, 0xff];
         assert!(yrs::sync::Message::decode_v1(&frame).is_err());
+    }
+    #[test]
+    fn preflight_refuses_empty_structs_and_survives_bounded_wire_mutations() {
+        use yrs::{OffsetKind, Options};
+        let root = b"content";
+        let mut malformed = vec![
+            vec![1, 1, 1, 0, 0, 0, 0],  // GC
+            vec![1, 1, 1, 0, 10, 0, 0], // Skip
+            vec![1, 0, 1, 0, 0],        // empty struct group
+            vec![0, 1, 1, 0],           // empty delete group
+            vec![0, 1, 1, 1, 0, 0],     // zero delete interval
+        ];
+        for info in [1, 4] {
+            let mut update = vec![1, 1, 1, 0, info, 1, 7];
+            update.extend(root);
+            update.extend([0, 0]);
+            malformed.push(update);
+        }
+        for update in &malformed {
+            assert!(
+                decode_update(update).is_err(),
+                "Zero-length inner structures must be refused before Yrs"
+            );
+        }
+        assert!(
+            decode_update(&[0, 0]).is_ok(),
+            "An empty outer synchronization update is valid"
+        );
+        let peer = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        peer.get_or_insert_text("content")
+            .insert(&mut peer.transact_mut(), 0, "Small 😀 source");
+        let initial = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let before = peer.transact().state_vector();
+        peer.get_or_insert_text("content")
+            .insert(&mut peer.transact_mut(), 2, "new");
+        let insertion = peer.transact().encode_state_as_update_v1(&before);
+        let before = peer.transact().state_vector();
+        peer.get_or_insert_text("content")
+            .remove_range(&mut peer.transact_mut(), 0, 2);
+        let deletion = peer.transact().encode_state_as_update_v1(&before);
+        let seeds = [initial.clone(), insertion, deletion];
+        let mut cases = malformed;
+        for seed in &seeds {
+            for index in 0..seed.len() {
+                for byte in [0, 1, 4, 10, 31, 32, 64, 127, 128, 255] {
+                    let mut mutation = seed.clone();
+                    mutation[index] = byte;
+                    cases.push(mutation);
+                }
+            }
+            for end in 0..seed.len() {
+                cases.push(seed[..end].to_vec());
+            }
+        }
+        for clock in [0, 1, u32::MAX - 1, u32::MAX] {
+            // A compact hostile GC range exercises checked clock arithmetic.
+            let mut update = vec![1, 1, 1];
+            fn var(out: &mut Vec<u8>, mut value: u32) {
+                while value >= 128 {
+                    out.push(value as u8 | 128);
+                    value >>= 7;
+                }
+                out.push(value as u8);
+            }
+            var(&mut update, clock);
+            update.push(0);
+            var(&mut update, 1);
+            update.push(0);
+            cases.push(update);
+        }
+        for (index, update) in cases.iter().enumerate() {
+            if validate_text_update(update).is_err() {
+                continue;
+            }
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                for existing in [false, true] {
+                    let doc = Doc::with_options(Options {
+                        offset_kind: OffsetKind::Utf16,
+                        ..Options::default()
+                    });
+                    if existing {
+                        doc.transact_mut()
+                            .apply_update(decode_update(&initial).unwrap())
+                            .unwrap();
+                    }
+                    let Ok(decoded) = decode_update(update) else {
+                        continue;
+                    };
+                    if doc.transact_mut().apply_update(decoded).is_err() {
+                        continue;
+                    }
+                    let _ = doc
+                        .get_or_insert_text("content")
+                        .get_string(&doc.transact());
+                    let _ = doc
+                        .transact()
+                        .encode_state_as_update_v1(&StateVector::default());
+                }
+            }));
+            assert!(
+                outcome.is_ok(),
+                "Preflight admitted a panicking bounded mutation at case {index}: {update:?}"
+            );
+        }
     }
 }

@@ -212,11 +212,11 @@ test(
     );
     assert.ok(
       Math.max(...requestTimes) < 1500,
-      "Other-document requests exceeded the responsiveness budget",
+      `Other-document requests exceeded the responsiveness budget (max ${Math.max(...requestTimes).toFixed(1)} ms; samples ${requestTimes.map(ms => ms.toFixed(1)).join(", ")})`,
     );
     assert.ok(
       Math.max(...deliveryTimes) < 1500,
-      "Other-document collaboration stalled behind a desktop rewrite",
+      `Other-document collaboration stalled behind a desktop rewrite (max ${Math.max(...deliveryTimes).toFixed(1)} ms)`,
     );
     const tokens =
       a.text

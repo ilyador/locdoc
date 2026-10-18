@@ -215,3 +215,81 @@ test("separate conversations and replies on the same word preserve prose and thr
     ]),
   );
 });
+
+test("desktop cut/paste keeps unique thread dates and resolution without carrying author rights across raw copies", async () => {
+  const source = "First passage.\n\nDestination passage.";
+  const doc = await create(source);
+  const posted = await request(`/api/docs/${doc.id}/comments`, "POST", {
+    name: "Ana",
+    body: "An unchanged conversation",
+    anchor: anchor(doc, 0, 5),
+    quote: "First",
+    requestId: crypto.randomUUID(),
+  });
+  await request(`/api/docs/${doc.id}/comments/${posted.id}`, "PATCH", {
+    name: "Alex",
+    body: "An unchanged reply",
+    resolved: true,
+    requestId: crypto.randomUUID(),
+  });
+  const before = await request(`/api/docs/${doc.id}/comments`);
+  const current = await request(`/api/docs/${doc.id}`);
+  const thread = sourceComments(current.content)[0];
+  const raw = current.content.slice(thread.from, thread.to);
+  const cut = current.content.slice(0, thread.from) + current.content.slice(thread.to);
+  await writeFile(join(dir, "docs", doc.path), cut);
+  assert.equal((await request(`/api/docs/${doc.id}/comments`)).comments.length, 0);
+  await writeFile(join(dir, "docs", doc.path), `${cut}\n\n${raw}`);
+  const moved = (await request(`/api/docs/${doc.id}/comments`)).comments[0];
+  assert.equal(moved.id, posted.id);
+  assert.equal(moved.created, before.comments[0].created);
+  assert.equal(moved.replies[0].created, before.comments[0].replies[0].created);
+  assert.equal(moved.resolved, true);
+  assert.equal(moved.guest, undefined, "internal author identity is never exposed");
+  assert.equal(moved.requestId, undefined);
+  assert.equal(moved.replyRequests, undefined);
+
+  const secondDoc = await create(`A different document.\n\n${raw}`);
+  const independent = (await request(`/api/docs/${secondDoc.id}/comments`)).comments[0];
+  assert.notEqual(independent.id, posted.id, "metadata never crosses documents");
+  assert.equal(independent.created, 0);
+  assert.equal(independent.resolved, false);
+
+  const movedSource = (await request(`/api/docs/${doc.id}`)).content;
+  await writeFile(join(dir, "docs", doc.path), `${movedSource}\n\n${raw}`);
+  const copies = (await request(`/api/docs/${doc.id}/comments`)).comments;
+  assert.equal(copies.length, 2);
+  assert.equal(copies[0].id, posted.id);
+  assert.notEqual(copies[1].id, posted.id);
+  assert.equal(copies[1].created, 0);
+  const copiedThread = sourceComments(`${movedSource}\n\n${raw}`)[0];
+  const copiedSource = `${movedSource}\n\n${raw}`;
+  await writeFile(join(dir, "docs", doc.path), copiedSource.slice(0, copiedThread.from) + copiedSource.slice(copiedThread.to));
+  const survivingCopy = (await request(`/api/docs/${doc.id}/comments`)).comments[0];
+  assert.equal(survivingCopy.id, copies[1].id, "deleting the original cannot reassign its metadata to an existing copy");
+  assert.equal(survivingCopy.resolved, false);
+});
+
+test("out-of-range comment anchor IDs return an error without crashing or aliasing valid positions", async () => {
+  const doc = await create("A safe selected passage.");
+  const selected = anchor(doc, 2, 6);
+  for (const field of ["item", "type"]) {
+    const invalid = structuredClone(selected);
+    invalid.start[field] = { client: 2 ** 53, clock: 0 };
+    const response = await fetch(`${base}/api/docs/${doc.id}/comments`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({ name: "Ana", body: "Must not be inserted", anchor: invalid }),
+      signal: AbortSignal.timeout(7000),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, "Invalid comment anchor.");
+    const current = await request(`/api/docs/${doc.id}`);
+    assert.equal(current.content, "A safe selected passage.");
+    assert.equal((await request(`/api/docs/${doc.id}/comments`)).comments.length, 0);
+  }
+});

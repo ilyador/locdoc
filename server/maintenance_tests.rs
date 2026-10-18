@@ -164,6 +164,133 @@ fn corrupt_state_requires_explicit_disk_choice_and_archives_every_opaque_byte() 
 }
 
 #[test]
+fn corrupt_client_ids_in_saved_state_baseline_or_journal_fail_safely_and_allow_disk_rebuild() {
+    fn var(out: &mut Vec<u8>, mut value: u64) {
+        while value >= 128 {
+            out.push(value as u8 | 128);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+    let mut corrupt = vec![1, 1];
+    // Yrs ClientID supports 53 bits. Its constructor asserts in debug and
+    // masks upper bits in release, so this must be refused before decoding.
+    var(&mut corrupt, 1u64 << 53);
+    corrupt.extend([0, 4, 1, 7]);
+    corrupt.extend(b"content");
+    corrupt.extend([1, b'x', 0]);
+    for target in ["state", "baseline", "journal"] {
+        let (_directory, store, document) = fixture("Desktop source\n");
+        let room = store.room(&document).unwrap();
+        store.persist(&document, &mut room.lock().unwrap()).unwrap();
+        store.rooms.lock().unwrap().remove(&document.id);
+        drop(room);
+        {
+            let db = store.db.lock().unwrap();
+            match target {
+                "state" => {
+                    db.execute(
+                        "UPDATE docs SET state=? WHERE id=?",
+                        params![corrupt, document.id],
+                    )
+                    .unwrap();
+                }
+                "baseline" => {
+                    db.execute(
+                        "UPDATE docs SET disk_state=? WHERE id=?",
+                        params![corrupt, document.id],
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    db.execute(
+                        "INSERT INTO doc_updates(doc,content) VALUES(?,?)",
+                        params![document.id, corrupt],
+                    )
+                    .unwrap();
+                }
+            }
+        }
+        let open = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.room(&document)));
+        assert!(
+            open.is_ok(),
+            "Corrupt {target} must not panic while decoding"
+        );
+        assert!(
+            open.unwrap().is_err(),
+            "Corrupt {target} must not open as aliased state"
+        );
+        let recovery =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| store.recover_pending()));
+        assert!(
+            recovery.is_ok(),
+            "Corrupt {target} must not panic during startup recovery"
+        );
+        assert!(
+            recovery.unwrap().is_ok(),
+            "Startup recovery isolates an invalid document"
+        );
+        assert!(rebuild_document(&store, &document.id, RebuildSource::Durable).is_err());
+        let result = rebuild_document(&store, &document.id, RebuildSource::Disk).unwrap();
+        let archive: Value =
+            serde_json::from_slice(&fs::read(store.data.join(result.archive)).unwrap()).unwrap();
+        let original = match target {
+            "state" => archive["state"].as_str().unwrap(),
+            "baseline" => archive["diskState"].as_str().unwrap(),
+            _ => archive["updates"][0]["state"].as_str().unwrap(),
+        };
+        assert_eq!(BASE64.decode(original).unwrap(), corrupt);
+        let reopened = store.room(&document).unwrap();
+        assert_eq!(room_text(&reopened.lock().unwrap()), "Desktop source\n");
+        assert_eq!(
+            fs::read_to_string(store.root.join("test.md")).unwrap(),
+            "Desktop source\n"
+        );
+    }
+}
+
+#[test]
+fn zero_length_saved_structures_are_isolated_and_rebuildable_without_losing_raw_state() {
+    let malformed = vec![1, 1, 1, 0, 0, 0, 0];
+    for target in ["state", "baseline", "journal"] {
+        let (_directory, store, document) = fixture("Recoverable desktop source\n");
+        let room = store.room(&document).unwrap();
+        store.persist(&document, &mut room.lock().unwrap()).unwrap();
+        store.rooms.lock().unwrap().remove(&document.id);
+        drop(room);
+        let sql = match target {
+            "state" => "UPDATE docs SET state=? WHERE id=?",
+            "baseline" => "UPDATE docs SET disk_state=? WHERE id=?",
+            _ => "INSERT INTO doc_updates(content,doc) VALUES(?,?)",
+        };
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(sql, params![malformed, document.id])
+            .unwrap();
+        assert!(
+            store.room(&document).is_err(),
+            "Malformed {target} must never become a live room"
+        );
+        store.recover_pending().unwrap();
+        let result = rebuild_document(&store, &document.id, RebuildSource::Disk).unwrap();
+        let archive: Value =
+            serde_json::from_slice(&fs::read(store.data.join(result.archive)).unwrap()).unwrap();
+        let saved = match target {
+            "state" => archive["state"].as_str().unwrap(),
+            "baseline" => archive["diskState"].as_str().unwrap(),
+            _ => archive["updates"][0]["state"].as_str().unwrap(),
+        };
+        assert_eq!(BASE64.decode(saved).unwrap(), malformed);
+        assert_eq!(
+            room_text(&store.room(&document).unwrap().lock().unwrap()),
+            "Recoverable desktop source\n"
+        );
+    }
+}
+
+#[test]
 fn recovery_export_preserves_invalid_utf8_file_bytes_without_decoding_state() {
     let (_directory, store, document) = fixture("Source");
     let bytes = vec![b'a', 255, b'\n'];

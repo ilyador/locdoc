@@ -125,7 +125,7 @@ fn delete_only_deltas_survive_restarts_and_checkpoint_compaction() {
         apply(&s, &d, &r, 1, 0, "x");
         s.persist(&d, &mut r.lock().unwrap()).unwrap();
     }
-    assert!(r.lock().unwrap().journal_len < 128);
+    assert!(r.lock().unwrap().journal.len() < 128);
     let expected = room_text(&r.lock().unwrap());
     drop(r);
     drop(s);
@@ -196,8 +196,9 @@ fn startup_recovery_repairs_torn_utf8_and_preserves_exact_observed_bytes() {
     apply(&s, &d, &r, 0, 8, "😀 intended");
     {
         let mut room = r.lock().unwrap();
-        room.recovering = true;
-        s.store_room(&d, &mut room, true).unwrap();
+        let target = text::render(&room_text(&room), room.save.ending()).into_bytes();
+        room.save.prepare_write(target);
+        s.store_room(&d, &mut room).unwrap();
     }
     // A process interruption after only the first two bytes of a UTF-8 scalar.
     let mut observed = b"Old text".to_vec();
@@ -232,8 +233,9 @@ fn desktop_save_after_an_interruption_merges_with_the_durable_browser_intent() {
     apply(&s, &d, &r, 6, 0, "Browser\n");
     {
         let mut room = r.lock().unwrap();
-        room.recovering = true;
-        s.store_room(&d, &mut room, true).unwrap();
+        let target = text::render(&room_text(&room), room.save.ending()).into_bytes();
+        room.save.prepare_write(target);
+        s.store_room(&d, &mut room).unwrap();
     }
     fs::write(&path, "First\nDesktop last\n").unwrap();
     drop(r);

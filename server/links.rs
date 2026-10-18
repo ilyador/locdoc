@@ -17,6 +17,14 @@ type Cache = Mutex<HashMap<String, (Instant, Value)>>;
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
 
+fn durable_source(s: &Store, d: &Document, room: &Arc<Mutex<Room>>) -> Result<String> {
+    let mut room = room.lock().unwrap();
+    // Admission and reading use separate lock acquisitions. An intervening
+    // failed import/edit must commit before its text can appear in a preview.
+    s.store_room(d, &mut room)?;
+    Ok(room_text(&room))
+}
+
 pub(super) async fn preview(
     State(s): State<App>,
     AxPath(id): AxPath<String>,
@@ -46,7 +54,7 @@ pub(super) async fn preview(
     }
     if !owner {
         let room = s.room(&source)?;
-        let text = room_text(&room.lock().unwrap());
+        let text = durable_source(&s, &source, &room)?;
         let referenced = text.contains(&q.url) || pulldown_cmark::Parser::new(&text).any(|event| {
             matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) if dest_url.as_ref() == q.url)
         });
@@ -89,7 +97,7 @@ pub(super) async fn preview(
             ));
         };
         let room = s.room(&target)?;
-        let text = room_text(&room.lock().unwrap());
+        let text = durable_source(&s, &target, &room)?;
         let title = text
             .lines()
             .find_map(|line| line.strip_prefix("# "))
@@ -337,6 +345,64 @@ fn metadata(html: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_preview_cannot_read_an_import_that_failed_after_room_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost:3477".into(),
+        )
+        .unwrap();
+        fs::write(store.root.join("preview.md"), "# Durable title").unwrap();
+        let document = store.index_document("preview.md").unwrap();
+        // The request has already obtained its room. A desktop import then
+        // reaches live memory but fails to commit before the preview locks it.
+        let room = store.room(&document).unwrap();
+        store.persist(&document, &mut room.lock().unwrap()).unwrap();
+        store.db.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_preview_import BEFORE INSERT ON doc_updates BEGIN SELECT RAISE(ABORT,'test preview storage outage'); END;"
+        ).unwrap();
+        fs::write(
+            store.root.join(&document.path),
+            "# Uncommitted imported title",
+        )
+        .unwrap();
+        assert!(store.persist(&document, &mut room.lock().unwrap()).is_err());
+        assert_eq!(
+            room_text(&room.lock().unwrap()),
+            "# Uncommitted imported title"
+        );
+        assert!(
+            durable_source(&store, &document, &room).is_err(),
+            "preview must fail while the imported source cannot commit"
+        );
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_preview_import;")
+            .unwrap();
+        assert_eq!(
+            durable_source(&store, &document, &room).unwrap(),
+            "# Uncommitted imported title"
+        );
+        let journal_count: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM doc_updates WHERE doc=?",
+                [&document.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            journal_count > 0,
+            "preview source is durable before it is returned"
+        );
+    }
+
     #[test]
     fn blocks_private_special_and_encoded_loopback_addresses() {
         for ip in [
