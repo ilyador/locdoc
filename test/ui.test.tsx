@@ -8,6 +8,13 @@ import { countMarkdownWords } from "../src/word-count";
 import { sourceComments } from "../src/comment-syntax";
 import { readFileSync } from "node:fs";
 import { NamePrompt } from "../src/name-prompt";
+import {
+  createEncoder,
+  writeVarUint,
+  writeVarString,
+  writeVarUint8Array,
+  toUint8Array,
+} from "lib0/encoding";
 
 let render, renderHook, act, fireEvent, screen, waitFor, cleanup;
 let WorkspaceView,
@@ -18,6 +25,7 @@ let WorkspaceView,
   useAppearance,
   useWorkspace;
 let originalFetch, dom;
+const sockets: any[] = [];
 const requests: { path: string; body: any }[] = [];
 const held = new Map<string, () => void>();
 let delayShare = false,
@@ -120,6 +128,9 @@ before(async () => {
     static CLOSING = 2;
     static CLOSED = 3;
     readyState = 0;
+    constructor() {
+      sockets.push(this);
+    }
     send() {}
     close() {
       this.readyState = 3;
@@ -193,6 +204,7 @@ before(async () => {
 });
 afterEach(() => {
   cleanup();
+  sockets.length = 0;
   requests.length = 0;
   held.clear();
   delayShare = delayComment = failReply = failBootstrap = false;
@@ -251,6 +263,58 @@ async function openWorkspace() {
   render(<WorkspaceFixture />);
   await screen.findByRole("textbox", { name: "Markdown document" });
 }
+
+test("the visible footer suppresses short remote saves but shows a sustained save", async () => {
+  await openWorkspace();
+  const socket = sockets.at(-1);
+  assert.ok(socket, "a document socket must exist");
+  const receive = (
+    encode: (encoder: ReturnType<typeof createEncoder>) => void,
+  ) => {
+    const encoder = createEncoder();
+    encode(encoder);
+    socket.onmessage({ data: toUint8Array(encoder) });
+  };
+  const status = (value: string) =>
+    receive((encoder) => {
+      writeVarUint(encoder, 121);
+      writeVarString(encoder, value);
+    });
+  await act(async () => {
+    socket.readyState = 1;
+    socket.onopen();
+    receive((encoder) => {
+      writeVarUint(encoder, 0);
+      writeVarUint(encoder, 1);
+      writeVarUint8Array(encoder, Buffer.from(docs.a.state, "base64"));
+    });
+    status("0");
+  });
+  const footer = document.querySelector(".document-status")!;
+  await waitFor(() => assert.equal(footer.textContent, "Saved to disk"), {
+    timeout: 3500,
+  });
+  for (let n = 0; n < 24; n++) {
+    await act(async () => {
+      status("2");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    assert.equal(footer.textContent, "Saved to disk");
+    await act(async () => {
+      status("0");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    assert.equal(footer.textContent, "Saved to disk");
+  }
+  await act(async () => status("2"));
+  await waitFor(() => assert.equal(footer.textContent, "Saving…"), {
+    timeout: 3500,
+  });
+  await act(async () => status("0"));
+  await waitFor(() => assert.equal(footer.textContent, "Saved to disk"), {
+    timeout: 3500,
+  });
+});
 async function chooseB() {
   fireEvent.click(screen.getByRole("button", { name: "b .md", exact: true }));
   await waitFor(() => assert.equal(document.title, "b · locdoc"));

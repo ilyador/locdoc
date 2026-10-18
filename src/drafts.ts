@@ -22,6 +22,55 @@ type Draft = {
   collaborationEpoch?: string;
   recovery?: RecoveryRecord;
 };
+export type DraftArchive = Omit<Draft, "state" | "recovery"> & {
+  state: unknown;
+  recovery?: Omit<RecoveryRecord, "originals"> & {
+    originals?: (Omit<
+      NonNullable<RecoveryRecord["originals"]>[number],
+      "state"
+    > & {
+      state: unknown;
+    })[];
+  };
+};
+// Explicit recovery reads the outbox without replaying or deleting it. Only the
+// owner's document namespace is included, never a guest link's local identity.
+export async function archiveOwnerDrafts(
+  document: string,
+): Promise<DraftArchive[]> {
+  const key = `owner/${document}`;
+  await Promise.all(
+    [...journals]
+      .filter((journal) => journal.key === key)
+      .map((journal) => journal.flush()),
+  );
+  const saved = new Map(
+    (await records(key)).map((record) => [recoveryId(record), record]),
+  );
+  for (const { record } of recoveryMemory.values())
+    if (record.key === key) saved.set(recoveryId(record), record);
+  return [...saved.values()].map((record) => ({
+    ...record,
+    state:
+      record.state instanceof Uint8Array
+        ? Array.from(record.state)
+        : record.state,
+    ...(record.recovery
+      ? {
+          recovery: {
+            ...record.recovery,
+            originals: record.recovery.originals?.map((original) => ({
+              ...original,
+              state:
+                original.state instanceof Uint8Array
+                  ? Array.from(original.state)
+                  : original.state,
+            })),
+          },
+        }
+      : {}),
+  }));
+}
 export type DraftRecovery = {
   id: string;
   reason: string;
@@ -143,7 +192,7 @@ async function archive(originals: Draft[], copies: Draft[]) {
     for (const copy of copies) store.put(copy);
   });
 }
-function plainText(doc: Y.Doc) {
+export function plainText(doc: Y.Doc) {
   if ([...doc.share.keys()].some((name) => name !== "content")) return false;
   const content = doc.share.get("content");
   return (

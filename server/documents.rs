@@ -122,10 +122,10 @@ pub(super) fn relative_path(input: &str, hidden: bool) -> Result<String> {
 }
 
 fn retire(db: &Connection, id: &str) -> Result<()> {
-    db.execute(
-        "UPDATE docs SET active=0,path=?,permission='private',token=NULL WHERE id=?",
-        params![format!(".retired/{id}"), id],
-    )?;
+    const RETIRE: &str = "UPDATE docs SET active=0,
+        retired_path=COALESCE(retired_path,path),retired_at=?,path=?,
+        permission='private',token=NULL WHERE id=? AND active=1";
+    db.execute(RETIRE, params![now(), format!(".retired/{id}"), id])?;
     Ok(())
 }
 
@@ -154,6 +154,8 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         ("collaboration_epoch", "TEXT NOT NULL DEFAULT ''"),
         ("media_initialized", "INTEGER NOT NULL DEFAULT 0"),
         ("protected_generation", "INTEGER NOT NULL DEFAULT -1"),
+        ("retired_path", "TEXT"),
+        ("retired_at", "INTEGER"),
     ] {
         let exists = db
             .prepare("PRAGMA table_info(docs)")?
@@ -338,6 +340,7 @@ impl Store {
             tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;
             tx.commit()?;
             drop(db);
+            self.permissions.invalidate();
             if let Some(previous) = previous {
                 self.close_document(&previous);
             }
@@ -409,6 +412,7 @@ impl Store {
         }
         drop(db);
         drop(r);
+        self.permissions.invalidate();
         if let Some(previous) = previous {
             self.close_document(&previous);
         }
@@ -465,6 +469,9 @@ impl Store {
         }
         tx.commit()?;
         drop(db);
+        if !missing.is_empty() {
+            self.permissions.invalidate();
+        }
         for (id, _) in missing {
             self.close_document(&id);
         }

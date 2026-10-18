@@ -2682,3 +2682,18 @@ button:hover {
 .collaboration-recovery .dialog-actions {
   flex-wrap: wrap;
 }
+.removed-recovery-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.removed-recovery-row > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--ui-caption-size);
+}
+.removed-recovery-row > button {
+  flex-shrink: 0;
+}

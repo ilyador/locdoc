@@ -44,6 +44,7 @@ import { FormattingTools } from "./formatting-tools";
 import { captureInsertion, insertAttachment } from "./document-session";
 import { normalizePresence, publishPresence } from "./presence";
 import { CollaborationRecovery } from "./collaboration-recovery";
+import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { DraftRecoveryNotice } from "./draft-recovery";
 import { useDocument } from "./use-document";
 import { AppearancePanel, documentFontFamily } from "./appearance";
@@ -1415,6 +1416,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                       reconnect={() => session?.provider.connect()}
                     />
                   )}
+                  {config?.owner && <RemovedDocumentRecovery />}
                   {config?.owner && (
                     <button
                       className="menu-action"

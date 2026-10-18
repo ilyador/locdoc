@@ -295,7 +295,7 @@ fn recovery_export_preserves_invalid_utf8_file_bytes_without_decoding_state() {
     let (_directory, store, document) = fixture("Source");
     let bytes = vec![b'a', 255, b'\n'];
     fs::write(store.root.join("test.md"), &bytes).unwrap();
-    let bundle = capture(&store, &document, Ok(bytes.clone()), None).unwrap();
+    let bundle = capture(&store, &document, Ok(bytes.clone()), None, true).unwrap();
     assert_eq!(
         BASE64.decode(bundle.filesystem_bytes.unwrap()).unwrap(),
         bytes
@@ -390,6 +390,7 @@ fn failed_rebuild_transaction_keeps_original_state_and_the_fsynced_archive() {
 #[tokio::test]
 async fn recovery_routes_are_owner_only_even_when_the_document_has_a_public_link() {
     let (_directory, store, document) = fixture("Private source");
+    store.snapshot(&document, "Older source", false).unwrap();
     store
         .db
         .lock()
@@ -433,6 +434,20 @@ async fn recovery_routes_are_owner_only_even_when_the_document_has_a_public_link
     assert_eq!(response.status(), StatusCode::OK);
     let bundle: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(bundle["filesystemSource"], "Private source");
+    assert_eq!(bundle["versions"][0]["content"], "Older source");
+    let text = client
+        .get(format!(
+            "{base}/api/docs/{}/recovery?history=false",
+            document.id
+        ))
+        .bearer_auth(&store.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(text.status(), StatusCode::OK);
+    let text: Value = serde_json::from_slice(&text.bytes().await.unwrap()).unwrap();
+    assert_eq!(text["filesystemSource"], "Private source");
+    assert!(text["versions"].as_array().unwrap().is_empty());
     server.abort();
 }
 
@@ -454,7 +469,7 @@ fn recovery_archives_exact_projection_preimage_and_rebuild_clears_it() {
         )
         .unwrap();
     let bytes = fs::read(store.root.join("test.md")).unwrap();
-    let bundle = capture(&store, &document, Ok(bytes), None).unwrap();
+    let bundle = capture(&store, &document, Ok(bytes), None, true).unwrap();
     assert_eq!(
         bundle.write_before_hash.as_deref(),
         Some("exact-preimage-hash")
@@ -472,4 +487,142 @@ fn recovery_archives_exact_projection_preimage_and_rebuild_clears_it() {
         )
         .unwrap();
     assert!(cleared);
+}
+
+#[tokio::test]
+async fn removed_document_recovery_keeps_pending_edits_private_without_reading_a_reused_path() {
+    let (directory, store, document) = fixture("Original file\n");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    {
+        let mut room = room.lock().unwrap();
+        let doc = room.awareness.doc();
+        doc.get_or_insert_text("content").insert(
+            &mut doc.transact_mut(),
+            0,
+            "Accepted pending edit. ",
+        );
+        room.save.edited();
+        store.store_room(&document, &mut room).unwrap();
+    }
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET token='removed-share',permission='edit' WHERE id=?",
+            [&document.id],
+        )
+        .unwrap();
+    let moved = directory.path().join("moved.md");
+    fs::rename(store.root.join("test.md"), &moved).unwrap();
+    store.retire_missing_documents().unwrap();
+    fs::write(store.root.join("test.md"), "Unrelated replacement").unwrap();
+    let replacement = store.index_document("test.md").unwrap();
+    assert_ne!(replacement.id, document.id);
+    assert!(store.doc(&document.id).is_err());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let application = router(store.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, application).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+    for path in [
+        "/api/recovery/removed".into(),
+        format!("/api/docs/{}/recovery?token=removed-share", document.id),
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let list = client
+        .get(format!("{base}/api/recovery/removed"))
+        .bearer_auth(&store.key)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let list: Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list[0]["id"], document.id);
+    assert_eq!(list[0]["path"], "test.md");
+    let response = client
+        .get(format!("{base}/api/docs/{}/recovery", document.id))
+        .bearer_auth(&store.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bundle: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(bundle["path"], "test.md");
+    assert!(bundle["filesystemBytes"].is_null());
+    let recovered = Doc::with_options(Options {
+        offset_kind: OffsetKind::Utf16,
+        ..Options::default()
+    });
+    recovered.get_or_insert_text("content");
+    let mut states = vec![bundle["state"].as_str().unwrap().to_owned()];
+    states.extend(
+        bundle["updates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["state"].as_str().unwrap().to_owned()),
+    );
+    for encoded in states {
+        recovered
+            .transact_mut()
+            .apply_update(security::decode_update(&BASE64.decode(encoded).unwrap()).unwrap())
+            .unwrap();
+    }
+    assert_eq!(
+        recovered
+            .get_or_insert_text("content")
+            .get_string(&recovered.transact()),
+        "Accepted pending edit. Original file\n"
+    );
+    assert!(
+        bundle["versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|version| version["content"] == "Accepted pending edit. Original file\n")
+    );
+    let text = client
+        .get(format!(
+            "{base}/api/docs/{}/recovery?history=false",
+            document.id
+        ))
+        .bearer_auth(&store.key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(text.status(), StatusCode::OK);
+    let text: Value = serde_json::from_slice(&text.bytes().await.unwrap()).unwrap();
+    assert_eq!(text["state"], bundle["state"]);
+    assert_eq!(text["updates"], bundle["updates"]);
+    assert!(text["versions"].as_array().unwrap().is_empty());
+    assert_eq!(fs::read_to_string(moved).unwrap(), "Original file\n");
+    assert_eq!(
+        fs::read_to_string(store.root.join("test.md")).unwrap(),
+        "Unrelated replacement"
+    );
+    let revoked: Option<String> = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT token FROM docs WHERE id=?", [&document.id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(revoked.is_none());
+    server.abort();
 }

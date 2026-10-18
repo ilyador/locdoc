@@ -10,6 +10,7 @@ mod peers;
 mod persistence_adversarial_tests;
 #[cfg(test)]
 mod persistence_tests;
+mod projection;
 mod save;
 #[cfg(test)]
 mod save_adversarial_tests;
@@ -34,7 +35,6 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
-use notify::Watcher;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -168,8 +168,10 @@ struct Store {
     document_jobs: work::Documents,
     uploads: Arc<tokio::sync::Semaphore>,
     visitors: Arc<peers::Visitors>,
+    permissions: peers::PermissionEpoch,
     data: PathBuf,
     db: Mutex<Connection>,
+    sessions: browser_auth::Sessions,
     rooms: Mutex<HashMap<String, Arc<Mutex<Room>>>>,
     key: String,
     public_url: String,
@@ -263,6 +265,7 @@ impl Store {
         browser_auth::migrate(&db)?;
         documents::migrate(&db)?;
         folders::migrate(&db)?;
+        let sessions = browser_auth::Sessions::load(&db)?;
         Ok(Arc::new(Self {
             root,
             root_identity,
@@ -271,8 +274,10 @@ impl Store {
             document_jobs: work::Documents::default(),
             uploads: Arc::new(tokio::sync::Semaphore::new(2)),
             visitors: Arc::new(peers::Visitors::default()),
+            permissions: peers::PermissionEpoch::default(),
             data,
             db: Mutex::new(db),
+            sessions,
             rooms: Mutex::new(HashMap::new()),
             key,
             public_url: public_url.trim_end_matches('/').into(),
@@ -1177,15 +1182,8 @@ async fn login(State(s): State<App>, h: HeaderMap, Json(b): Json<Login>) -> Resu
         tokio::time::sleep(std::time::Duration::from_millis(700)).await;
         return Err(denied());
     }
-    let t = token();
-    s.db.lock().unwrap().execute(
-        "INSERT INTO sessions(hash,expires,transport) VALUES(?,?,?)",
-        params![
-            hash(&t),
-            now() + 365 * 86400,
-            browser_auth::transport(&s, &h)
-        ],
-    )?;
+    let transport = browser_auth::transport(&s, &h);
+    let t = job(s.clone(), move |s| browser_auth::issue(s, transport)).await?;
     Ok(browser_auth::login_response(&s, &h, &t))
 }
 async fn issue_ticket(State(s): State<App>, h: HeaderMap) -> Result<Json<Value>> {
@@ -1215,30 +1213,16 @@ struct Redeem {
     ticket: String,
 }
 async fn redeem(State(s): State<App>, h: HeaderMap, Json(b): Json<Redeem>) -> Result<Response> {
-    let db = s.db.lock().unwrap();
-    let valid = db.execute(
-        "DELETE FROM tickets WHERE hash=? AND expires>?",
-        params![hash(&b.ticket), now()],
-    )?;
-    if valid != 1 {
-        return Err(denied());
-    }
-    let t = token();
-    db.execute(
-        "INSERT INTO sessions(hash,expires,transport) VALUES(?,?,?)",
-        params![
-            hash(&t),
-            now() + 365 * 86400,
-            browser_auth::transport(&s, &h)
-        ],
-    )?;
+    let transport = browser_auth::transport(&s, &h);
+    let t = job(s.clone(), move |s| {
+        browser_auth::redeem(s, &b.ticket, transport)
+    })
+    .await?;
     Ok(browser_auth::login_response(&s, &h, &t))
 }
 async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
     if let Some(digest) = browser_auth::session(&s, &h) {
-        s.db.lock()
-            .unwrap()
-            .execute("DELETE FROM sessions WHERE hash=?", [digest])?;
+        job(s, move |s| browser_auth::revoke(s, &digest)).await?;
     }
     Ok(browser_auth::logout_response())
 }
@@ -1474,29 +1458,36 @@ async fn share(
     Json(b): Json<Share>,
 ) -> Result<Json<Value>> {
     doc_job(s, id.clone(), move |s| {
-    if !["private", "view", "edit"].contains(&b.permission.as_str()) {
-        return Err(bad("Choose private, view, or edit."));
-    }
-    let d = s.doc(&id)?;
-    let t = if b.permission == "private" {
-        None
-    } else {
-        Some(match (b.rotate, d.permission.as_str(), d.token) {
-            (false, permission, Some(existing)) if permission != "private" => existing,
-            _ => token(),
-        })
-    };
-    s.db.lock().unwrap().execute(
-        "UPDATE docs SET permission=?,token=? WHERE id=?",
-        params![b.permission, t, id],
-    )?;
-    // Permissions are rechecked on every frame and existing visitors reconnect with the new mode.
-    let room = s.rooms.lock().unwrap().get(&id).cloned();
-    if let Some(room) = room { let _ = room.lock().unwrap().tx.send(vec![126]); }
-    Ok(Json(
-        json!({"permission":b.permission,"shareUrl":if b.permission=="private"{None}else{t.map(|t| format!("{}/s/{t}",s.public_url))}}),
-    ))
-    }).await
+        if !["private", "view", "edit"].contains(&b.permission.as_str()) {
+            return Err(bad("Choose private, view, or edit."));
+        }
+        let d = s.doc(&id)?;
+        let t = if b.permission == "private" {
+            None
+        } else {
+            Some(match (b.rotate, d.permission.as_str(), d.token) {
+                (false, permission, Some(existing)) if permission != "private" => existing,
+                _ => token(),
+            })
+        };
+        s.db.lock().unwrap().execute(
+            "UPDATE docs SET permission=?,token=? WHERE id=?",
+            params![b.permission, t, id],
+        )?;
+        s.permissions.invalidate();
+        // Existing visitors reconnect with the new mode. Cached passive checks
+        // are invalidated even if a busy room cannot be notified immediately.
+        let room = s.rooms.lock().unwrap().get(&id).cloned();
+        if let Some(room) = room {
+            let _ = room.lock().unwrap().tx.send(vec![126]);
+        }
+        let share_url = t.map(|token| format!("{}/s/{token}", s.public_url));
+        Ok(Json(json!({
+            "permission": b.permission,
+            "shareUrl": share_url,
+        })))
+    })
+    .await
 }
 #[derive(Deserialize)]
 struct Rename {
@@ -1575,8 +1566,8 @@ fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]
         }));
     }
     let room = s.room(&d)?;
-    let r = room.lock().unwrap();
-    if s.usage(&d, &room_text(&r)) + bytes.len() > DOC_LIMIT {
+    let usage = s.usage(&d, &room_text(&room.lock().unwrap()));
+    if usage + bytes.len() > DOC_LIMIT {
         return Err(bad(
             "This document would exceed its 50 MB attachment limit.",
         ));
@@ -1590,9 +1581,8 @@ fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]
     s.write_upload(&d, &rel, bytes)?;
     let depth = Path::new(&d.path).parent().unwrap().components().count();
     let reference = format!("{}{rel}", "../".repeat(depth));
-    Ok(
-        json!({"path":reference,"name":name,"bytes":bytes.len(),"video":video,"usage":s.usage(&d,&room_text(&r))}),
-    )
+    let usage = s.usage(&d, &room_text(&room.lock().unwrap()));
+    Ok(json!({"path":reference,"name":name,"bytes":bytes.len(),"video":video,"usage":usage}))
 }
 #[derive(Deserialize)]
 struct Media {
@@ -1870,14 +1860,37 @@ async fn websocket(
             socket_loop(socket, s, d.id, r, h, a).await
         }))
 }
-async fn socket_access(s: App, id: String, headers: HeaderMap, access: Access) -> Result<()> {
-    // Authorization also touches SQLite. Keep it off network workers while
-    // checking permission before each passive broadcast and heartbeat.
-    job(s, move |s| {
-        s.doc(&id).and_then(|d| s.access(&headers, &d, &access))?;
-        Ok(())
-    })
-    .await
+async fn socket_access(
+    s: &App,
+    id: &str,
+    headers: &HeaderMap,
+    access: &Access,
+    checked: &mut peers::PermissionCheck,
+    force: bool,
+) -> Result<()> {
+    loop {
+        let generation = s.permissions.current();
+        if !checked.needs_check(generation, force) {
+            return Ok(());
+        }
+        let document = id.to_string();
+        let headers = headers.clone();
+        let access = access.clone();
+        let result = job(s.clone(), move |s| {
+            s.doc(&document)
+                .and_then(|d| s.access(&headers, &d, &access))?;
+            Ok(())
+        })
+        .await;
+        if s.permissions.current() != generation {
+            // Never cache an old result under a newer generation when a share
+            // or session mutation completed while the check was queued.
+            continue;
+        }
+        result?;
+        checked.checked(generation);
+        return Ok(());
+    }
 }
 async fn send_socket(
     sender: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
@@ -1969,6 +1982,7 @@ async fn socket_loop(
     let mut pulse = tokio::time::interval(peers::PING_INTERVAL);
     pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut heartbeat = peers::Heartbeat::default();
+    let mut permission = peers::PermissionCheck::default();
     let mut frames = 0u32;
     'connection: loop {
         tokio::select! {
@@ -2011,10 +2025,7 @@ async fn socket_loop(
             outgoing = rx.recv() => match outgoing {
                 Ok(data) => {
                     if data == [126] { break; }
-                    // Directory replacement can invalidate a folder capability
-                    // without a settings request. Passive visitors must not
-                    // receive another user's edits until the next heartbeat.
-                    if socket_access(s.clone(), id.clone(), h.clone(), a.clone()).await.is_err() { break; }
+                    if socket_access(&s, &id, &h, &a, &mut permission, false).await.is_err() { break; }
                     let Some(data) = peer.presence.outgoing(data) else { continue; };
                     if !send_socket(&mut sender, WsMessage::Binary(data.into())).await { break; }
                 }
@@ -2022,7 +2033,9 @@ async fn socket_loop(
             },
             _ = pulse.tick() => {
                 frames = 0;
-                if socket_access(s.clone(), id.clone(), h.clone(), a.clone()).await.is_err() { break; }
+                // Filesystem replacement and natural session expiry need a
+                // live check even when no settings generation has changed.
+                if socket_access(&s, &id, &h, &a, &mut permission, true).await.is_err() { break; }
                 let Some(nonce) = heartbeat.ping() else { break; };
                 if !send_socket(&mut sender, WsMessage::Ping(nonce.to_vec().into())).await { break; }
             }
@@ -2269,111 +2282,6 @@ fn process_frame(
     responses.extend(receipt_response);
     Ok(responses)
 }
-fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    };
-    use std::time::{Duration, Instant};
-    let (tx, rx) = mpsc::sync_channel(1024);
-    let overflow = Arc::new(AtomicBool::new(false));
-    let invalidated = overflow.clone();
-    let mut watcher = notify::recommended_watcher(move |event| {
-        if tx.try_send(event).is_err() {
-            invalidated.store(true, Ordering::Relaxed);
-        }
-    })?;
-    watcher.watch(&s.root, notify::RecursiveMode::Recursive)?;
-    // A dedicated blocking coordinator owns projection work. A bounded event
-    // queue plus invalidation fallback handles bulk checkouts without a backlog
-    // proportional to filesystem traffic or blocking network runtime threads.
-    std::thread::spawn(move || {
-        let settle = Duration::from_millis(1000);
-        let mut missing_after = Some(Instant::now() + settle);
-        let mut next_sweep = Instant::now();
-        loop {
-            if Instant::now() >= next_sweep {
-                let rooms: Vec<_> = s
-                    .rooms
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(id, room)| (id.clone(), room.clone()))
-                    .collect();
-                let rescan = overflow.swap(false, Ordering::Relaxed);
-                if rescan {
-                    missing_after = Some(Instant::now() + settle);
-                }
-                for (id, room) in rooms {
-                    let mut r = room.lock().unwrap();
-                    if rescan {
-                        r.save.request();
-                    }
-                    if r.save.needs_projection()
-                        && r.save.projection_due()
-                        && let Ok(d) = s.doc(&id)
-                        && let Err(error) = s.project(&d, &mut r)
-                    {
-                        r.waiting();
-                        tracing::warn!("pending disk save failed: {error}");
-                    }
-                }
-                if missing_after.is_some_and(|deadline| Instant::now() >= deadline) {
-                    if let Err(error) = s.retire_missing_documents() {
-                        tracing::warn!("document scan failed: {error}");
-                    }
-                    missing_after = None;
-                }
-                next_sweep = Instant::now() + Duration::from_millis(100);
-            }
-            let result = match rx.recv_timeout(next_sweep.saturating_duration_since(Instant::now()))
-            {
-                Ok(event) => event,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-            let Ok(event): notify::Result<notify::Event> = result else {
-                overflow.store(true, Ordering::Relaxed);
-                continue;
-            };
-            if matches!(
-                event.kind,
-                notify::EventKind::Remove(_)
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-            ) {
-                missing_after = Some(Instant::now() + settle);
-            }
-            if !matches!(
-                event.kind,
-                notify::EventKind::Access(notify::event::AccessKind::Close(
-                    notify::event::AccessMode::Write
-                )) | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
-            ) {
-                continue;
-            }
-            for p in event.paths {
-                if documents::format(&p.to_string_lossy()).is_some()
-                    && let Ok(rel) = p.strip_prefix(&s.root)
-                    && let Ok(d) = s.index_document(&rel.to_string_lossy())
-                {
-                    let room = s.rooms.lock().unwrap().get(&d.id).cloned();
-                    if let Some(room) = room {
-                        let mut r = room.lock().unwrap();
-                        // Close-write also fires when our writable descriptor
-                        // closes after a read/validation error. Compare the exact
-                        // metadata observed under our lease, without reopening
-                        // the note and accidentally cancelling retry backoff.
-                        if !r.save.observed_file(disk::Stamp::read(&p)) {
-                            r.save.desktop_changed();
-                        }
-                    }
-                }
-            }
-        }
-    });
-    Ok(watcher)
-}
 
 async fn versions(
     State(s): State<App>,
@@ -2508,11 +2416,7 @@ async fn guard(
         } else {
             ("api", 600)
         };
-        let headers = req.headers().clone();
-        let owner = match job(s.clone(), move |s| Ok(s.owner(&headers))).await {
-            Ok(owner) => owner,
-            Err(error) => return error.into_response(),
-        };
+        let owner = s.owner(req.headers());
         let mut rates = s.rates.lock().unwrap();
         let time = now();
         if rates.len() > 10_000 {
@@ -2581,6 +2485,7 @@ async fn response_headers(req: axum::extract::Request, next: axum::middleware::N
 }
 fn router(s: App) -> Router {
     Router::new()
+        .route("/api/recovery/removed", get(maintenance::removed))
         .route("/api/docs/{id}/recovery", get(maintenance::export))
         .route("/api/docs/{id}/rebuild", post(maintenance::rebuild))
         .route("/api/open/{token}", get(open_shared))
@@ -2645,7 +2550,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::var("LOCDOC_BIND").unwrap_or_else(|_| "127.0.0.1:3477".into());
     let s = Store::open(root.into(), data.into(), public)?;
     job(s.clone(), |s| s.recover_pending()).await?;
-    let _watcher = watch(s.clone())?;
+    let _watcher = projection::watch(s.clone())?;
     tracing::info!(
         "Locdoc listening at http://{bind}; owner key: {}/owner.key",
         s.data.display()

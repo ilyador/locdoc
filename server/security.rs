@@ -12,8 +12,7 @@ pub(super) struct Owner;
 impl FromRequestParts<App> for Owner {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, state: &App) -> Result<Self> {
-        let headers = parts.headers.clone();
-        if super::job(state.clone(), move |state| Ok(state.owner(&headers))).await? {
+        if state.owner(&parts.headers) {
             Ok(Self)
         } else {
             Err(denied())

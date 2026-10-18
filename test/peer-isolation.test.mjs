@@ -257,6 +257,33 @@ test("one address cannot occupy every guest slot and owners remain exempt", asyn
   }
 });
 
+test("rotating IPv6 privacy addresses cannot bypass one prefix's visitor cap", async () => {
+  const held = [];
+  try {
+    for (let n = 1; n <= 16; n++) {
+      const socket = raw({ headers: { "X-Forwarded-For": `2001:db8:abcd:1::${n.toString(16)}` } });
+      await once(socket, "open");
+      held.push(socket);
+    }
+    const rejected = raw({ headers: { "X-Forwarded-For": "2001:db8:abcd:1:ffff:ffff:ffff:ffff" } });
+    const status = await new Promise((resolve, reject) => {
+      rejected.once("unexpected-response", (_, response) => {
+        response.resume();
+        resolve(response.statusCode);
+        rejected.terminate();
+      });
+      rejected.once("open", () => reject(new Error("IPv6 prefix limit was bypassed")));
+      rejected.on("error", () => {});
+    });
+    assert.equal(status, 503);
+    const other = raw({ headers: { "X-Forwarded-For": "2001:db8:abcd:2::1" } });
+    await once(other, "open");
+    await close(other);
+  } finally {
+    await Promise.all(held.map(close));
+  }
+});
+
 test("a peer that never answers the ping challenge is disconnected", { timeout: 25_000 }, async () => {
   const healthy = await connected();
   let healthyDisconnects = 0;

@@ -1,12 +1,54 @@
 //! Connection-scoped admission, liveness and awareness ownership.
 use super::*;
-use std::{net::IpAddr, time::Duration};
+use std::{
+    net::{IpAddr, Ipv6Addr},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
 use yrs::{sync::AwarenessUpdate, updates::decoder::Decode};
 
 const VISITORS: usize = 64;
 const VISITORS_PER_ADDRESS: usize = 16;
 pub(super) const AWARENESS_CLIENT_LIMIT: usize = 256;
 pub(super) const PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// Settings mutations are rare; cursor broadcasts are not. Sockets retain the
+/// generation they actually checked, and still refresh live filesystem grants
+/// and session expiry on every heartbeat.
+#[derive(Default)]
+pub(super) struct PermissionEpoch(AtomicU64);
+impl PermissionEpoch {
+    pub(super) fn current(&self) -> u64 {
+        self.0.load(Ordering::Acquire)
+    }
+    pub(super) fn invalidate(&self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Default)]
+pub(super) struct PermissionCheck(Option<u64>);
+impl PermissionCheck {
+    pub(super) fn needs_check(&self, generation: u64, force: bool) -> bool {
+        force || self.0 != Some(generation)
+    }
+    pub(super) fn checked(&mut self, generation: u64) {
+        self.0 = Some(generation);
+    }
+}
+
+fn address_group(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V6(address) => {
+            // Privacy addresses from one host normally vary within its /64.
+            // Apply one budget to the prefix, preserving separate IPv4 hosts.
+            let mut bytes = address.octets();
+            bytes[8..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(bytes))
+        }
+        address => address,
+    }
+}
 
 /// Forwarded addresses are trusted only on the local reverse-proxy hop. Use the
 /// final value Caddy appends, rather than an address supplied by the browser.
@@ -18,9 +60,9 @@ pub(super) fn address(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
             .and_then(|value| value.rsplit(',').next())
             .and_then(|value| value.trim().parse::<IpAddr>().ok())
     {
-        return forwarded.to_canonical();
+        return address_group(forwarded);
     }
-    peer.to_canonical()
+    address_group(peer)
 }
 
 #[derive(Default)]
@@ -218,6 +260,197 @@ mod tests {
         assert_eq!(
             address(&HeaderMap::new(), "::ffff:192.0.2.5".parse().unwrap()).to_string(),
             "192.0.2.5"
+        );
+    }
+
+    #[test]
+    fn ipv6_privacy_addresses_share_one_budget_without_combining_ipv4_hosts() {
+        let visitors = Arc::new(Visitors::default());
+        let mut headers = HeaderMap::new();
+        let mut leases = Vec::new();
+        for n in 1..=VISITORS_PER_ADDRESS {
+            headers.insert(
+                "x-forwarded-for",
+                format!("2001:db8:1234:5678::{n:x}").parse().unwrap(),
+            );
+            let group = address(&headers, "127.0.0.1".parse().unwrap());
+            assert_eq!(group.to_string(), "2001:db8:1234:5678::");
+            leases.push(visitors.enter(group).unwrap());
+        }
+        headers.insert(
+            "x-forwarded-for",
+            "2001:db8:1234:5678::ffff".parse().unwrap(),
+        );
+        assert!(
+            visitors
+                .enter(address(&headers, "127.0.0.1".parse().unwrap()))
+                .is_err()
+        );
+        assert!(
+            visitors
+                .enter(address(
+                    &HeaderMap::new(),
+                    "2001:db8:1234:5679::1".parse().unwrap()
+                ))
+                .is_ok()
+        );
+        assert_eq!(
+            address(&HeaderMap::new(), "::ffff:192.0.2.5".parse().unwrap()),
+            "192.0.2.5".parse::<IpAddr>().unwrap()
+        );
+        assert_ne!(
+            address(&HeaderMap::new(), "192.0.2.5".parse().unwrap()),
+            address(&HeaderMap::new(), "192.0.2.6".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_socket_permissions_do_not_queue_storage_and_revocation_rechecks() {
+        let directory = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost".into(),
+        )
+        .unwrap();
+        fs::write(s.root.join("shared.md"), "Shared text\n").unwrap();
+        let doc = s.index_document("shared.md").unwrap();
+        let _ = share(
+            State(s.clone()),
+            AxPath(doc.id.clone()),
+            security::Owner,
+            Json(Share {
+                permission: "view".into(),
+                rotate: false,
+            }),
+        )
+        .await
+        .unwrap();
+        let access = Access {
+            token: s.doc(&doc.id).unwrap().token,
+            ..Access::default()
+        };
+        let headers = HeaderMap::new();
+        let mut checked = PermissionCheck::default();
+        socket_access(&s, &doc.id, &headers, &access, &mut checked, false)
+            .await
+            .unwrap();
+        let permits = s.work.clone().acquire_many_owned(4).await.unwrap();
+        let relays = tokio::time::timeout(Duration::from_millis(100), async {
+            for _ in 0..1024 {
+                socket_access(&s, &doc.id, &headers, &access, &mut checked, false).await?;
+            }
+            Ok::<(), ApiError>(())
+        })
+        .await;
+        assert!(
+            matches!(relays, Ok(Ok(()))),
+            "steady broadcasts must bypass occupied storage workers"
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                socket_access(&s, &doc.id, &headers, &access, &mut checked, true),
+            )
+            .await
+            .is_err(),
+            "heartbeats must force a fresh permission check"
+        );
+        drop(permits);
+        let _ = share(
+            State(s.clone()),
+            AxPath(doc.id.clone()),
+            security::Owner,
+            Json(Share {
+                permission: "private".into(),
+                rotate: false,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            socket_access(&s, &doc.id, &headers, &access, &mut checked, false)
+                .await
+                .is_err(),
+            "revocation must invalidate a socket's successful cached check"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_rechecks_unversioned_folder_identity_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost".into(),
+        )
+        .unwrap();
+        fs::create_dir(s.root.join("Shared")).unwrap();
+        fs::write(s.root.join("Shared/note.md"), "Shared text\n").unwrap();
+        let doc = s.index_document("Shared/note.md").unwrap();
+        let value = folders::share(
+            State(s.clone()),
+            security::Owner,
+            Json(serde_json::from_value(json!({"path":"Shared","permission":"view"})).unwrap()),
+        )
+        .await
+        .unwrap();
+        let token = value.0["shareUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let access = Access {
+            token: Some(token.into()),
+            ..Access::default()
+        };
+        let headers = HeaderMap::new();
+        let mut checked = PermissionCheck::default();
+        socket_access(&s, &doc.id, &headers, &access, &mut checked, false)
+            .await
+            .unwrap();
+        // No watcher runs in this fixture: the heartbeat must also cover a
+        // dropped namespace notice, rather than trusting the epoch forever.
+        fs::rename(s.root.join("Shared"), s.root.join("Moved")).unwrap();
+        fs::create_dir(s.root.join("Shared")).unwrap();
+        fs::rename(s.root.join("Moved/note.md"), s.root.join("Shared/note.md")).unwrap();
+        assert!(
+            socket_access(&s, &doc.id, &headers, &access, &mut checked, true)
+                .await
+                .is_err(),
+            "heartbeat must reject a replaced folder even without an epoch bump"
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_a_cached_private_document_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let s = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost".into(),
+        )
+        .unwrap();
+        fs::write(s.root.join("private.md"), "Private text\n").unwrap();
+        let doc = s.index_document("private.md").unwrap();
+        let session = browser_auth::issue(&s, "origin").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {session}").parse().unwrap(),
+        );
+        let access = Access::default();
+        let mut checked = PermissionCheck::default();
+        socket_access(&s, &doc.id, &headers, &access, &mut checked, false)
+            .await
+            .unwrap();
+        let _ = logout(State(s.clone()), headers.clone()).await.unwrap();
+        assert!(
+            socket_access(&s, &doc.id, &headers, &access, &mut checked, false)
+                .await
+                .is_err(),
+            "logout must stop passive private-document access without waiting for heartbeat"
         );
     }
 

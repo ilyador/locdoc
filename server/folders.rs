@@ -29,9 +29,10 @@ impl Grant {
         directory_identity(s, &self.path).is_ok_and(|value| value == self.identity)
     }
     pub fn value(&self, s: &Store) -> Value {
-        json!({"name":Path::new(&self.path).file_name().unwrap().to_string_lossy(),
-            "permission":self.permission,
-            "shareUrl":if self.permission == "private" {None} else {Some(format!("{}/s/{}",s.public_url,self.token))}})
+        let name = Path::new(&self.path).file_name().unwrap().to_string_lossy();
+        let share_url =
+            (self.permission != "private").then(|| format!("{}/s/{}", s.public_url, self.token));
+        json!({"name": name, "permission": self.permission, "shareUrl": share_url})
     }
 }
 
@@ -66,8 +67,13 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Grant> {
     })
 }
 pub(super) fn grant(s: &Store, token: &str) -> Result<Grant> {
-    let value = s.db.lock().unwrap().query_row(
-        "SELECT path,identity,permission,token FROM folder_shares WHERE token=? AND permission!='private'",[token],row).optional()?;
+    const GRANT: &str = "SELECT path,identity,permission,token FROM folder_shares
+        WHERE token=? AND permission!='private'";
+    let value =
+        s.db.lock()
+            .unwrap()
+            .query_row(GRANT, [token], row)
+            .optional()?;
     let value = value.ok_or_else(unavailable)?;
     if !value.valid(s) {
         return Err(unavailable());
@@ -177,47 +183,60 @@ pub(super) async fn share(
     Json(b): Json<Change>,
 ) -> Result<Json<Value>> {
     job(s, move |s| {
-    if !["private", "view", "edit"].contains(&b.permission.as_str()) {
-        return Err(bad("Choose private, view, or edit."));
-    }
-    let path = documents::relative_path(&b.path, false)?;
-    let identity = directory_identity(s, &path)?;
-    let previous =
-        s.db.lock()
-            .unwrap()
-            .query_row(
-                "SELECT path,identity,permission,token FROM folder_shares WHERE path=?",
-                [&path],
-                row,
-            )
-            .optional()?;
-    let token = previous
-        .filter(|value| {
-            !b.rotate
-                && b.permission != "private"
-                && value.permission != "private"
-                && value.identity == identity
-        })
-        .map(|value| value.token)
-        .unwrap_or_else(token);
-    let value = Grant {
-        path,
-        identity,
-        permission: b.permission,
-        token,
-    };
-    s.db.lock().unwrap().execute("INSERT INTO folder_shares(path,identity,permission,token) VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET identity=excluded.identity,permission=excluded.permission,token=excluded.token",params![value.path,value.identity,value.permission,value.token])?;
-    // Reconnect descendants immediately. Access also rechecks the live folder
-    // capability on every HTTP action, WS frame, and periodic WS heartbeat.
-    let rooms: Vec<_> = s.rooms.lock().unwrap().iter()
-        .map(|(id, room)| (id.clone(), room.clone())).collect();
-    for (id, room) in rooms {
-        if s.doc(&id).is_ok_and(|doc| value.contains(&doc.path)) {
-            // A busy room rechecks capabilities before broadcasting again.
-            // Never hold the global room map or a worker waiting to notify it.
-            if let Ok(room) = room.try_lock() { let _ = room.tx.send(vec![126]); }
+        if !["private", "view", "edit"].contains(&b.permission.as_str()) {
+            return Err(bad("Choose private, view, or edit."));
         }
-    }
-    Ok(Json(value.value(s)))
-    }).await
+        let path = documents::relative_path(&b.path, false)?;
+        let identity = directory_identity(s, &path)?;
+        let previous =
+            s.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT path,identity,permission,token FROM folder_shares WHERE path=?",
+                    [&path],
+                    row,
+                )
+                .optional()?;
+        let token = previous
+            .filter(|value| {
+                !b.rotate
+                    && b.permission != "private"
+                    && value.permission != "private"
+                    && value.identity == identity
+            })
+            .map(|value| value.token)
+            .unwrap_or_else(token);
+        let value = Grant {
+            path,
+            identity,
+            permission: b.permission,
+            token,
+        };
+        const UPSERT: &str = "INSERT INTO folder_shares(path,identity,permission,token)
+            VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET
+            identity=excluded.identity,permission=excluded.permission,token=excluded.token";
+        s.db.lock().unwrap().execute(
+            UPSERT,
+            params![value.path, value.identity, value.permission, value.token],
+        )?;
+        s.permissions.invalidate();
+        // Reconnect descendants immediately. Cached passive checks also see
+        // this mutation even if a busy room cannot be notified immediately.
+        let rooms: Vec<_> = s
+            .rooms
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, room)| (id.clone(), room.clone()))
+            .collect();
+        for (id, room) in rooms {
+            if s.doc(&id).is_ok_and(|doc| value.contains(&doc.path))
+                && let Ok(room) = room.try_lock()
+            {
+                let _ = room.tx.send(vec![126]);
+            }
+        }
+        Ok(Json(value.value(s)))
+    })
+    .await
 }

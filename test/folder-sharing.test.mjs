@@ -17,7 +17,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
-import { DatabaseSync } from "node:sqlite";
 
 const base = "http://127.0.0.1:3514",
   key = "folder-sharing-fixture-owner";
@@ -474,7 +473,7 @@ test("internal previews authorize folder destinations and preserve the folder li
   assert.equal(sharedPreview.id, target.id);
 });
 
-test("passive sockets stop receiving edits immediately when directory identity invalidates their capability", async () => {
+test("namespace changes close passive folder sockets before later edits are relayed", async () => {
   const d = await doc("Passive/page.md");
   const folder = await share("Passive", "view");
   const direct = await request(`/api/docs/${d.id}/share`, {
@@ -487,15 +486,16 @@ test("passive sockets stop receiving edits immediately when directory identity i
   const viewer = connect(snapshot, folder.token),
     writer = connect(snapshot, direct.shareUrl.split("/").pop());
   await until(() => viewer.provider.synced && writer.provider.synced);
-  // Model a replaced directory's invalid identity without racing the filesystem
-  // watcher. The document and independent editor capability remain valid.
-  const db = new DatabaseSync(join(dir, "state/locdoc.sqlite"));
-  db.exec("PRAGMA busy_timeout=2000");
-  db.prepare("UPDATE folder_shares SET identity=? WHERE path=?").run(
-    "replaced-directory",
-    "Passive",
-  );
-  db.close();
+  // Exercise a real namespace replacement: the document and independent editor
+  // capability remain valid, while the original directory grant does not.
+  await rename(join(dir, "docs/Passive"), join(dir, "docs/Passive-old"));
+  await mkdir(join(dir, "docs/Passive"));
+  await rename(join(dir, "docs/Passive-old/page.md"), join(dir, "docs/Passive/page.md"));
+  let probes = 0;
+  await until(() => {
+    writer.provider.awareness.setLocalStateField("user", { name: `Probe ${++probes}` });
+    return !viewer.provider.wsconnected;
+  });
   writer.text.insert(writer.text.length, "PRIVATE AFTER REPLACEMENT");
   await until(async () =>
     (await readFile(join(dir, "docs/Passive/page.md"), "utf8")).includes(

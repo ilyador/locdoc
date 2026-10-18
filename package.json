@@ -18,7 +18,7 @@
     "fonts:update": "node scripts/update-font-catalog.mjs",
     "icons:build": "node scripts/build-icons.mjs",
     "social:build": "node scripts/build-social.mjs",
-    "verify": "npm run check && npm test && vite build --outDir .locdoc/verified-web",
+    "verify": "npm run check && vite build --outDir .locdoc/verified-web && npm test",
     "install:service": "node scripts/install-service.mjs"
   },
   "dependencies": {

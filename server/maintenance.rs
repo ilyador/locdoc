@@ -25,6 +25,14 @@ pub(super) struct RecoveryComment {
 }
 
 #[derive(Serialize)]
+pub(super) struct RecoveryVersion {
+    id: String,
+    created: i64,
+    kind: String,
+    content: String,
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RecoveryBundle {
     format: &'static str,
@@ -45,6 +53,37 @@ pub(super) struct RecoveryBundle {
     filesystem_source: Option<String>,
     filesystem_error: Option<String>,
     live_state: Option<String>,
+    versions: Vec<RecoveryVersion>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RemovedDocument {
+    id: String,
+    path: String,
+    removed: Option<i64>,
+}
+
+pub(super) async fn removed(
+    State(store): State<App>,
+    _owner: security::Owner,
+) -> Result<Json<Vec<RemovedDocument>>> {
+    const REMOVED: &str = "SELECT id,COALESCE(retired_path,id),retired_at
+        FROM docs WHERE active=0 ORDER BY retired_at DESC,id";
+    let records = job(store, |store| {
+        let db = store.db.lock().unwrap();
+        let mut statement = db.prepare(REMOVED)?;
+        let records = statement.query_map([], |row| {
+            Ok(RemovedDocument {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                removed: row.get(2)?,
+            })
+        })?;
+        Ok(records.collect::<std::result::Result<Vec<_>, _>>()?)
+    })
+    .await?;
+    Ok(Json(records))
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -85,18 +124,43 @@ struct RecoveryState {
     before: Option<Vec<u8>>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct ExportOptions {
+    history: Option<bool>,
+}
+
 fn capture(
     store: &Store,
     document: &Document,
     filesystem: std::result::Result<Vec<u8>, String>,
     live: Option<&Room>,
+    history: bool,
 ) -> Result<RecoveryBundle> {
+    const STORED: &str = "SELECT state,disk_state,write_intent,line_ending,
+        collaboration_epoch,write_target,write_before_hash,write_before
+        FROM docs WHERE id=?";
     let db = store.db.lock().unwrap();
-    let RecoveryState { state, disk_state, intent, ending, epoch, target, before_hash, before } = db.query_row(
-        "SELECT state,disk_state,write_intent,line_ending,collaboration_epoch,write_target,write_before_hash,write_before FROM docs WHERE id=? AND active=1",
-        [&document.id],
-        |row| Ok(RecoveryState { state: row.get(0)?, disk_state: row.get(1)?, intent: row.get(2)?, ending: row.get(3)?, epoch: row.get(4)?, target: row.get(5)?, before_hash: row.get(6)?, before: row.get(7)? }),
-    )?;
+    let RecoveryState {
+        state,
+        disk_state,
+        intent,
+        ending,
+        epoch,
+        target,
+        before_hash,
+        before,
+    } = db.query_row(STORED, [&document.id], |row| {
+        Ok(RecoveryState {
+            state: row.get(0)?,
+            disk_state: row.get(1)?,
+            intent: row.get(2)?,
+            ending: row.get(3)?,
+            epoch: row.get(4)?,
+            target: row.get(5)?,
+            before_hash: row.get(6)?,
+            before: row.get(7)?,
+        })
+    })?;
     let updates = db
         .prepare("SELECT seq,content FROM doc_updates WHERE doc=? ORDER BY seq")?
         .query_map([&document.id], |row| {
@@ -116,6 +180,20 @@ fn capture(
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let versions = if history {
+        db.prepare("SELECT id,created,kind,content FROM revisions WHERE doc=? ORDER BY rowid DESC")?
+            .query_map([&document.id], |row| {
+                Ok(RecoveryVersion {
+                    id: row.get(0)?,
+                    created: row.get(1)?,
+                    kind: row.get(2)?,
+                    content: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let (filesystem_bytes, filesystem_source, filesystem_error) = match filesystem {
         Ok(bytes) => {
             let source = String::from_utf8(bytes.clone()).ok();
@@ -152,6 +230,7 @@ fn capture(
                     .encode_state_as_update_v1(&StateVector::default()),
             )
         }),
+        versions,
     })
 }
 
@@ -193,16 +272,49 @@ pub(super) async fn export(
     State(store): State<App>,
     AxPath(id): AxPath<String>,
     _owner: security::Owner,
+    Query(options): Query<ExportOptions>,
 ) -> Result<Json<RecoveryBundle>> {
     Ok(Json(
         doc_job(store, id.clone(), move |store| {
-            let document = store.doc(&id)?;
+            // Retired identities remain private recovery records. Never open
+            // their former path: it may now belong to an unrelated document.
+            let (document, active) = store
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE(retired_path,path),active FROM docs WHERE id=?",
+                    [&id],
+                    |row| {
+                        Ok((
+                            Document {
+                                id: id.clone(),
+                                path: row.get(0)?,
+                                permission: "private".into(),
+                                token: None,
+                            },
+                            row.get::<_, bool>(1)?,
+                        ))
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Document not found.".into()))?;
             let room = store.rooms.lock().unwrap().get(&id).cloned();
             let live = room.as_ref().map(|room| room.lock().unwrap());
-            let filesystem = read_file(store, &document)
-                .map(|(_, _, source)| source)
-                .map_err(|error| error.1);
-            capture(store, &document, filesystem, live.as_deref())
+            let filesystem = if active {
+                read_file(store, &document)
+                    .map(|(_, _, source)| source)
+                    .map_err(|error| error.1)
+            } else {
+                Err("This document was removed. Its former path is not read or restored.".into())
+            };
+            capture(
+                store,
+                &document,
+                filesystem,
+                live.as_deref(),
+                options.history.unwrap_or(true),
+            )
         })
         .await?,
     ))
@@ -257,7 +369,7 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
     } else {
         text::canonical(&raw)
     };
-    let bundle = capture(store, &document, Ok(bytes), live.as_deref())?;
+    let bundle = capture(store, &document, Ok(bytes), live.as_deref(), true)?;
     let saved_archive = archive(store, &bundle)?;
     if !file.intact() || !file.is_current(&path) {
         return Err(conflict(
