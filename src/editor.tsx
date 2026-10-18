@@ -25,6 +25,7 @@ import {
 import { markdownLink, resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
 import { rememberEditorScroll } from "./editor-scroll";
+import { previewRanges, type PreviewRange } from "./preview-ranges";
 import { fountainPreview, fountainInlineParser } from "./fountain-preview";
 import { parseFountain, type FountainForce } from "./fountain";
 import type { Entry } from "./model";
@@ -394,22 +395,17 @@ const writingHighlight = HighlightStyle.define([
 class TableWidget extends WidgetType {
   constructor(
     readonly source: string,
-    readonly from: number,
     readonly editable: boolean,
   ) {
     super();
   }
   eq(other: TableWidget) {
-    return (
-      this.source === other.source &&
-      this.from === other.from &&
-      this.editable === other.editable
-    );
+    return this.source === other.source && this.editable === other.editable;
   }
   toDOM(view: EditorView) {
     const wrap = document.createElement("div");
     wrap.className = "md-table-preview";
-    const data = parseMarkdownTable(this.source, this.from);
+    const data = parseMarkdownTable(this.source, 0);
     if (!data) return wrap;
     const table = document.createElement("table");
     table.setAttribute("aria-label", "Document table");
@@ -431,7 +427,7 @@ class TableWidget extends WidgetType {
           );
           edit.onclick = () => {
             view.dispatch({
-              selection: { anchor: cell.from },
+              selection: { anchor: view.posAtDOM(wrap) + cell.from },
               scrollIntoView: true,
             });
             view.focus();
@@ -457,14 +453,11 @@ class MediaWidget extends WidgetType {
   constructor(
     readonly src: string,
     readonly alt: string,
-    readonly pos: number,
   ) {
     super();
   }
   eq(other: MediaWidget) {
-    return (
-      other.src === this.src && other.pos === this.pos && other.alt === this.alt
-    );
+    return other.src === this.src && other.alt === this.alt;
   }
   toDOM(view: EditorView) {
     const wrap = document.createElement("figure");
@@ -484,7 +477,7 @@ class MediaWidget extends WidgetType {
     edit.className = "embed-edit";
     edit.type = "button";
     edit.onclick = () => {
-      view.dispatch({ selection: { anchor: this.pos } });
+      view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
       view.focus();
     };
     wrap.appendChild(edit);
@@ -497,7 +490,6 @@ class MediaWidget extends WidgetType {
 
 class TaskWidget extends WidgetType {
   constructor(
-    readonly from: number,
     readonly checked: boolean,
     readonly editable: boolean,
     readonly label: string,
@@ -506,7 +498,6 @@ class TaskWidget extends WidgetType {
   }
   eq(other: TaskWidget) {
     return (
-      this.from === other.from &&
       this.checked === other.checked &&
       this.editable === other.editable &&
       this.label === other.label
@@ -520,15 +511,16 @@ class TaskWidget extends WidgetType {
     input.disabled = !this.editable;
     input.setAttribute("aria-label", this.label || "Task");
     input.onchange = () => {
+      const from = view.posAtDOM(target);
       if (
         view.state.readOnly ||
-        !/^\[[ xX]\]$/.test(view.state.sliceDoc(this.from, this.from + 3))
+        !/^\[[ xX]\]$/.test(view.state.sliceDoc(from, from + 3))
       )
         return;
       view.dispatch({
         changes: {
-          from: this.from + 1,
-          to: this.from + 2,
+          from: from + 1,
+          to: from + 2,
           insert: input.checked ? "x" : " ",
         },
       });
@@ -543,13 +535,13 @@ class TaskWidget extends WidgetType {
   }
 }
 
-function livePreview(
+export function livePreview(
   id: string,
   token?: string,
   path = "",
   entries: Entry[] = [],
 ) {
-  function build(state: EditorState) {
+  function build(state: EditorState, ranges: PreviewRange[]) {
     const decorations: ReturnType<Decoration["range"]>[] = [];
     const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
     const active = (state.readOnly ? [] : state.selection.ranges).map((r) => ({
@@ -562,196 +554,201 @@ function livePreview(
     const tableLines = new Set<number>();
     const blockEnds = new Set<number>();
     const listPrefixes = new Map<number, { content: number; indent: string }>();
-    syntaxTree(state).iterate({
-      enter(n) {
-        const { name, from, to } = n;
-        if (name === "LocdocComment") return false;
-        if (name === "Table" && inactive(from, to)) {
-          const source = state.sliceDoc(from, to);
-          if (parseMarkdownTable(source, from)) {
-            for (
-              let line = state.doc.lineAt(from).number;
-              line <= state.doc.lineAt(to).number;
-              line++
-            )
-              tableLines.add(line);
+    for (const range of ranges)
+      syntaxTree(state).iterate({
+        from: range.from,
+        to: range.to,
+        enter(n) {
+          const { name, from, to } = n;
+          if (name === "LocdocComment") return false;
+          if (name === "Table" && inactive(from, to)) {
+            const source = state.sliceDoc(from, to);
+            if (parseMarkdownTable(source, from)) {
+              for (
+                let line = state.doc.lineAt(from).number;
+                line <= state.doc.lineAt(to).number;
+                line++
+              )
+                tableLines.add(line);
+              decorations.push(
+                Decoration.replace({
+                  widget: new TableWidget(source, !state.readOnly),
+                  block: true,
+                }).range(from, to),
+              );
+              return false;
+            }
+          }
+          if (/^(FencedCode|CodeBlock)$/.test(name)) {
+            for (let pos = from; pos <= to;) {
+              const line = state.doc.lineAt(pos);
+              codeLines.add(line.number);
+              decorations.push(
+                Decoration.line({ class: "md-code-line" }).range(line.from),
+              );
+              if (line.to >= to) break;
+              pos = line.to + 1;
+            }
+          }
+          if (name === "ListItem" || name === "Task")
+            blockEnds.add(state.doc.lineAt(Math.max(from, to - 1)).from);
+          if (name === "Paragraph") {
+            let list = n.node.parent;
+            while (list && list.name !== "ListItem") list = list.parent;
+            // Enter creates a visible text block even without a blank Markdown
+            // line. Keep list continuations together and natural wrapping intact.
+            for (let pos = list ? Math.max(from, to - 1) : from; pos < to;) {
+              const line = state.doc.lineAt(pos);
+              if (
+                visibleTextRanges(state, line.from, line.to).some((range) =>
+                  state.sliceDoc(range.from, range.to).trim(),
+                )
+              )
+                blockEnds.add(line.from);
+              pos = line.to + 1;
+            }
+          }
+          const heading = name.match(/^ATXHeading(\d)$/);
+          if (heading)
+            decorations.push(
+              Decoration.line({ class: `md-h${heading[1]}` }).range(
+                state.doc.lineAt(from).from,
+              ),
+            );
+          if (name === "StrongEmphasis")
+            decorations.push(
+              Decoration.mark({ class: "md-strong" }).range(from, to),
+            );
+          if (name === "Emphasis")
+            decorations.push(
+              Decoration.mark({ class: "md-em" }).range(from, to),
+            );
+          if (name === "InlineCode")
+            decorations.push(
+              Decoration.mark({ class: "md-inline-code" }).range(from, to),
+            );
+          if (name === "Strikethrough")
+            decorations.push(
+              Decoration.mark({ class: "md-strike" }).range(from, to),
+            );
+          if (name === "Blockquote") {
+            const line = state.doc.lineAt(from);
+            decorations.push(
+              Decoration.line({ class: "md-quote" }).range(line.from),
+            );
+          }
+          if (name === "ListItem") {
+            const mark = n.node.getChild("ListMark");
+            if (mark) {
+              const line = state.doc.lineAt(from);
+              const task = n.node.getChild("Task")?.getChild("TaskMarker");
+              const end = task?.to ?? mark.to;
+              const spaces =
+                state.sliceDoc(end, line.to).match(/^[\t ]*/)?.[0] ?? "";
+              const content = end + spaces.length;
+              const indent = task
+                ? `calc(${countColumn(state.sliceDoc(line.from, mark.from) + spaces, state.tabSize)}ch + 28px)`
+                : `${countColumn(state.sliceDoc(line.from, content), state.tabSize)}ch`;
+              listPrefixes.set(line.from, { content, indent });
+            }
+          }
+          if (
+            [
+              "HeaderMark",
+              "EmphasisMark",
+              "CodeMark",
+              "StrikethroughMark",
+              "QuoteMark",
+            ].includes(name) &&
+            inactive(from, to) &&
+            !codeLines.has(state.doc.lineAt(from).number)
+          ) {
+            const end =
+              name === "HeaderMark" && state.sliceDoc(to, to + 1) === " "
+                ? to + 1
+                : to;
+            decorations.push(Decoration.replace({}).range(from, end));
+          }
+          if (name === "TaskMarker") {
+            const line = state.doc.lineAt(from);
+            const marker = n.node.parent?.parent?.getChild("ListMark");
+            const checked =
+              state.sliceDoc(from + 1, from + 2).toLowerCase() === "x";
+            decorations.push(
+              Decoration.line({
+                class: checked ? "md-task done" : "md-task",
+              }).range(line.from),
+            );
+            if (marker)
+              decorations.push(Decoration.replace({}).range(marker.from, from));
             decorations.push(
               Decoration.replace({
-                widget: new TableWidget(source, from, !state.readOnly),
-                block: true,
+                widget: new TaskWidget(
+                  checked,
+                  !state.readOnly,
+                  state.sliceDoc(to, line.to).trim(),
+                ),
               }).range(from, to),
             );
-            return false;
           }
-        }
-        if (/^(FencedCode|CodeBlock)$/.test(name)) {
-          for (let pos = from; pos <= to;) {
-            const line = state.doc.lineAt(pos);
-            codeLines.add(line.number);
-            decorations.push(
-              Decoration.line({ class: "md-code-line" }).range(line.from),
-            );
-            if (line.to >= to) break;
-            pos = line.to + 1;
-          }
-        }
-        if (name === "ListItem" || name === "Task")
-          blockEnds.add(state.doc.lineAt(Math.max(from, to - 1)).from);
-        if (name === "Paragraph") {
-          let list = n.node.parent;
-          while (list && list.name !== "ListItem") list = list.parent;
-          // Enter creates a visible text block even without a blank Markdown
-          // line. Keep list continuations together and natural wrapping intact.
-          for (let pos = list ? Math.max(from, to - 1) : from; pos < to;) {
-            const line = state.doc.lineAt(pos);
+          if (name === "Link" || name === "Autolink" || name === "URL") {
             if (
-              visibleTextRanges(state, line.from, line.to).some((range) =>
-                state.sliceDoc(range.from, range.to).trim(),
+              name === "URL" &&
+              /^(Link|Autolink|Image)$/.test(n.node.parent?.name || "")
+            )
+              return;
+            const destination =
+              name === "URL" ? n.node : n.node.getChild("URL");
+            if (!destination) {
+              // Markdown parses the inner [text] of [[text]] as a shortcut
+              // link. Keep this literal bracketed prose in one consistent ink.
+              if (
+                name === "Link" &&
+                state.sliceDoc(Math.max(0, from - 1), from) === "[" &&
+                state.sliceDoc(to, to + 1) === "]"
               )
-            )
-              blockEnds.add(line.from);
-            pos = line.to + 1;
-          }
-        }
-        const heading = name.match(/^ATXHeading(\d)$/);
-        if (heading)
-          decorations.push(
-            Decoration.line({ class: `md-h${heading[1]}` }).range(
-              state.doc.lineAt(from).from,
-            ),
-          );
-        if (name === "StrongEmphasis")
-          decorations.push(
-            Decoration.mark({ class: "md-strong" }).range(from, to),
-          );
-        if (name === "Emphasis")
-          decorations.push(Decoration.mark({ class: "md-em" }).range(from, to));
-        if (name === "InlineCode")
-          decorations.push(
-            Decoration.mark({ class: "md-inline-code" }).range(from, to),
-          );
-        if (name === "Strikethrough")
-          decorations.push(
-            Decoration.mark({ class: "md-strike" }).range(from, to),
-          );
-        if (name === "Blockquote") {
-          const line = state.doc.lineAt(from);
-          decorations.push(
-            Decoration.line({ class: "md-quote" }).range(line.from),
-          );
-        }
-        if (name === "ListItem") {
-          const mark = n.node.getChild("ListMark");
-          if (mark) {
-            const line = state.doc.lineAt(from);
-            const task = n.node.getChild("Task")?.getChild("TaskMarker");
-            const end = task?.to ?? mark.to;
-            const spaces =
-              state.sliceDoc(end, line.to).match(/^[\t ]*/)?.[0] ?? "";
-            const content = end + spaces.length;
-            const indent = task
-              ? `calc(${countColumn(state.sliceDoc(line.from, mark.from) + spaces, state.tabSize)}ch + 28px)`
-              : `${countColumn(state.sliceDoc(line.from, content), state.tabSize)}ch`;
-            listPrefixes.set(line.from, { content, indent });
-          }
-        }
-        if (
-          [
-            "HeaderMark",
-            "EmphasisMark",
-            "CodeMark",
-            "StrikethroughMark",
-            "QuoteMark",
-          ].includes(name) &&
-          inactive(from, to) &&
-          !codeLines.has(state.doc.lineAt(from).number)
-        ) {
-          const end =
-            name === "HeaderMark" && state.sliceDoc(to, to + 1) === " "
-              ? to + 1
-              : to;
-          decorations.push(Decoration.replace({}).range(from, end));
-        }
-        if (name === "TaskMarker") {
-          const line = state.doc.lineAt(from);
-          const marker = n.node.parent?.parent?.getChild("ListMark");
-          const checked =
-            state.sliceDoc(from + 1, from + 2).toLowerCase() === "x";
-          decorations.push(
-            Decoration.line({
-              class: checked ? "md-task done" : "md-task",
-            }).range(line.from),
-          );
-          if (marker)
-            decorations.push(Decoration.replace({}).range(marker.from, from));
-          decorations.push(
-            Decoration.replace({
-              widget: new TaskWidget(
-                from,
-                checked,
-                !state.readOnly,
-                state.sliceDoc(to, line.to).trim(),
-              ),
-            }).range(from, to),
-          );
-        }
-        if (name === "Link" || name === "Autolink" || name === "URL") {
-          if (
-            name === "URL" &&
-            /^(Link|Autolink|Image)$/.test(n.node.parent?.name || "")
-          )
-            return;
-          const destination = name === "URL" ? n.node : n.node.getChild("URL");
-          if (!destination) {
-            // Markdown parses the inner [text] of [[text]] as a shortcut
-            // link. Keep this literal bracketed prose in one consistent ink.
-            if (
-              name === "Link" &&
-              state.sliceDoc(Math.max(0, from - 1), from) === "[" &&
-              state.sliceDoc(to, to + 1) === "]"
-            )
+                decorations.push(
+                  Decoration.mark({ class: "md-literal-brackets" }).range(
+                    from - 1,
+                    to + 1,
+                  ),
+                );
+              return;
+            }
+            const raw = state
+              .sliceDoc(destination.from, destination.to)
+              .replace(/^<|>$/g, "");
+            const href = resolveDocumentLink(raw, path, entries);
+            if (!href) return;
+            const mark = n.node.getChild("LinkMark");
+            const labelFrom =
+              name === "Link" ? mark?.to || from : destination.from;
+            const labelTo =
+              name === "Link"
+                ? n.node.getChildren("LinkMark")[1]?.from || destination.from
+                : destination.to;
+            if (labelTo > labelFrom)
               decorations.push(
-                Decoration.mark({ class: "md-literal-brackets" }).range(
-                  from - 1,
-                  to + 1,
-                ),
+                Decoration.mark({
+                  tagName: "a",
+                  class: "md-link",
+                  attributes: {
+                    href,
+                    "data-link-url": href,
+                    "data-link-label": state.sliceDoc(labelFrom, labelTo),
+                  },
+                }).range(labelFrom, labelTo),
               );
-            return;
+            if (inactive(from, to) && name !== "URL") {
+              if (from < labelFrom)
+                decorations.push(Decoration.replace({}).range(from, labelFrom));
+              if (labelTo < to)
+                decorations.push(Decoration.replace({}).range(labelTo, to));
+            }
+            if (name !== "URL") return false;
           }
-          const raw = state
-            .sliceDoc(destination.from, destination.to)
-            .replace(/^<|>$/g, "");
-          const href = resolveDocumentLink(raw, path, entries);
-          if (!href) return;
-          const mark = n.node.getChild("LinkMark");
-          const labelFrom =
-            name === "Link" ? mark?.to || from : destination.from;
-          const labelTo =
-            name === "Link"
-              ? n.node.getChildren("LinkMark")[1]?.from || destination.from
-              : destination.to;
-          if (labelTo > labelFrom)
-            decorations.push(
-              Decoration.mark({
-                tagName: "a",
-                class: "md-link",
-                attributes: {
-                  href,
-                  "data-link-url": href,
-                  "data-link-label": state.sliceDoc(labelFrom, labelTo),
-                },
-              }).range(labelFrom, labelTo),
-            );
-          if (inactive(from, to) && name !== "URL") {
-            if (from < labelFrom)
-              decorations.push(Decoration.replace({}).range(from, labelFrom));
-            if (labelTo < to)
-              decorations.push(Decoration.replace({}).range(labelTo, to));
-          }
-          if (name !== "URL") return false;
-        }
-      },
-    });
+        },
+      });
     for (const from of blockEnds)
       decorations.push(Decoration.line({ class: "md-block-end" }).range(from));
     for (const [from, { content, indent }] of listPrefixes) {
@@ -767,46 +764,79 @@ function livePreview(
         Decoration.mark({ class: "md-list-prefix" }).range(from, content),
       );
     }
-    for (let i = 1; i <= state.doc.lines; i++) {
-      const line = state.doc.line(i);
-      if (codeLines.has(i) || tableLines.has(i)) continue;
-      const m = line.text.match(
-        /^!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))\)\s*$/,
-      );
-      if (m && inactive(line.from, line.to)) {
-        const path = m[2] || m[3];
-        if (!/^(?:https?:|data:|\/)/.test(path))
+    for (const range of ranges)
+      for (
+        let i = state.doc.lineAt(range.from).number;
+        i <= state.doc.lineAt(range.to).number;
+        i++
+      ) {
+        const line = state.doc.line(i);
+        if (codeLines.has(i) || tableLines.has(i)) continue;
+        const m = line.text.match(
+          /^!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))\)\s*$/,
+        );
+        if (m && inactive(line.from, line.to)) {
+          const path = m[2] || m[3];
+          if (!/^(?:https?:|data:|\/)/.test(path))
+            decorations.push(
+              Decoration.replace({
+                widget: new MediaWidget(mediaUrl(id, path, token), m[1]),
+                block: true,
+              }).range(line.from, line.to),
+            );
+        }
+        if (/^\s*[-*_]{3,}\s*$/.test(line.text) && inactive(line.from, line.to))
           decorations.push(
-            Decoration.replace({
-              widget: new MediaWidget(
-                mediaUrl(id, path, token),
-                m[1],
-                line.from,
-              ),
-              block: true,
-            }).range(line.from, line.to),
+            Decoration.line({ class: "md-rule" }).range(line.from),
           );
       }
-      if (/^\s*[-*_]{3,}\s*$/.test(line.text) && inactive(line.from, line.to))
-        decorations.push(
-          Decoration.line({ class: "md-rule" }).range(line.from),
-        );
-    }
     return {
-      decorations: Decoration.set(decorations, true),
-      wrappers: BlockWrapper.set(wrappers, true),
+      decorations,
+      wrappers,
     };
   }
-  return StateField.define<ReturnType<typeof build>>({
-    create: build,
+  function create(state: EditorState) {
+    const value = build(state, [{ from: 0, to: state.doc.length }]);
+    return {
+      decorations: Decoration.set(value.decorations, true),
+      wrappers: BlockWrapper.set(value.wrappers, true),
+    };
+  }
+  return StateField.define<ReturnType<typeof create>>({
+    create,
     update(value, tr) {
-      return tr.docChanged ||
-        (tr.selection &&
-          previewLines(tr.state) !== previewLines(tr.startState)) ||
-        tr.reconfigured ||
-        syntaxTree(tr.state) !== syntaxTree(tr.startState)
-        ? build(tr.state)
-        : value;
+      if (tr.reconfigured) return create(tr.state);
+      if (
+        !tr.docChanged &&
+        !(
+          tr.selection && previewLines(tr.state) !== previewLines(tr.startState)
+        ) &&
+        syntaxTree(tr.state) === syntaxTree(tr.startState)
+      )
+        return value;
+      let decorations = value.decorations.map(tr.changes);
+      let wrappers = value.wrappers.map(tr.changes);
+      const ranges = previewRanges(tr);
+      // Range-limited filtering keeps untouched branches and block widgets,
+      // including those outside the viewport, intact during editing/scrolling.
+      for (const { from, to } of ranges) {
+        const keep = (a: number, b: number) => b < from || a > to;
+        decorations = decorations.update({
+          filterFrom: from,
+          filterTo: to,
+          filter: keep,
+        });
+        wrappers = wrappers.update({
+          filterFrom: from,
+          filterTo: to,
+          filter: keep,
+        });
+      }
+      const fresh = build(tr.state, ranges);
+      return {
+        decorations: decorations.update({ add: fresh.decorations, sort: true }),
+        wrappers: wrappers.update({ add: fresh.wrappers, sort: true }),
+      };
     },
     provide: (f) => [
       EditorView.decorations.from(f, (value) => value.decorations),
