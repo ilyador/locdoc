@@ -3,8 +3,38 @@
 use super::*;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 const F_SETSIG: libc::c_int = 10; // Linux fcntl ABI; not exported by libc.
+
+/// Held for the Store lifetime. SQLite transactions alone cannot serialize two
+/// independent CRDT/file projection coordinators over the same state folder.
+pub(super) struct StateLock(fs::File);
+impl StateLock {
+    pub(super) fn acquire(data: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(data.join(".instance.lock"))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Another Locdoc process is using this state folder.".into(),
+            ));
+        }
+        Ok(Self(file))
+    }
+}
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
 
 pub(super) struct DiskFile(fs::File, libc::c_int);
 impl DiskFile {
@@ -15,10 +45,24 @@ impl DiskFile {
         Self::leased(path, libc::F_RDLCK)
     }
     fn leased(path: &Path, lease: libc::c_int) -> Result<Option<Self>> {
-        let file = fs::OpenOptions::new()
+        let file = match fs::OpenOptions::new()
             .read(true)
             .write(lease == libc::F_WRLCK)
-            .open(path)?;
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let fd = file.as_raw_fd();
         // SIGURG has an ignored default disposition. A conflicting opener waits
         // only for this short synchronous commit, then continues on the SAME inode.
@@ -37,16 +81,19 @@ impl DiskFile {
         }
         Ok(Some(Self(file, lease)))
     }
-    pub(super) fn read(&mut self) -> Result<String> {
-        let mut text = String::new();
+    pub(super) fn read_bytes(&mut self) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
         self.0.seek(SeekFrom::Start(0))?;
         (&mut self.0)
             .take((5 * MB + 1) as u64)
-            .read_to_string(&mut text)?;
-        if text.len() > 5 * MB {
-            return Err(bad("Markdown documents are limited to 5 MB."));
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 5 * MB {
+            return Err(bad("Documents are limited to 5 MB."));
         }
-        Ok(text)
+        Ok(bytes)
+    }
+    pub(super) fn read(&mut self) -> Result<String> {
+        String::from_utf8(self.read_bytes()?).map_err(|_| bad("This file is not valid UTF-8 text."))
     }
     pub(super) fn write(&mut self, content: &str) -> Result<()> {
         self.0.seek(SeekFrom::Start(0))?;
@@ -83,6 +130,24 @@ impl Drop for DiskFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_reads_preserve_exact_bytes_while_normal_reads_require_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("torn.md");
+        let bytes = [b'A', 0xf0, 0x9f];
+        fs::write(&path, bytes).unwrap();
+        let mut file = DiskFile::open_read(&path).unwrap().unwrap();
+        assert!(file.read().is_err());
+        assert_eq!(file.read_bytes().unwrap(), bytes);
+    }
+    #[test]
+    fn a_state_directory_accepts_only_one_live_projection_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = StateLock::acquire(dir.path()).unwrap();
+        assert!(StateLock::acquire(dir.path()).is_err());
+        drop(first);
+        assert!(StateLock::acquire(dir.path()).is_ok());
+    }
     #[test]
     fn a_desktop_opener_waiting_for_our_lease_keeps_the_same_inode() {
         let dir = tempfile::tempdir().unwrap();

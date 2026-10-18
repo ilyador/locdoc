@@ -1,7 +1,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -44,6 +43,8 @@ import type { LinkTarget } from "./editor";
 import { FormattingTools } from "./formatting-tools";
 import { captureInsertion, insertAttachment } from "./document-session";
 import { normalizePresence, publishPresence } from "./presence";
+import { CollaborationRecovery } from "./collaboration-recovery";
+import { DraftRecoveryNotice } from "./draft-recovery";
 import { useDocument } from "./use-document";
 import { AppearancePanel, documentFontFamily } from "./appearance";
 import { VersionHistory } from "./version-history";
@@ -69,6 +70,47 @@ declare global {
 import { type Entry, sharedToken } from "./model";
 import type { Workspace } from "./workspace";
 type DraftConversation = { kind: "draft"; selection: Selection };
+
+export function DocumentWordMetrics({
+  text,
+  initial,
+  path,
+}: {
+  text?: Y.Text;
+  initial: string;
+  path: string;
+}) {
+  const [count, setCount] = useState(() =>
+    countDocumentWords(text?.toString() ?? initial, path),
+  );
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const snapshot = () => {
+      timer = undefined;
+      setCount(countDocumentWords(text?.toString() ?? initial, path));
+    };
+    const changed = () => {
+      timer ??= setTimeout(snapshot, 100);
+    };
+    snapshot();
+    text?.observe(changed);
+    return () => {
+      clearTimeout(timer);
+      text?.unobserve(changed);
+    };
+  }, [text, initial, path]);
+  return (
+    <>
+      <span>
+        {count.toLocaleString()} {count === 1 ? "word" : "words"}
+      </span>
+      <span className="reading-time">
+        {Math.max(1, Math.ceil(count / 220))} min read
+      </span>
+    </>
+  );
+}
+
 export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const {
     config,
@@ -93,11 +135,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     doc,
     setDoc,
     session,
-    content,
-    setContent,
     status,
     people,
     error: documentError,
+    recovery,
+    clearRecovery,
+    storageWarning,
     setError,
   } = useDocument(
     id,
@@ -187,7 +230,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     comments,
     mutate: mutateComment,
     forgetRequest,
-  } = useComments(endpoint, !!doc, content);
+  } = useComments(endpoint, !!doc, session?.ydoc.getText("content"));
   const tell = useCallback((message: string) => setToast(message), []);
   useEffect(() => {
     if (!toast) return;
@@ -317,7 +360,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         : captureInsertion(origin.ydoc);
       const release = origin.retain();
       try {
-        const result = await api(
+        const result = await api<{ path: string; usage: number }>(
           `/api/docs/${origin.id}/upload${accessQuery}`,
           {
             method: "POST",
@@ -345,7 +388,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     action(async () => {
       let path = newPath.trim();
       if (createKind === "file") path = documentPath(path, createFormat);
-      const result = await api(
+      const result = await api<{ id?: string }>(
         "/api/files",
         send("POST", { path, kind: createKind }),
       );
@@ -387,12 +430,15 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       await mutateComment(cid, data);
     });
   const download = () => {
-    const blob = new Blob([content], {
-      type:
-        documentFormat(doc?.path) === "fountain"
-          ? "text/plain;charset=utf-8"
-          : "text/markdown;charset=utf-8",
-    });
+    const blob = new Blob(
+      [session?.ydoc.getText("content").toString() ?? doc?.content ?? ""],
+      {
+        type:
+          documentFormat(doc?.path) === "fountain"
+            ? "text/plain;charset=utf-8"
+            : "text/markdown;charset=utf-8",
+      },
+    );
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = doc?.path.split("/").pop() || "document.md";
@@ -414,10 +460,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     });
   const filename = doc ? documentName(doc.path) : "Your workspace";
   const fountain = documentFormat(doc?.path) === "fountain";
-  const wordCount = useMemo(
-    () => countDocumentWords(content, doc?.path || ""),
-    [content, doc?.path],
-  );
   const currentComment =
     conversation?.kind === "thread"
       ? comments.find((c) => c.id === conversation.id)
@@ -800,6 +842,16 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               )}
             </div>
           </header>
+          {storageWarning && (
+            <div className="storage-notice" role="status">
+              {storageWarning}
+            </div>
+          )}
+          <DraftRecoveryNotice
+            records={recovery}
+            dismiss={clearRecovery}
+            onError={setError}
+          />
           {error && (
             <div className="error-banner" role="alert">
               <WarningCircle />
@@ -1013,7 +1065,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         entries={entries}
                         onLink={setLinkTarget}
                         onInsertLink={fountain ? undefined : startLink}
-                        onChange={setContent}
+                        onIntegrityError={setError}
                         onComment={startComment}
                         onUpload={
                           fountain
@@ -1068,13 +1120,11 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             </div>
             {doc && (
               <div className="footer-metrics">
-                <span>
-                  {wordCount.toLocaleString()}{" "}
-                  {wordCount === 1 ? "word" : "words"}
-                </span>
-                <span className="reading-time">
-                  {Math.max(1, Math.ceil(wordCount / 220))} min read
-                </span>
+                <DocumentWordMetrics
+                  text={session?.ydoc.getText("content")}
+                  initial={doc.content}
+                  path={doc.path}
+                />
                 <span
                   className="attachment-usage"
                   title="Attachment storage, including uploaded files awaiting insertion"
@@ -1342,6 +1392,29 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     Fonts and appearance
                     <CaretRight size={14} />
                   </button>
+                  {config?.owner && id && (
+                    <CollaborationRecovery
+                      key={id}
+                      endpoint={endpoint}
+                      available={!!doc}
+                      disconnect={async () => {
+                        await session?.drafts.flush();
+                        const provider = session?.provider;
+                        if (!provider?.wsconnected) return;
+                        await new Promise<void>((resolve) => {
+                          const closed = () => {
+                            clearTimeout(timer);
+                            provider.off("connection-close", closed);
+                            resolve();
+                          };
+                          const timer = setTimeout(closed, 500);
+                          provider.on("connection-close", closed);
+                          provider.disconnect();
+                        });
+                      }}
+                      reconnect={() => session?.provider.connect()}
+                    />
+                  )}
                   {config?.owner && (
                     <button
                       className="menu-action"

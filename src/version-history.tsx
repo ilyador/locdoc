@@ -34,7 +34,7 @@ export function VersionHistory({
     <>
       <p className="dialog-description">
         Automatic local snapshots protect against accidental or unwanted edits.
-        Your last 50 snapshots are kept.
+        Up to 50 automatic snapshots and 20 recovery versions are kept.
       </p>
       {versions.loading && <p role="status">Loading versions…</p>}
       {(versions.error || preview.error || error) && (

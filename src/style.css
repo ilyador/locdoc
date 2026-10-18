@@ -2641,3 +2641,44 @@ button:hover {
   font-weight: var(--weight-regular);
   white-space: nowrap;
 }
+
+/* Recovery is secondary to the accepted document; it never covers the editor. */
+.storage-notice,
+.draft-recovery {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 16px;
+  font: var(--weight-regular) var(--ui-caption-size)/1.4 var(--ui-font);
+  color: var(--muted);
+  background: var(--surface);
+}
+.draft-recovery summary {
+  cursor: pointer;
+}
+.draft-recovery-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+.draft-recovery-row p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.draft-recovery-row .button {
+  flex-shrink: 0;
+}
+
+.collaboration-recovery {
+  border-top: 1px solid var(--line);
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.collaboration-recovery summary {
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+}
+.collaboration-recovery .dialog-actions {
+  flex-wrap: wrap;
+}

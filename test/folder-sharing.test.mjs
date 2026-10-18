@@ -73,7 +73,7 @@ function connect(document, token) {
     document.id,
     ydoc,
     {
-      params: { token, client: "file-comments-v1" },
+      params: { token, client: "plain-text-v2" },
       disableBc: true,
       WebSocketPolyfill: WebSocket,
     },
@@ -490,6 +490,7 @@ test("passive sockets stop receiving edits immediately when directory identity i
   // Model a replaced directory's invalid identity without racing the filesystem
   // watcher. The document and independent editor capability remain valid.
   const db = new DatabaseSync(join(dir, "state/locdoc.sqlite"));
+  db.exec("PRAGMA busy_timeout=2000");
   db.prepare("UPDATE folder_shares SET identity=? WHERE path=?").run(
     "replaced-directory",
     "Passive",

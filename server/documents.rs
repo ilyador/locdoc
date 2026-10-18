@@ -2,6 +2,84 @@
 //! Paths are normalized before storage. Discovery preserves an identity;
 //! explicit creation always gets a fresh, private identity.
 use super::*;
+use std::os::unix::fs::MetadataExt;
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct RootIdentity {
+    device: u64,
+    inode: u64,
+}
+impl RootIdentity {
+    fn read(path: &Path) -> std::io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_dir() {
+            return Err(std::io::Error::other("Documents path is not a folder."));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    pub(super) fn matches(&self, path: &Path) -> bool {
+        Self::read(path).is_ok_and(|identity| identity == *self)
+    }
+}
+
+fn root_unavailable() -> ApiError {
+    ApiError(StatusCode::SERVICE_UNAVAILABLE,
+        "The documents folder is unavailable or was replaced. Restore the configured folder before continuing.".into())
+}
+
+/// First installation may create a folder; reopening an existing workspace
+/// must never turn a missing mount into an empty replacement workspace.
+pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIdentity)> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && !data.join("locdoc.sqlite").exists()
+                && !data.join("root.identity").exists() =>
+        {
+            fs::create_dir_all(root)?
+        }
+        _ => return Err(root_unavailable()),
+    }
+    let root = fs::canonicalize(root)?;
+    let identity = RootIdentity::read(&root)?;
+    let identity_path = data.join("root.identity");
+    match fs::read(&identity_path) {
+        Ok(bytes) => {
+            let previous: RootIdentity =
+                serde_json::from_slice(&bytes).map_err(|_| root_unavailable())?;
+            if previous != identity {
+                return Err(root_unavailable());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let temporary = data.join(format!(".root-identity-{}.tmp", uuid::Uuid::new_v4()));
+            let result: Result<()> = (|| {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&temporary)?;
+                file.write_all(&serde_json::to_vec(&identity).map_err(|_| root_unavailable())?)?;
+                file.sync_all()?;
+                fs::rename(&temporary, &identity_path)?;
+                fs::File::open(data)?.sync_all()?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(temporary);
+            }
+            result?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok((root, identity))
+}
 
 #[derive(PartialEq)]
 pub(super) enum Format {
@@ -67,6 +145,12 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     for (name, definition) in [
         ("disk_state", "BLOB"),
         ("write_intent", "INTEGER NOT NULL DEFAULT 0"),
+        ("line_ending", "TEXT NOT NULL DEFAULT 'lf'"),
+        ("line_ending_migrated", "INTEGER NOT NULL DEFAULT 0"),
+        ("browser_generation", "INTEGER NOT NULL DEFAULT 0"),
+        ("collaboration_epoch", "TEXT NOT NULL DEFAULT ''"),
+        ("media_initialized", "INTEGER NOT NULL DEFAULT 0"),
+        ("protected_generation", "INTEGER NOT NULL DEFAULT -1"),
     ] {
         let exists = db
             .prepare("PRAGMA table_info(docs)")?
@@ -79,6 +163,18 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
                 [],
             )?;
         }
+    }
+    db.execute_batch("CREATE TABLE IF NOT EXISTS active_media(doc TEXT NOT NULL,reference TEXT NOT NULL,PRIMARY KEY(doc,reference));")?;
+    let has_kind = db
+        .prepare("PRAGMA table_info(revisions)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|column| column == "kind");
+    if !has_kind {
+        db.execute(
+            "ALTER TABLE revisions ADD COLUMN kind TEXT NOT NULL DEFAULT 'autosave'",
+            [],
+        )?;
     }
     let has_pending = db
         .prepare("PRAGMA table_info(assets)")?
@@ -124,6 +220,9 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
 
 impl Store {
     pub(super) fn safe(&self, rel: &str, hidden: bool) -> Result<PathBuf> {
+        if !self.root_identity.matches(&self.root) {
+            return Err(root_unavailable());
+        }
         let normalized = relative_path(rel, hidden)?;
         let mut path = self.root.clone();
         for part in Path::new(&normalized).components() {
@@ -315,21 +414,52 @@ impl Store {
 
     pub(super) fn retire_missing_documents(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
-        let mut db = self.db.lock().unwrap();
-        let missing = db
+        if !self.root_identity.matches(&self.root) {
+            return Ok(());
+        }
+        let rows = self
+            .db
+            .lock()
+            .unwrap()
             .prepare("SELECT id,path FROM docs WHERE active=1")?
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .filter_map(std::result::Result::ok)
-            .filter(|(_, path)| self.safe(path, false).is_ok_and(|p| !p.exists()))
-            .map(|(id, _)| id)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut missing = rows
+            .into_iter()
+            .filter_map(|(id, path)| {
+                let full = self.safe(&path, false).ok()?;
+                match fs::metadata(&full) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((id, full)),
+                    _ => None,
+                }
+            })
             .collect::<Vec<_>>();
+        // Do not hold the database while taking a room lock: persistence takes
+        // them in the reverse order. Preserve accepted edits before retirement.
+        for (id, _) in &missing {
+            let room = self.rooms.lock().unwrap().get(id).cloned();
+            if let Some(room) = room {
+                let room = room.lock().unwrap();
+                let source = room_text(&room);
+                if room.disk_dirty || room.recovering || source != room.last_disk {
+                    self.snapshot(&self.doc(id)?, &source, true)?;
+                }
+            }
+        }
+        if !self.root_identity.matches(&self.root) {
+            return Ok(());
+        }
+        missing.retain(|(_, full)| {
+            fs::metadata(full).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        });
+        let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        for id in &missing {
+        for (id, _) in &missing {
             retire(&tx, id)?;
         }
         tx.commit()?;
         drop(db);
-        for id in missing {
+        for (id, _) in missing {
             self.close_document(&id);
         }
         Ok(())
@@ -357,6 +487,108 @@ mod tests {
                 [id],
             )
             .unwrap();
+    }
+    #[test]
+    fn a_missing_or_replaced_root_never_retires_documents_or_recreates_the_folder() {
+        let (dir, s) = store();
+        let doc = s.create_document("root.md").unwrap();
+        share(&s, &doc.id);
+        let root = s.root.clone();
+        let data = s.data.clone();
+        let moved = dir.path().join("temporarily-unmounted");
+        fs::rename(&root, &moved).unwrap();
+        s.retire_missing_documents().unwrap();
+        assert_eq!(s.doc(&doc.id).unwrap().token.as_deref(), Some("old-link"));
+        drop(s);
+        assert!(Store::open(root.clone(), data.clone(), "http://localhost".into()).is_err());
+        assert!(
+            !root.exists(),
+            "Startup must not recreate a missing configured root"
+        );
+        fs::create_dir(&root).unwrap();
+        assert!(Store::open(root.clone(), data.clone(), "http://localhost".into()).is_err());
+        fs::remove_dir(&root).unwrap();
+        fs::rename(moved, &root).unwrap();
+        let reopened = Store::open(root, data, "http://localhost".into()).unwrap();
+        assert_eq!(
+            reopened.doc(&doc.id).unwrap().token.as_deref(),
+            Some("old-link")
+        );
+    }
+    #[test]
+    fn permission_errors_do_not_retire_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, s) = store();
+        let doc = s.create_document("Restricted/note.md").unwrap();
+        share(&s, &doc.id);
+        let folder = s.root.join("Restricted");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = s.retire_missing_documents();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        assert_eq!(s.doc(&doc.id).unwrap().token.as_deref(), Some("old-link"));
+    }
+    fn append_frame(room: &Arc<Mutex<Room>>, value: &str) -> Vec<u8> {
+        let peer = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        let state = room
+            .lock()
+            .unwrap()
+            .awareness
+            .doc()
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        peer.transact_mut()
+            .apply_update(Update::decode_v1(&state).unwrap())
+            .unwrap();
+        let before = peer.transact().state_vector();
+        let text = peer.get_or_insert_text("content");
+        let len = text.len(&peer.transact());
+        text.insert(&mut peer.transact_mut(), len, value);
+        Message::Sync(SyncMessage::Update(
+            peer.transact().encode_state_as_update_v1(&before),
+        ))
+        .encode_v1()
+    }
+    #[test]
+    fn a_temporary_replacement_gap_defers_projection_without_rejecting_accepted_edits() {
+        let (_dir, s) = store();
+        let doc = s.create_document("replacement.md").unwrap();
+        let room = s.room(&doc).unwrap();
+        s.persist(&doc, &mut room.lock().unwrap()).unwrap();
+        let frame = append_frame(&room, "Browser edit");
+        let path = s.root.join("replacement.md");
+        let held = s.root.join("replacement.old");
+        fs::rename(&path, &held).unwrap();
+        process_frame(&s, &doc, &room, &frame, true, true, &mut Peer::default()).unwrap();
+        assert!(room_text(&room.lock().unwrap()).contains("Browser edit"));
+        assert!(!s.persist(&doc, &mut room.lock().unwrap()).unwrap());
+        fs::rename(held, &path).unwrap();
+        assert!(s.persist(&doc, &mut room.lock().unwrap()).unwrap());
+        assert!(fs::read_to_string(path).unwrap().contains("Browser edit"));
+    }
+    #[test]
+    fn a_read_only_file_defers_browser_projection_until_it_is_writable() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (_dir, s) = store();
+        let doc = s.create_document("readonly.md").unwrap();
+        let room = s.room(&doc).unwrap();
+        s.persist(&doc, &mut room.lock().unwrap()).unwrap();
+        let frame = append_frame(&room, "Browser edit");
+        let path = s.root.join("readonly.md");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+        let accepted = process_frame(&s, &doc, &room, &frame, true, true, &mut Peer::default());
+        let saved = s.persist(&doc, &mut room.lock().unwrap());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        accepted.unwrap();
+        assert!(!saved.unwrap());
+        assert!(s.persist(&doc, &mut room.lock().unwrap()).unwrap());
+        assert!(fs::read_to_string(path).unwrap().contains("Browser edit"));
     }
     #[test]
     fn paths_have_one_identity() {

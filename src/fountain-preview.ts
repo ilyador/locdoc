@@ -6,12 +6,21 @@ import { parseFountain, type FountainScript } from "./fountain";
 
 // Reuse the established delimiter parser, with Fountain's underscore semantics.
 // Prefixing each isolated line prevents Markdown block rules from reclassifying it.
-const inline = commentParser.configure({
+export const fountainInlineParser = commentParser.configure({
   remove: ["InlineCode", "HTMLTag", "Autolink", "Link", "Image"],
 });
 
 export function fountainPreview() {
   const focus = StateEffect.define<boolean>();
+  const activeLines = (state: EditorState) =>
+    state.readOnly
+      ? ""
+      : state.selection.ranges
+          .map(
+            (range) =>
+              `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
+          )
+          .join(",");
   function build(state: EditorState, script: FountainScript, focused: boolean) {
     const marks: ReturnType<Decoration["range"]>[] = [];
     const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
@@ -64,7 +73,7 @@ export function fountainPreview() {
       }
       const source = state.sliceDoc(line.from, line.to);
       if (!/[*_\\]/.test(source) || line.kind === "omitted") continue;
-      inline.parse("x " + source).iterate({
+      fountainInlineParser.parse("x " + source).iterate({
         enter(node) {
           const from = line.from + node.from - 2,
             to = line.from + node.to - 2;
@@ -121,7 +130,10 @@ export function fountainPreview() {
         tr.effects.find((effect) => effect.is(focus))?.value ?? value.focused;
       if (tr.docChanged)
         return build(tr.state, parseFountain(tr.state.doc.toString()), focused);
-      return tr.selection || tr.reconfigured || focused !== value.focused
+      return (tr.selection &&
+        activeLines(tr.state) !== activeLines(tr.startState)) ||
+        tr.reconfigured ||
+        focused !== value.focused
         ? build(tr.state, value.script, focused)
         : value;
     },

@@ -143,12 +143,9 @@ pub(super) struct PathQuery {
 }
 pub(super) async fn read(
     State(s): State<App>,
-    h: HeaderMap,
+    _owner: security::Owner,
     Query(q): Query<PathQuery>,
 ) -> Result<Json<Value>> {
-    if !s.owner(&h) {
-        return Err(denied());
-    }
     let path = documents::relative_path(&q.path, false)?;
     let identity = directory_identity(&s, &path)?;
     let value =
@@ -176,13 +173,9 @@ pub(super) struct Change {
 }
 pub(super) async fn share(
     State(s): State<App>,
-    h: HeaderMap,
+    _owner: security::Owner,
     Json(b): Json<Change>,
 ) -> Result<Json<Value>> {
-    origin_check(&s, &h)?;
-    if !s.owner(&h) {
-        return Err(denied());
-    }
     if !["private", "view", "edit"].contains(&b.permission.as_str()) {
         return Err(bad("Choose private, view, or edit."));
     }
@@ -198,7 +191,12 @@ pub(super) async fn share(
             )
             .optional()?;
     let token = previous
-        .filter(|value| !b.rotate && value.identity == identity)
+        .filter(|value| {
+            !b.rotate
+                && b.permission != "private"
+                && value.permission != "private"
+                && value.identity == identity
+        })
         .map(|value| value.token)
         .unwrap_or_else(token);
     let value = Grant {

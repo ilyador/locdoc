@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type * as Y from "yjs";
 import { api, send } from "./api";
 import { sourceComments } from "./comment-syntax";
 import type { Comment } from "./model";
@@ -8,20 +9,14 @@ import type { Comment } from "./model";
 export function useComments(
   endpoint: (suffix: string) => string,
   ready: boolean,
-  source: string,
+  source: string | Y.Text | undefined,
 ) {
   const [comments, setComments] = useState<Comment[]>([]);
   const alive = useRef(false);
   const read = useRef<AbortController | null>(null);
   const retry = useRef(false);
   const requests = useRef(new Map<string, { body: string; id: string }>());
-  const sourceKey = useMemo(
-    () =>
-      sourceComments(source)
-        .map((t) => source.slice(t.from, t.to))
-        .join("\n\n"),
-    [source],
-  );
+  const sourceKey = useRef<string | null>(null);
   const refresh = useCallback(async () => {
     if (!ready || !alive.current) return;
     read.current?.abort();
@@ -46,6 +41,31 @@ export function useComments(
     }
   }, [endpoint, ready]);
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const snapshot = () => {
+      timer = undefined;
+      if (source === undefined) return;
+      const text = typeof source === "string" ? source : source.toString();
+      const key = sourceComments(text)
+        .map((t) => text.slice(t.from, t.to))
+        .join("\n\n");
+      const changed = sourceKey.current !== null && sourceKey.current !== key;
+      sourceKey.current = key;
+      if (changed) void refresh();
+    };
+    const changed = () => {
+      // A bounded sampling interval, rather than a trailing debounce: metadata
+      // stays current during sustained typing without parsing every keystroke.
+      timer ??= setTimeout(snapshot, 100);
+    };
+    snapshot();
+    if (source && typeof source !== "string") source.observe(changed);
+    return () => {
+      clearTimeout(timer);
+      if (source && typeof source !== "string") source.unobserve(changed);
+    };
+  }, [source, refresh]);
+  useEffect(() => {
     alive.current = true;
     return () => {
       alive.current = false;
@@ -60,7 +80,11 @@ export function useComments(
     // Source changes arrive immediately over the existing WebSocket. Poll only
     // metadata on documents with threads, without overlapping slow requests.
     const timer = setInterval(() => {
-      if (!document.hidden && !read.current && (sourceKey || retry.current))
+      if (
+        !document.hidden &&
+        !read.current &&
+        (sourceKey.current || retry.current)
+      )
         void refresh();
     }, 2000);
     document.addEventListener("visibilitychange", refreshVisible);
@@ -71,7 +95,7 @@ export function useComments(
       document.removeEventListener("visibilitychange", refreshVisible);
       window.removeEventListener("online", refreshVisible);
     };
-  }, [refresh, sourceKey]);
+  }, [refresh]);
   const forgetRequest = (id = "") => requests.current.delete(id);
   const mutate = async (
     id: string,

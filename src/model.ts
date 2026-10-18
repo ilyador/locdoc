@@ -21,6 +21,8 @@ export type Document = {
   modified: number;
   state: string;
   diskPending?: boolean;
+  lineEndingMigrated?: boolean;
+  collaborationEpoch?: string;
 };
 export type Config = {
   owner: boolean;

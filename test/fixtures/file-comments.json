@@ -88,5 +88,137 @@
     "name": "comment syntax inside link destinations and labels stays literal",
     "source": "[label[[comment(ana): literal]]](https://example.test)\n\n[text](https://example.test/[[comment(ana):literal]])",
     "threads": []
+  },
+  {
+    "name": "standalone conversation after a complete table",
+    "source": "| Name | Value |\n| - | - |\n| one | two |\n\n[[comment(ana): Table note]]\n[[comment(alex): Table reply]]\n\nAfter the table.",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "Table note"
+        },
+        {
+          "name": "alex",
+          "body": "Table reply"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "standalone conversation after a complete nested list",
+    "source": "- first\n  - nested\n- last\n\n[[comment(ana): List note]]\n\nAfter the list.",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "List note"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "conversations after an inline HTML paragraph stay separate",
+    "source": "Before <span title=\"hello\">text</span> after.\n\n[[comment(ana): First note]]\n\n[[comment(alex): Separate note]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First note"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "Separate note"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "one CR joins a reply",
+    "source": "[[comment(ana): First]]\r[[comment(alex): Next]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First"
+        },
+        {
+          "name": "alex",
+          "body": "Next"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "one CRLF joins a reply",
+    "source": "[[comment(ana): First]]\r\n[[comment(alex): Next]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First"
+        },
+        {
+          "name": "alex",
+          "body": "Next"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "two CR separators start independent conversations",
+    "source": "[[comment(ana): First]]\r\r[[comment(alex): Next]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "Next"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "CRLF then CR starts independent conversations",
+    "source": "[[comment(ana): First]]\r\n\r[[comment(alex): Next]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "Next"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "LF then CR starts independent conversations",
+    "source": "[[comment(ana): First]]\n\r[[comment(alex): Next]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "First"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "Next"
+        }
+      ]
+    ]
   }
 ]

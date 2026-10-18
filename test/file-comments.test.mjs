@@ -94,6 +94,28 @@ function anchor(snapshot, from, to) {
     ),
   };
 }
+function assertSelectedPassage(snapshot, comment, expected) {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, Buffer.from(snapshot.state, "base64"));
+    const from = Y.createAbsolutePositionFromRelativePosition(
+      Y.createRelativePositionFromJSON(comment.anchor.start),
+      doc,
+    );
+    const to = Y.createAbsolutePositionFromRelativePosition(
+      Y.createRelativePositionFromJSON(comment.anchor.end),
+      doc,
+    );
+    assert.ok(from && to, "the original selection anchors must remain valid");
+    assert.equal(
+      doc.getText("content").toString().slice(from.index, to.index),
+      expected,
+    );
+    assert.equal(comment.quote, expected);
+  } finally {
+    doc.destroy();
+  }
+}
 async function connect(id) {
   const snapshot = await request(`/api/docs/${id}`),
     doc = new Y.Doc();
@@ -111,7 +133,7 @@ async function connect(id) {
       WebSocketPolyfill: Socket,
       disableBc: true,
       connect: false,
-      params: { client: "file-comments-v1" },
+      params: { client: "plain-text-v2" },
     },
   );
   const peer = { doc, provider, text: doc.getText("content"), waiting: false };
@@ -249,9 +271,12 @@ test("view-link comments and concurrent replies round-trip to the exact file syn
   );
   assert.equal(
     await readFile(join(dir, "docs/web.md"), "utf8"),
-    source.slice(0, end) +
-      "[[comment(alex): this is my comment]]" +
-      source.slice(end),
+    source + "\n\n[[comment(alex): this is my comment]]",
+  );
+  assertSelectedPassage(
+    await request(`/api/docs/${d.id}`),
+    c,
+    source.slice(0, end),
   );
   const reply = {
     name: "ana",
@@ -312,16 +337,21 @@ test("posting a comment on newly typed text tolerates HTTP overtaking the CRDT u
   const pending = request(`/api/docs/${d.id}/comments`, "POST", {
     name: "alex",
     body: "A causal comment",
+    quote: " Newly typed passage",
     anchor: selection,
   });
   await delay(60);
   Y.applyUpdate(peer.doc, Y.encodeStateAsUpdate(local));
   const result = await pending;
   assert.equal(result.body, "A causal comment");
-  assert.ok(
-    (await readFile(join(dir, "docs/causal.md"), "utf8")).includes(
-      "Newly typed passage[[comment(alex): A causal comment]]",
-    ),
+  assert.equal(
+    await readFile(join(dir, "docs/causal.md"), "utf8"),
+    "Original. Newly typed passage\n\n[[comment(alex): A causal comment]]",
+  );
+  assertSelectedPassage(
+    await request(`/api/docs/${d.id}`),
+    result,
+    " Newly typed passage",
   );
   local.destroy();
 });
@@ -460,7 +490,12 @@ test("existing conversations export once, preserve identity and resolution, and 
   const file = await readFile(join(dir, "docs/legacy.md"), "utf8");
   assert.equal(
     file,
-    "Original passage.[[comment(alex): Existing comment]]\n[[comment(ana): Existing response]]",
+    "Original passage.\n\n[[comment(alex): Existing comment]]\n[[comment(ana): Existing response]]",
+  );
+  assertSelectedPassage(
+    await request("/api/docs/legacy-doc"),
+    first[0],
+    "passage",
   );
   await request("/api/docs/legacy-doc/comments");
   assert.equal(await readFile(join(dir, "docs/legacy.md"), "utf8"), file);

@@ -30,7 +30,12 @@ import { DraftJournal } from "../src/drafts.ts";
 // The ordinary suite runs every disruption once. An explicit soak runs the same
 // deterministic scenario for minutes, retaining assertions throughout the run.
 const duration = Number(process.env.LOCDOC_SOAK_MS || 8000);
-const base = "http://127.0.0.1:3510",
+const port = Number(process.env.LOCDOC_SOAK_PORT || 3510);
+assert.ok(
+  Number.isInteger(port) && port >= 3500 && port <= 3999,
+  "Use an isolated test port between 3500 and 3999",
+);
+const base = `http://127.0.0.1:${port}`,
   key = "isolated-soak-owner";
 async function until(check, message, timeout = 10000) {
   const deadline = Date.now() + timeout;
@@ -98,7 +103,7 @@ test(
       server = spawn(executable, [], {
         env: {
           ...process.env,
-          LOCDOC_BIND: "127.0.0.1:3510",
+          LOCDOC_BIND: `127.0.0.1:${port}`,
           LOCDOC_DOCS: join(dir, "docs"),
           LOCDOC_STATE: join(dir, "state"),
           LOCDOC_PUBLIC_URL: base,
@@ -142,7 +147,7 @@ test(
           disableBc: true,
           connect: false,
           maxBackoffTime: 300,
-          params: { client: "file-comments-v1" },
+          params: { client: "plain-text-v2" },
         },
       );
       const drafts = new DraftJournal(

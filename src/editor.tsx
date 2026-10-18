@@ -20,20 +20,23 @@ import {
   commentMarkdown,
   commentReadingText,
   sourceComments,
+  commentParser,
 } from "./comment-syntax";
 import { markdownLink, resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
 import { rememberEditorScroll } from "./editor-scroll";
-import { fountainPreview } from "./fountain-preview";
+import { fountainPreview, fountainInlineParser } from "./fountain-preview";
 import { parseFountain, type FountainForce } from "./fountain";
 import type { Entry } from "./model";
 import type { Comment } from "./model";
 import {
   EditorState,
+  ChangeSet,
   StateField,
   Compartment,
   Prec,
   countColumn,
+  type TransactionSpec,
 } from "@codemirror/state";
 import {
   EditorView,
@@ -54,7 +57,11 @@ import {
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { createMarkdownTable, parseMarkdownTable } from "./markdown-table";
-import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import {
+  yCollab,
+  ySyncAnnotation,
+  yUndoManagerKeymap,
+} from "y-codemirror.next";
 import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
 
@@ -85,6 +92,280 @@ export function mediaUrl(id: string, path: string, token?: string) {
 }
 export function isVideo(path: string) {
   return /\.(mp4|webm|mov)(?:[?&]|$)/i.test(decodeURIComponent(path));
+}
+
+type TextRange = { from: number; to: number };
+function mergeRanges(ranges: TextRange[]) {
+  const merged: TextRange[] = [];
+  for (const range of ranges.sort((a, b) => a.from - b.from || a.to - b.to)) {
+    const previous = merged.at(-1);
+    if (previous && range.from <= previous.to)
+      previous.to = Math.max(previous.to, range.to);
+    else if (range.to > range.from) merged.push({ ...range });
+  }
+  return merged;
+}
+function subtractRanges(ranges: TextRange[], cuts: TextRange[]) {
+  return ranges.flatMap((range) => {
+    const parts: TextRange[] = [];
+    let from = range.from;
+    for (const cut of cuts) {
+      if (cut.to <= from || cut.from >= range.to) continue;
+      if (cut.from > from) parts.push({ from, to: cut.from });
+      from = Math.max(from, cut.to);
+    }
+    if (from < range.to) parts.push({ from, to: range.to });
+    return parts;
+  });
+}
+
+// Change delimiters only: selected characters and hidden comment records retain
+// their CRDT identities, including when removing part of an existing emphasis.
+export function toggleInlineFormat(
+  state: EditorState,
+  marker: "*" | "**" | "_",
+  fountain = false,
+  onUnsafe?: (message: string) => void,
+): TransactionSpec {
+  const main = state.selection.main;
+  const { from, to } = main;
+  const source = state.doc.toString();
+  if (from === to) {
+    const paired =
+      source.slice(Math.max(0, from - marker.length), from) === marker &&
+      source.slice(from, from + marker.length) === marker &&
+      source[from - marker.length - 1] !== "\\";
+    return {
+      changes: paired
+        ? { from: from - marker.length, to: from + marker.length }
+        : { from, insert: marker + marker },
+      selection: { anchor: from + (paired ? -marker.length : marker.length) },
+    };
+  }
+  let selected = visibleTextRanges(state, from, to);
+  type FormatPair = {
+    from: number;
+    to: number;
+    open: TextRange;
+    close: TextRange;
+    wanted: boolean;
+    kind: "bold" | "italic" | "underline";
+  };
+  const kind =
+    marker === "**"
+      ? "bold"
+      : marker === "_" && fountain
+        ? "underline"
+        : "italic";
+  const readSyntax = (source: string) => {
+    const pairs: FormatPair[] = [];
+    const syntaxMarks: TextRange[] = [];
+    const parse = (text: string, offset: number, prefix = "") => {
+      (fountain ? fountainInlineParser : commentParser)
+        .parse(prefix + text)
+        .iterate({
+          enter(node) {
+            if (node.name === "LocdocComment") return false;
+            if (node.name === "EmphasisMark")
+              syntaxMarks.push({
+                from: node.from + offset - prefix.length,
+                to: node.to + offset - prefix.length,
+              });
+            if (node.name !== "StrongEmphasis" && node.name !== "Emphasis")
+              return;
+            const marks = node.node.getChildren("EmphasisMark");
+            if (marks.length !== 2) return;
+            const convert = (range: TextRange) => ({
+              from: range.from + offset - prefix.length,
+              to: range.to + offset - prefix.length,
+            });
+            const open = convert(marks[0]),
+              close = convert(marks[1]);
+            if (open.from < offset || close.to > offset + text.length) return;
+            const delimiter = source.slice(open.from, open.to);
+            const style =
+              fountain && delimiter.includes("_")
+                ? "underline"
+                : node.name === "StrongEmphasis"
+                  ? "bold"
+                  : "italic";
+            pairs.push({
+              from: open.from,
+              to: close.to,
+              open,
+              close,
+              wanted: style === kind,
+              kind: style,
+            });
+          },
+        });
+    };
+    if (fountain) {
+      let offset = 0,
+        number = 1;
+      const first = state.doc.lineAt(from).number,
+        last = state.doc.lineAt(to).number;
+      for (const line of source.split("\n")) {
+        if (number >= first && number <= last) parse(line, offset, "x ");
+        if (number++ >= last) break;
+        offset += line.length + 1;
+      }
+    } else parse(source, 0);
+    return { pairs, syntaxMarks };
+  };
+  const { pairs, syntaxMarks } = readSyntax(source);
+  const hiddenSource = sourceCommentRanges(state);
+  const inert = mergeRanges([...syntaxMarks, ...hiddenSource]);
+  const touchesFormat = pairs.some(
+    (pair) =>
+      pair.wanted &&
+      selected.some((range) => range.from < pair.to && range.to > pair.from),
+  );
+  // A fully selected nested style travels with its content. Closing bold before
+  // an italic opener (rather than inside it) avoids crossing Markdown pairs.
+  for (let pass = 0; pass < pairs.length; pass++) {
+    let expanded = false;
+    for (const pair of pairs) {
+      const content = subtractRanges(
+        [{ from: pair.open.to, to: pair.close.from }],
+        inert,
+      ).filter((part) => /\S/.test(source.slice(part.from, part.to)));
+      const first = content[0],
+        last = content.at(-1);
+      if (!first || !last) continue;
+      for (const range of selected)
+        if (
+          (pair.wanted ||
+            touchesFormat ||
+            range.from < pair.from ||
+            range.to > pair.to) &&
+          range.from <= first.from &&
+          range.to >= last.to &&
+          (range.from > pair.from || range.to < pair.to)
+        ) {
+          range.from = Math.min(range.from, pair.from);
+          range.to = Math.max(range.to, pair.to);
+          expanded = true;
+        }
+    }
+    if (!expanded) break;
+    selected = mergeRanges(selected);
+  }
+  const relevant = pairs.filter(
+    (pair) =>
+      pair.wanted &&
+      selected.some((range) => range.from < pair.to && range.to > pair.from),
+  );
+  const removed = state.changes(
+    mergeRanges(relevant.flatMap((pair) => [pair.open, pair.close])),
+  );
+  const doc = removed.apply(state.doc);
+  const map = (range: TextRange) => ({
+    from: removed.mapPos(range.from, 1),
+    to: removed.mapPos(range.to, -1),
+  });
+  const hidden = hiddenSource.map(map);
+  const marks = mergeRanges(syntaxMarks.map(map));
+  // Delimiters cannot cross physical lines or hidden records. Trimming each run
+  // keeps split emphasis valid: **hello world** -> hello **world**.
+  const runs = (ranges: TextRange[]) =>
+    mergeRanges(
+      subtractRanges(ranges, hidden).flatMap((range) => {
+        const result: TextRange[] = [];
+        for (let start = range.from; start < range.to;) {
+          const line = doc.lineAt(start);
+          const end = Math.min(range.to, line.to);
+          const value = doc.sliceString(start, end);
+          const leading = value.match(/^\s*/)?.[0].length ?? 0;
+          const trailing = value.match(/\s*$/)?.[0].length ?? 0;
+          if (
+            leading + trailing < value.length &&
+            subtractRanges([{ from: start, to: end }], marks).some((part) =>
+              /\S/.test(doc.sliceString(part.from, part.to)),
+            )
+          )
+            result.push({ from: start + leading, to: end - trailing });
+          start = line.to + 1;
+        }
+        return result;
+      }),
+    );
+  const selection = runs(selected.map(map));
+  if (!selection.length) return {};
+  const existing = mergeRanges(
+    relevant.map((pair) => map({ from: pair.open.to, to: pair.close.from })),
+  );
+  const remove = !subtractRanges(
+    subtractRanges(selection, marks),
+    existing,
+  ).some((part) => /\S/.test(doc.sliceString(part.from, part.to)));
+  const desired = runs(
+    remove
+      ? subtractRanges(existing, selection)
+      : mergeRanges([...existing, ...selection]),
+  );
+  const added = ChangeSet.of(
+    desired.flatMap((range) => [
+      { from: range.from, insert: marker },
+      { from: range.to, insert: marker },
+    ]),
+    doc.length,
+  );
+  const candidate = added.apply(doc).toString();
+  const parsed = readSyntax(candidate);
+  const reverse = (range: TextRange) => ({
+    from: added.invertedDesc.mapPos(range.from, 1),
+    to: added.invertedDesc.mapPos(range.to, -1),
+  });
+  const parsedMarks = mergeRanges(parsed.syntaxMarks);
+  let invalid = false;
+  added.iterChanges((_from, _to, fromB, toB) => {
+    if (subtractRanges([{ from: fromB, to: toB }], parsedMarks).length)
+      invalid = true;
+  });
+  const differs = (a: TextRange[], b: TextRange[]) =>
+    subtractRanges(
+      subtractRanges(a, b),
+      [...marks, ...hidden].sort((a, b) => a.from - b.from),
+    ).some((part) => /\S/.test(doc.sliceString(part.from, part.to)));
+  for (const style of ["bold", "italic", "underline"] as const) {
+    const expected = mergeRanges([
+      ...(style === kind ? desired : []),
+      ...pairs
+        .filter(
+          (pair) =>
+            pair.kind === style && (style !== kind || !relevant.includes(pair)),
+        )
+        .map((pair) => map({ from: pair.open.to, to: pair.close.from })),
+    ]);
+    const actual = mergeRanges(
+      parsed.pairs
+        .filter((pair) => pair.kind === style)
+        .map((pair) => reverse({ from: pair.open.to, to: pair.close.from })),
+    );
+    if (differs(expected, actual) || differs(actual, expected)) invalid = true;
+  }
+  const survivingMarks = mergeRanges(parsed.syntaxMarks.map(reverse));
+  if (
+    subtractRanges(survivingMarks, marks).length ||
+    subtractRanges(marks, survivingMarks).length
+  )
+    invalid = true;
+  if (invalid) {
+    onUnsafe?.(
+      "This selection would break nested formatting. Select the complete word or phrase and try again.",
+    );
+    return {};
+  }
+  const changes = removed.compose(added);
+  return {
+    changes,
+    selection: {
+      anchor: changes.mapPos(main.anchor, main.anchor < main.head ? 1 : -1),
+      head: changes.mapPos(main.head, main.anchor < main.head ? -1 : 1),
+    },
+    userEvent: "input.format",
+  };
 }
 
 // Solarized II, from the owner's Ulysses theme. Dark variants keep its hues
@@ -520,7 +801,8 @@ function livePreview(
     create: build,
     update(value, tr) {
       return tr.docChanged ||
-        tr.selection ||
+        (tr.selection &&
+          previewLines(tr.state) !== previewLines(tr.startState)) ||
         tr.reconfigured ||
         syntaxTree(tr.state) !== syntaxTree(tr.startState)
         ? build(tr.state)
@@ -531,6 +813,17 @@ function livePreview(
       EditorView.blockWrappers.from(f, (value) => value.wrappers),
     ],
   });
+}
+
+function previewLines(state: EditorState) {
+  return state.readOnly
+    ? ""
+    : state.selection.ranges
+        .map(
+          (range) =>
+            `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
+        )
+        .join(",");
 }
 
 // Sidebar metadata refreshes must not replace the parser and discard its tree.
@@ -574,7 +867,8 @@ export const MarkdownEditor = forwardRef<
     editable: boolean;
     id: string;
     token?: string;
-    onChange: (text: string) => void;
+    onChange?: (text: string) => void;
+    onIntegrityError?: (message: string) => void;
     onComment: () => void;
     onUpload: (file: File) => void;
     comments?: Comment[];
@@ -596,6 +890,7 @@ export const MarkdownEditor = forwardRef<
     id,
     token,
     onChange,
+    onIntegrityError,
     onComment,
     onUpload,
     comments,
@@ -613,12 +908,16 @@ export const MarkdownEditor = forwardRef<
 ) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
+  const undoHistory = useRef<Y.UndoManager | null>(null);
   const [commentHost] = useState(() => document.createElement("div"));
   const commentExtension = useRef<ReturnType<typeof commentLayer> | null>(null);
   const preview = useRef(new Compartment());
   const access = useRef(new Compartment());
+  const integrity = useRef(new Compartment());
+  const invalidText = useRef(false);
   const callbacks = useRef({
     onChange,
+    onIntegrityError,
     onComment,
     onUpload,
     onOpenComment,
@@ -627,6 +926,7 @@ export const MarkdownEditor = forwardRef<
   });
   callbacks.current = {
     onChange,
+    onIntegrityError,
     onComment,
     onUpload,
     onOpenComment,
@@ -638,7 +938,14 @@ export const MarkdownEditor = forwardRef<
     () => ({
       formatFountain(kind) {
         const v = view.current;
-        if (!v || !editable || documentFormat(path) !== "fountain") return;
+        if (
+          !v ||
+          !editable ||
+          invalidText.current ||
+          v.state.readOnly ||
+          documentFormat(path) !== "fountain"
+        )
+          return;
         const current = v.state.doc.lineAt(v.state.selection.main.head);
         const line = parseFountain(v.state.doc.toString()).lines[
           current.number - 1
@@ -692,7 +999,14 @@ export const MarkdownEditor = forwardRef<
       },
       insertLink(url, label, anchor) {
         const v = view.current;
-        if (!v || !editable || !anchor) return;
+        if (
+          !v ||
+          !editable ||
+          invalidText.current ||
+          v.state.readOnly ||
+          !anchor
+        )
+          return;
         const range = resolveCommentAnchor(ydoc, anchor);
         if (!range) return;
         const text = markdownLink(label, url);
@@ -709,7 +1023,7 @@ export const MarkdownEditor = forwardRef<
       },
       toggleTasks() {
         const v = view.current;
-        if (!v || !editable) return;
+        if (!v || !editable || invalidText.current || v.state.readOnly) return;
         const range = v.state.selection.main;
         const first = v.state.doc.lineAt(range.from),
           last = v.state.doc.lineAt(
@@ -751,7 +1065,7 @@ export const MarkdownEditor = forwardRef<
       },
       insert(text) {
         const v = view.current;
-        if (!v || !editable) return;
+        if (!v || !editable || invalidText.current || v.state.readOnly) return;
         const { from, to } = v.state.selection.main;
         v.dispatch({
           changes: { from, to, insert: text },
@@ -761,7 +1075,7 @@ export const MarkdownEditor = forwardRef<
       },
       insertTable(rows, columns) {
         const v = view.current;
-        if (!v || !editable) return;
+        if (!v || !editable || invalidText.current || v.state.readOnly) return;
         const { from, to } = v.state.selection.main;
         const before = v.state.sliceDoc(0, from);
         const prefix =
@@ -780,7 +1094,24 @@ export const MarkdownEditor = forwardRef<
       },
       wrap(before, after = "") {
         const v = view.current;
-        if (!v || !editable) return;
+        if (!v || !editable || invalidText.current || v.state.readOnly) return;
+        if (
+          before === after &&
+          (before === "*" || before === "**" || before === "_")
+        ) {
+          undoHistory.current?.stopCapturing();
+          v.dispatch(
+            toggleInlineFormat(
+              v.state,
+              before,
+              documentFormat(path) === "fountain",
+              callbacks.current.onIntegrityError,
+            ),
+          );
+          undoHistory.current?.stopCapturing();
+          v.focus();
+          return;
+        }
         const { from, to } = v.state.selection.main;
         const source = v.state.doc.toString();
         const segments = visibleTextRanges(v.state, from, to);
@@ -894,7 +1225,22 @@ export const MarkdownEditor = forwardRef<
   );
   useLayoutEffect(() => {
     const text = ydoc.getText("content");
+    const source = text.toString();
+    invalidText.current = source.includes("\r");
+    const integrityAccess = () =>
+      invalidText.current
+        ? [
+            Prec.highest(EditorState.readOnly.of(true)),
+            Prec.highest(EditorView.editable.of(false)),
+          ]
+        : [];
+    const reportIntegrity = () =>
+      callbacks.current.onIntegrityError?.(
+        "This document has incompatible line endings. Editing is paused until it reconnects with the server.",
+      );
+    if (invalidText.current) reportIntegrity();
     const undo = new Y.UndoManager(text);
+    undoHistory.current = undo;
     const layer = commentLayer(commentHost, (id) =>
       callbacks.current.onOpenComment?.(id),
     );
@@ -902,8 +1248,35 @@ export const MarkdownEditor = forwardRef<
     const v = new EditorView({
       parent: host.current!,
       state: EditorState.create({
-        doc: text.toString(),
+        doc: source,
         extensions: [
+          EditorState.lineSeparator.of("\n"),
+          integrity.current.of(integrityAccess()),
+          EditorState.transactionFilter.of((tr) => {
+            if (!tr.docChanged || tr.annotation(ySyncAnnotation)) return tr;
+            // Pasted CRLF/lone CR becomes canonical LF before yCollab sees it.
+            // Remote data keeps exact offsets and is guarded below instead.
+            const corrections: { from: number; to: number; insert: string }[] =
+              [];
+            tr.changes.iterChanges((_from, _to, fromB, _toB, inserted) => {
+              for (const match of inserted.toString().matchAll(/\r\n?/g))
+                corrections.push({
+                  from: fromB + match.index,
+                  to: fromB + match.index + match[0].length,
+                  insert: "\n",
+                });
+            });
+            if (!corrections.length) return tr;
+            const changes = ChangeSet.of(corrections, tr.newDoc.length, "\n");
+            return [
+              tr,
+              {
+                changes,
+                selection: tr.newSelection.map(changes),
+                sequential: true,
+              },
+            ];
+          }),
           sourceCommentLayer,
           Prec.highest(
             EditorView.domEventHandlers({
@@ -957,7 +1330,7 @@ export const MarkdownEditor = forwardRef<
             indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged)
+            if (u.docChanged && callbacks.current.onChange)
               callbacks.current.onChange(u.state.doc.toString());
           }),
           EditorView.domEventHandlers({
@@ -1038,9 +1411,34 @@ export const MarkdownEditor = forwardRef<
       }),
     });
     view.current = v;
-    callbacks.current.onChange(text.toString());
+    let alive = true;
+    const inspect = (event: Y.YTextEvent) => {
+      if (
+        !invalidText.current &&
+        !event.delta.some(
+          (part) =>
+            typeof part.insert === "string" && part.insert.includes("\r"),
+        )
+      )
+        return;
+      const invalid = text.toString().includes("\r");
+      if (invalid === invalidText.current) return;
+      invalidText.current = invalid;
+      if (invalid) reportIntegrity();
+      queueMicrotask(() => {
+        if (alive)
+          v.dispatch({
+            effects: integrity.current.reconfigure(integrityAccess()),
+          });
+      });
+    };
+    text.observe(inspect);
+    callbacks.current.onChange?.(text.toString());
     return () => {
+      alive = false;
+      text.unobserve(inspect);
       view.current = null;
+      undoHistory.current = null;
       v.destroy();
       undo.destroy();
     };

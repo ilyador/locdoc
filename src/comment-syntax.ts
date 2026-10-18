@@ -125,7 +125,7 @@ export function sourceComments(source: string): SourceThread[] {
     if (
       previous &&
       /^[ \t\r\n]*$/.test(gap) &&
-      (gap.match(/\n/g)?.length || 0) <= 1
+      (gap.match(/\r\n|\r|\n/g)?.length || 0) <= 1
     ) {
       previous.to = to;
       previous.messages.push({ name: message.name, body: message.body });

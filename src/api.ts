@@ -5,7 +5,7 @@ export class ApiError extends Error {
     this.status = status;
   }
 }
-export async function api<T = any>(
+export async function api<T = unknown>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
