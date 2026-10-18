@@ -43,22 +43,30 @@ fn shared_doc(s: &Store, token: &str, selected: Option<&str>) -> Result<Option<D
     }
 }
 
-fn preview(
-    s: &Store,
-    token: &str,
-    selected: Option<&str>,
+async fn preview(
+    s: App,
+    token: String,
+    selected: Option<String>,
 ) -> Result<Option<(Document, social::Preview)>> {
-    let Some(doc) = shared_doc(s, token, selected)? else {
+    let capability = token.clone();
+    let Some(doc) = job(s.clone(), move |s| {
+        shared_doc(s, &capability, selected.as_deref())
+    })
+    .await?
+    else {
         return Ok(None);
     };
-    let room = s.room(&doc)?;
-    let source = {
+    doc_job(s, doc.id.clone(), move |s| {
+        // Resolution and admission may be separated by a long projection.
+        // Recheck the live capability before accessing the accepted source.
+        let doc = shared_doc(s, &token, Some(&doc.id))?.ok_or_else(denied)?;
+        let room = s.room(&doc)?;
         let mut room = room.lock().unwrap();
-        s.persist(&doc, &mut room)?;
-        room_text(&room)
-    };
-    let value = social::Preview::new(&source, &doc.path);
-    Ok(Some((doc, value)))
+        s.store_room(&doc, &mut room)?;
+        let value = social::Preview::new(&room_text(&room), &doc.path);
+        Ok(Some((doc, value)))
+    })
+    .await
 }
 
 pub(super) async fn shell(
@@ -71,8 +79,14 @@ pub(super) async fn shell(
         .path()
         .strip_prefix("/s/")
         .map(|v| v.trim_end_matches('/'));
-    let shared =
-        token.and_then(|token| preview(&s, token, selection.doc.as_deref()).ok().flatten());
+    let shared = if let Some(token) = token {
+        preview(s.clone(), token.to_string(), selection.doc.clone())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     let mut page_url = format!("{}{}", s.public_url, uri.path());
     let (title, description, image, alt) = if let Some((doc, value)) = shared {
         let token = token.unwrap();
@@ -114,10 +128,16 @@ pub(super) async fn preview_image(
     AxPath(token): AxPath<String>,
     Query(selection): Query<folders::Selection>,
 ) -> Result<Response> {
-    let (doc, value) = preview(&s, &token, selection.doc.as_deref())?.ok_or_else(denied)?;
+    let (doc, value) = preview(s.clone(), token.clone(), selection.doc)
+        .await?
+        .ok_or_else(denied)?;
     let png = social::image(value).await?;
     // Rendering runs off-thread. Recheck revocation before returning cached or new bytes.
-    shared_doc(&s, &token, Some(&doc.id))?.ok_or_else(denied)?;
+    job(s, move |s| {
+        shared_doc(s, &token, Some(&doc.id))?.ok_or_else(denied)?;
+        Ok(())
+    })
+    .await?;
     Ok(([(header::CONTENT_TYPE, "image/png")], png).into_response())
 }
 
@@ -142,6 +162,87 @@ fn render(template: &str, values: [&str; 5]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn social_previews_await_document_admission_without_forcing_file_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(
+            directory.path().join("docs"),
+            directory.path().join("state"),
+            "http://localhost".into(),
+        )
+        .unwrap();
+        fs::write(store.root.join("preview.md"), "# Original title").unwrap();
+        let document = store.index_document("preview.md").unwrap();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='view',token='social-preview-share' WHERE id=?",
+                [&document.id],
+            )
+            .unwrap();
+        let room = store.room(&document).unwrap();
+        {
+            let mut room = room.lock().unwrap();
+            store.persist(&document, &mut room).unwrap();
+            apply_text(
+                room.awareness.doc(),
+                "# Original title",
+                "# Accepted browser title",
+            );
+            room.save.edited();
+            store.store_room(&document, &mut room).unwrap();
+        }
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let busy = room.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = busy.lock().unwrap();
+            started.send(()).unwrap();
+            let _ = wait.recv_timeout(std::time::Duration::from_millis(900));
+        });
+        ready.await.unwrap();
+        let started = std::time::Instant::now();
+        let mut requests = Vec::new();
+        for _ in 0..6 {
+            let app = store.clone();
+            requests.push(tokio::spawn(async move {
+                preview(app, "social-preview-share".into(), None).await
+            }));
+        }
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        let independent = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            doc_job(store.clone(), "unrelated-document".into(), |_| Ok(())),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        holder.join().unwrap();
+        for request in requests {
+            let (_, value) = request.await.unwrap().unwrap().unwrap();
+            assert_eq!(value.title, "Accepted browser title");
+        }
+        assert!(
+            matches!(independent, Ok(Ok(()))),
+            "Social preview queues must leave storage capacity for other documents"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "Social preview room locks must not block the network runtime"
+        );
+        assert_eq!(
+            fs::read_to_string(store.root.join("preview.md")).unwrap(),
+            "# Original title"
+        );
+        assert!(
+            room.lock().unwrap().save.needs_projection(),
+            "A crawler must not bypass normal save coalescing"
+        );
+    }
     #[test]
     fn metadata_escapes_content_without_recursively_expanding_document_text() {
         let html = render(

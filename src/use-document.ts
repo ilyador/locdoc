@@ -84,6 +84,7 @@ export function useDocument(
           },
         );
         let serverWaiting = !!d.diskPending;
+        let serverSaving = !!d.diskSaving;
         let receiptId = "";
         let resetting = false;
         let transientWarning = "";
@@ -122,7 +123,9 @@ export function useDocument(
               : serverWaiting
                 ? "Waiting for desktop file"
                 : provider.synced
-                  ? "Saved to disk"
+                  ? serverSaving
+                    ? "Saving…"
+                    : "Saved to disk"
                   : "Connecting";
             if (status !== notifiedStatus) {
               notifiedStatus = status;
@@ -210,7 +213,9 @@ export function useDocument(
           }
         };
         provider.messageHandlers[121] = (_encoder, decoder) => {
-          serverWaiting = readVarString(decoder) === "1";
+          const state = readVarString(decoder);
+          serverWaiting = state === "1";
+          serverSaving = state !== "0";
           updateStatus();
         };
         provider.messageHandlers[123] = (_encoder, decoder) => {

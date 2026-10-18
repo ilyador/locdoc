@@ -435,3 +435,41 @@ async fn recovery_routes_are_owner_only_even_when_the_document_has_a_public_link
     assert_eq!(bundle["filesystemSource"], "Private source");
     server.abort();
 }
+
+#[test]
+fn recovery_archives_exact_projection_preimage_and_rebuild_clears_it() {
+    let (_directory, store, document) = fixture("Safe desktop source\r\n");
+    let room = store.room(&document).unwrap();
+    store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    store.rooms.lock().unwrap().remove(&document.id);
+    drop(room);
+    let before = vec![b'x', 0xf0, 0x9f];
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET write_before_hash=?,write_before=? WHERE id=?",
+            params!["exact-preimage-hash", before, document.id],
+        )
+        .unwrap();
+    let bytes = fs::read(store.root.join("test.md")).unwrap();
+    let bundle = capture(&store, &document, Ok(bytes), None).unwrap();
+    assert_eq!(
+        bundle.write_before_hash.as_deref(),
+        Some("exact-preimage-hash")
+    );
+    assert_eq!(BASE64.decode(bundle.write_before.unwrap()).unwrap(), before);
+    rebuild_document(&store, &document.id, RebuildSource::Disk).unwrap();
+    let cleared: bool = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_before_hash IS NULL AND write_before IS NULL FROM docs WHERE id=?",
+            [&document.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(cleared);
+}

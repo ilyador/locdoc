@@ -31,17 +31,6 @@ pub(super) async fn preview(
     Query(q): Query<PreviewQuery>,
     h: HeaderMap,
 ) -> Result<Json<Value>> {
-    let source = s.doc(&id)?;
-    let owner = s
-        .access(
-            &h,
-            &source,
-            &Access {
-                token: q.token.clone(),
-                ..Access::default()
-            },
-        )?
-        .0;
     if q.url.len() > 8192 {
         return Err(bad("This link is too long."));
     }
@@ -52,52 +41,80 @@ pub(super) async fn preview(
     {
         return Err(bad("Use an HTTP or HTTPS link without credentials."));
     }
-    if !owner {
-        let room = s.room(&source)?;
-        let text = durable_source(&s, &source, &room)?;
-        let referenced = text.contains(&q.url) || pulldown_cmark::Parser::new(&text).any(|event| {
-            matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) if dest_url.as_ref() == q.url)
-        });
-        if !referenced {
-            return Err(denied());
+    let requested = q.url.clone();
+    let access = Access {
+        token: q.token.clone(),
+        ..Access::default()
+    };
+    let headers = h.clone();
+    let owner = doc_job(s.clone(), id.clone(), move |s| {
+        let source = s.doc(&id)?;
+        let owner = s.access(&headers, &source, &access)?.0;
+        if !owner {
+            let room = s.room(&source)?;
+            let text = durable_source(s, &source, &room)?;
+            let referenced = text.contains(&requested) || pulldown_cmark::Parser::new(&text).any(|event| {
+                matches!(event, pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) if dest_url.as_ref() == requested)
+            });
+            if !referenced {
+                return Err(denied());
+            }
         }
-    }
+        Ok(owner)
+    }).await?;
     if url.origin()
         == url::Url::parse(&s.public_url)
             .map_err(|_| bad("Invalid public URL."))?
             .origin()
     {
         let path = url.path();
-        let target = if let Some(id) = path.strip_prefix("/d/") {
-            let target = s.doc(id.trim_end_matches('/'))?;
+        if !path.starts_with("/d/") && !path.starts_with("/s/") {
+            return Ok(Json(
+                json!({"kind":"web","url":url.as_str(),"site":url.host_str(),"title":"Locdoc","description":"Your local Markdown workspace."}),
+            ));
+        }
+        let selected_url = url.clone();
+        let token = q.token.clone();
+        // Resolve first, then acquire target admission. Source admission was
+        // released above, so reciprocal document links cannot deadlock.
+        let (target, token) = job(s.clone(), move |s| {
+            if let Some(id) = selected_url.path().strip_prefix("/d/") {
+                Ok((s.doc(id.trim_end_matches('/'))?, token))
+            } else {
+                let token = selected_url
+                    .path()
+                    .strip_prefix("/s/")
+                    .unwrap()
+                    .trim_end_matches('/');
+                let target = if let Ok(folder) = folders::grant(s, token) {
+                    let selected = selected_url
+                        .query_pairs()
+                        .find(|(key, _)| key == "doc")
+                        .map(|(_, value)| value.into_owned());
+                    folders::document(s, &folder, selected.as_deref())?
+                        .ok_or_else(|| bad("This folder has no documents yet."))?
+                } else {
+                    shared_document(s, token)?
+                };
+                Ok((target, Some(token.to_string())))
+            }
+        })
+        .await?;
+        let (target, text) = doc_job(s.clone(), target.id.clone(), move |s| {
+            let target = s.doc(&target.id)?;
             s.access(
                 &h,
                 &target,
                 &Access {
-                    token: q.token.clone(),
+                    token,
                     ..Access::default()
                 },
             )?;
-            target
-        } else if let Some(token) = path.strip_prefix("/s/") {
-            let token = token.trim_end_matches('/');
-            if let Ok(folder) = folders::grant(&s, token) {
-                let selected = url
-                    .query_pairs()
-                    .find(|(key, _)| key == "doc")
-                    .map(|(_, value)| value.into_owned());
-                folders::document(&s, &folder, selected.as_deref())?
-                    .ok_or_else(|| bad("This folder has no documents yet."))?
-            } else {
-                shared_document(&s, token)?
-            }
-        } else {
-            return Ok(Json(
-                json!({"kind":"web","url":url.as_str(),"site":url.host_str(),"title":"Locdoc","description":"Your local Markdown workspace."}),
-            ));
-        };
-        let room = s.room(&target)?;
-        let text = durable_source(&s, &target, &room)?;
+            let room = s.room(&target)?;
+            let text = durable_source(s, &target, &room)?;
+            Ok((target, text))
+        })
+        .await?;
         let title = text
             .lines()
             .find_map(|line| line.strip_prefix("# "))
@@ -345,6 +362,90 @@ fn metadata(html: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_source_and_target_previews_leave_runtime_and_storage_capacity() {
+        for blocked_target in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(
+                directory.path().join("docs"),
+                directory.path().join("state"),
+                "http://localhost:3477".into(),
+            )
+            .unwrap();
+            fs::write(store.root.join("target.md"), "# Target").unwrap();
+            let target = store.index_document("target.md").unwrap();
+            let url = if blocked_target {
+                format!("http://localhost:3477/d/{}", target.id)
+            } else {
+                "http://localhost:3477/".into()
+            };
+            fs::write(store.root.join("source.md"), format!("[Link]({url})")).unwrap();
+            let source = store.index_document("source.md").unwrap();
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE docs SET permission='view',token='source-preview-share' WHERE id=?",
+                    [&source.id],
+                )
+                .unwrap();
+            let blocked = if blocked_target { &target } else { &source };
+            let room = store.room(blocked).unwrap();
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _guard = room.lock().unwrap();
+                started.send(()).unwrap();
+                // A bound also makes the pre-fix runtime starvation failure
+                // terminate without needing its stalled Tokio timer.
+                let _ = wait.recv_timeout(Duration::from_millis(700));
+            });
+            ready.await.unwrap();
+            let started = Instant::now();
+            let mut requests = Vec::new();
+            for _ in 0..6 {
+                let app = store.clone();
+                let id = source.id.clone();
+                let query = PreviewQuery {
+                    url: url.clone(),
+                    token: Some("source-preview-share".into()),
+                };
+                let mut headers = HeaderMap::new();
+                if blocked_target {
+                    headers.insert(
+                        header::AUTHORIZATION,
+                        format!("Bearer {}", store.key).parse().unwrap(),
+                    );
+                }
+                requests.push(tokio::spawn(async move {
+                    preview(State(app), AxPath(id), Query(query), headers).await
+                }));
+            }
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+            }
+            let independent = tokio::time::timeout(
+                Duration::from_millis(300),
+                doc_job(store.clone(), "unrelated-document".into(), |_| Ok(())),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            let _ = release.send(());
+            holder.join().unwrap();
+            for request in requests {
+                assert!(request.await.unwrap().is_ok());
+            }
+            assert!(
+                matches!(independent, Ok(Ok(()))),
+                "Preview queues must leave storage capacity for other documents"
+            );
+            assert!(
+                elapsed < Duration::from_millis(300),
+                "Preview room locks must not block the network runtime"
+            );
+        }
+    }
     #[test]
     fn a_preview_cannot_read_an_import_that_failed_after_room_admission() {
         let directory = tempfile::tempdir().unwrap();

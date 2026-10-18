@@ -12,7 +12,8 @@ pub(super) struct Owner;
 impl FromRequestParts<App> for Owner {
     type Rejection = ApiError;
     async fn from_request_parts(parts: &mut Parts, state: &App) -> Result<Self> {
-        if state.owner(&parts.headers) {
+        let headers = parts.headers.clone();
+        if super::job(state.clone(), move |state| Ok(state.owner(&headers))).await? {
             Ok(Self)
         } else {
             Err(denied())
@@ -266,7 +267,7 @@ pub(super) fn decode_frame(bytes: &[u8]) -> Result<yrs::sync::Message> {
         1 => {
             let mut payload = Wire(wire.buffer()?);
             let clients = payload.count(3)?;
-            if clients > 16 {
+            if clients > super::peers::AWARENESS_CLIENT_LIMIT {
                 return Err(invalid_frame());
             }
             for _ in 0..clients {
@@ -337,6 +338,32 @@ const RETAINED_WORKSPACE_BYTES: i64 = 10_000 * super::MB as i64;
 const FREE_SPACE_FLOOR: u128 = 128 * super::MB as u128;
 
 impl super::Store {
+    fn reconcile_missing_uploads(&self, tx: &rusqlite::Transaction<'_>) -> Result<()> {
+        let expired = tx
+            .prepare("SELECT path FROM assets WHERE pending_until<=?")?
+            .query_map([super::now()], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for relative in expired {
+            if !std::path::Path::new(&relative).starts_with(".assets") {
+                continue;
+            }
+            let path = match self.safe(&relative, true) {
+                Ok(path) => path,
+                // Preserve reservations when a symlink, unavailable root or
+                // unreadable folder prevents proving that a file is gone.
+                Err(_) => continue,
+            };
+            if std::fs::symlink_metadata(path)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            {
+                tx.execute(
+                    "DELETE FROM assets WHERE path=? AND pending_until<=?",
+                    super::params![relative, super::now()],
+                )?;
+            }
+        }
+        Ok(())
+    }
     pub(super) fn validate_reference_sets(
         &self,
         doc: &super::Document,
@@ -386,6 +413,9 @@ impl super::Store {
         doc: &super::Document,
         path: &std::path::Path,
     ) -> bool {
+        if !self.attachment_allowed(doc, path) {
+            return false;
+        }
         let references = self
             .db
             .lock()
@@ -523,16 +553,28 @@ impl super::Store {
         {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
-            let (retained, total, pending): (i64, i64, i64) = tx.query_row(
+            let totals = || {
+                tx.query_row(
                 "SELECT COALESCE(SUM(CASE WHEN doc=? THEN bytes ELSE 0 END),0),COALESCE(SUM(bytes),0),COALESCE(SUM(CASE WHEN pending_until>? THEN bytes ELSE 0 END),0) FROM assets",
-                super::params![doc.id, super::now()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                super::params![doc.id, super::now()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)))
+            };
+            let (mut retained, mut total, mut pending) = totals()?;
+            let size = i64::try_from(bytes.len()).map_err(|_| bad("Attachment is too large."))?;
+            if retained.saturating_add(size) > RETAINED_DOCUMENT_BYTES
+                || total.saturating_add(size) > RETAINED_WORKSPACE_BYTES
+            {
+                // Only inspect retained files when their budget would block
+                // an upload. Missing expired records no longer charge owners
+                // after manual cleanup; pending writers stay reserved.
+                self.reconcile_missing_uploads(&tx)?;
+                (retained, total, pending) = totals()?;
+            }
             // Pending rows cover concurrent file writers. Conservatively keep
             // this headroom for their ten-minute insertion window, so racing
             // uploads cannot all spend the same last free filesystem bytes.
             if pending < 0 || free < FREE_SPACE_FLOOR + bytes.len() as u128 + pending as u128 {
                 return Err(bad("Not enough free disk space to upload safely."));
             }
-            let size = i64::try_from(bytes.len()).map_err(|_| bad("Attachment is too large."))?;
             if retained < 0 || total < 0 || retained.saturating_add(size) > RETAINED_DOCUMENT_BYTES
             {
                 return Err(bad(
@@ -904,6 +946,8 @@ mod tests {
     #[test]
     fn removed_embeddings_do_not_free_retained_storage_and_global_storage_is_bounded() {
         let (_dir, store, doc) = upload_store();
+        std::fs::create_dir_all(store.root.join(".assets")).unwrap();
+        std::fs::write(store.root.join(".assets/old.png"), b"retained history").unwrap();
         store
             .db
             .lock()
@@ -925,6 +969,96 @@ mod tests {
             )
             .unwrap();
         assert!(store.write_upload(&doc, ".assets/new.png", b"new").is_err());
+    }
+    #[test]
+    fn owner_deleted_uploads_release_document_and_workspace_retained_capacity() {
+        let (_dir, store, doc) = upload_store();
+        for (owner, size) in [
+            (doc.id.as_str(), RETAINED_DOCUMENT_BYTES),
+            ("another-document", RETAINED_WORKSPACE_BYTES),
+        ] {
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO assets(doc,path,bytes,pending_until) VALUES(?,?,?,0)",
+                    super::super::params![owner, ".assets/deleted.png", size],
+                )
+                .unwrap();
+            store
+                .write_upload(&doc, ".assets/recovered.png", b"saved")
+                .unwrap();
+            std::fs::remove_file(store.root.join(".assets/recovered.png")).unwrap();
+            store
+                .db
+                .lock()
+                .unwrap()
+                .execute("UPDATE assets SET pending_until=0", [])
+                .unwrap();
+        }
+        let remaining: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM assets WHERE path='.assets/deleted.png'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+    #[test]
+    fn missing_inflight_uploads_and_symlinks_do_not_release_retained_capacity() {
+        let (_dir, store, doc) = upload_store();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO assets(doc,path,bytes,pending_until) VALUES(?,?,?,?)",
+                super::super::params![
+                    doc.id,
+                    ".assets/missing.png",
+                    RETAINED_DOCUMENT_BYTES,
+                    super::super::now() + 600
+                ],
+            )
+            .unwrap();
+        assert!(store.write_upload(&doc, ".assets/new.png", b"new").is_err());
+        std::fs::create_dir_all(store.root.join(".assets")).unwrap();
+        std::os::unix::fs::symlink("absent.png", store.root.join(".assets/missing.png")).unwrap();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE assets SET pending_until=0", [])
+            .unwrap();
+        assert!(store.write_upload(&doc, ".assets/new.png", b"new").is_err());
+        assert!(!store.root.join(".assets/new.png").exists());
+    }
+    #[test]
+    fn reclaimed_upload_record_does_not_authorize_a_later_file_at_the_same_path() {
+        let (_dir, store, doc) = upload_store();
+        store
+            .write_upload(&doc, ".assets/deleted.png", b"old")
+            .unwrap();
+        let path = store.media_path(&doc, ".assets/deleted.png").unwrap();
+        assert!(store.active_attachment_allowed(&doc, &path));
+        std::fs::remove_file(&path).unwrap();
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE assets SET bytes=?,pending_until=0",
+                [RETAINED_DOCUMENT_BYTES],
+            )
+            .unwrap();
+        store.write_upload(&doc, ".assets/new.png", b"new").unwrap();
+        std::fs::write(&path, b"a different local file").unwrap();
+        assert!(!store.active_attachment_allowed(&doc, &path));
     }
     #[test]
     fn failed_upload_releases_its_reservation_without_deleting_an_existing_file() {
@@ -955,6 +1089,8 @@ mod tests {
     #[test]
     fn concurrent_uploads_cannot_spend_the_same_retained_allowance() {
         let (_dir, store, doc) = upload_store();
+        std::fs::create_dir_all(store.root.join(".assets")).unwrap();
+        std::fs::write(store.root.join(".assets/old.png"), b"retained history").unwrap();
         store
             .db
             .lock()

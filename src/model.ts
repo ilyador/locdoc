@@ -21,6 +21,7 @@ export type Document = {
   modified: number;
   state: string;
   diskPending?: boolean;
+  diskSaving?: boolean;
   lineEndingMigrated?: boolean;
   collaborationEpoch?: string;
   mediaToken?: string | null;

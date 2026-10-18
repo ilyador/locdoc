@@ -494,6 +494,12 @@ fn bootstrap_cannot_expose_a_desktop_import_that_failed_its_sql_commit() {
         .unwrap();
     let payload = document_payload(&store, &headers, &document, &Access::default()).unwrap();
     assert_eq!(payload["content"], "Before and desktop");
+    // A read retries the rejected journal commit, without bypassing the
+    // projection retry cadence. Its status must remain honest until fsync.
+    if room.lock().unwrap().save.needs_projection() {
+        assert_eq!(payload["diskSaving"], true);
+        store.persist(&document, &mut room.lock().unwrap()).unwrap();
+    }
     assert!(!room.lock().unwrap().save.needs_projection());
 }
 

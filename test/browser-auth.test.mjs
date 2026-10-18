@@ -89,6 +89,31 @@ after(async () => {
   if (dir) await rm(dir, { recursive: true, force: true });
 });
 
+test("browser responses prohibit inline and dynamically evaluated scripts", async () => {
+  const { response } = await request("/api/config");
+  const policy = response.headers.get("content-security-policy");
+  assert.ok(policy, "Every browser response needs an enforced CSP");
+  const directives = new Map(
+    policy
+      .split(";")
+      .filter((entry) => entry.trim())
+      .map((entry) => {
+        const [name, ...values] = entry.trim().split(/\s+/);
+        return [name, values];
+      }),
+  );
+  assert.deepEqual(directives.get("script-src"), ["'self'"]);
+  for (const override of ["script-src-elem", "script-src-attr"])
+    if (directives.has(override))
+      assert.deepEqual(
+        directives.get(override),
+        ["'none'"],
+        `${override} must not weaken script-src`,
+      );
+  assert.deepEqual(directives.get("object-src"), ["'none'"]);
+  assert.deepEqual(directives.get("base-uri"), ["'self'"]);
+});
+
 test("local owner sessions survive planted cookies and are never themselves cookies", async () => {
   for (const Host of ["127.0.0.1:3561", "localhost:3561", "[::1]:3561"]) {
     const config = await request("/api/config", { headers: { Host } });

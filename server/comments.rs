@@ -265,14 +265,14 @@ fn anchor_pending() -> ApiError {
 fn anchor_ready(r: &Room, anchor: &Value) -> bool {
     offset(r, &anchor["start"]).is_some() && offset(r, &anchor["end"]).is_some()
 }
-async fn await_anchor(s: App, room: &Arc<Mutex<Room>>, anchor: &Value) -> Result<()> {
+async fn await_anchor(s: App, id: &str, room: &Arc<Mutex<Room>>, anchor: &Value) -> Result<()> {
     // HTTP may overtake its selected WebSocket characters. Subscribe and check
     // atomically, then await committed source updates without occupying a
     // worker or repeatedly competing for a busy room's lock.
     let wait = async {
         let target = room.clone();
         let selected = anchor.clone();
-        let (ready, mut updates) = job(s.clone(), move |_| {
+        let (ready, mut updates) = doc_job(s.clone(), id.to_string(), move |_| {
             let r = target.lock().unwrap();
             Ok((anchor_ready(&r, &selected), r.tx.subscribe()))
         })
@@ -290,7 +290,7 @@ async fn await_anchor(s: App, room: &Arc<Mutex<Room>>, anchor: &Value) -> Result
             }
             let target = room.clone();
             let selected = anchor.clone();
-            if job(s.clone(), move |_| {
+            if doc_job(s.clone(), id.to_string(), move |_| {
                 Ok(anchor_ready(&target.lock().unwrap(), &selected))
             })
             .await?
@@ -756,13 +756,18 @@ pub(super) fn rebuild_metadata(
 
 // Commit source state and its metadata together before attempting Markdown I/O.
 fn commit(s: &Store, d: &Document, r: &mut Room, rows: &[Value]) -> Result<()> {
-    if !r.pending_updates.lock().unwrap().is_empty() {
+    let changed = !r.pending_updates.lock().unwrap().is_empty();
+    if changed {
         r.save.edited();
     }
-    s.commit_room(d, r, rows)
+    s.commit_room(d, r, rows)?;
+    if changed {
+        r.publish_projection();
+    }
+    Ok(())
 }
 fn project(s: &Store, d: &Document, r: &mut Room) {
-    if let Err(error) = s.persist(d, r) {
+    if let Err(error) = s.project(d, r) {
         r.waiting();
         tracing::warn!("comment projection pending: {error}");
     }
@@ -856,7 +861,13 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
     Ok(())
 }
 fn load(s: &Store, d: &Document, r: &mut Room) -> Result<(String, Vec<Thread>, Vec<Value>)> {
-    s.persist(d, r)?;
+    if let Err(error) = s.project(d, r) {
+        r.waiting();
+        tracing::warn!("comment projection pending: {error}");
+        // Imports may have reached the live CRDT before their failed commit.
+        // Only continue from source whose journal/metadata are durable.
+        s.store_room(d, r)?;
+    }
     let mut meta = metadata(s, &d.id)?;
     migrate(s, d, r, &mut meta)?;
     let source = room_text(r);
@@ -873,7 +884,7 @@ pub(super) async fn list(
     Query(a): Query<Access>,
     h: HeaderMap,
 ) -> Result<Json<Value>> {
-    job(s, move |s| {
+    doc_job(s, id.clone(), move |s| {
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
         let guest = guest_id(&h).ok();
@@ -904,7 +915,7 @@ pub(super) async fn add(
     h: HeaderMap,
     Json(b): Json<NewComment>,
 ) -> Result<Json<Value>> {
-    let (id, a, h, b, guest, room) = job(s.clone(), move |s| {
+    let (id, a, h, b, guest, room) = doc_job(s.clone(), id.clone(), move |s| {
         let d = s.doc(&id)?;
         s.access(&h, &d, &a)?;
         if !valid(&b.body, &b.name) {
@@ -927,9 +938,9 @@ pub(super) async fn add(
     })
     .await?;
     if let Some(anchor) = &b.anchor {
-        await_anchor(s.clone(), &room, anchor).await?;
+        await_anchor(s.clone(), &id, &room, anchor).await?;
     }
-    job(s, move |s| {
+    doc_job(s, id.clone(), move |s| {
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
         let mut r = room.lock().unwrap();
@@ -1000,7 +1011,7 @@ pub(super) async fn edit(
     h: HeaderMap,
     Json(b): Json<Edit>,
 ) -> Result<Json<Value>> {
-    job(s, move |s| {
+    doc_job(s, id.clone(), move |s| {
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
         let guest = guest_id(&h)?;
@@ -1167,7 +1178,9 @@ mod tests {
         let target = room.clone();
         let selected = anchor.clone();
         let store = s.clone();
-        let pending = tokio::spawn(async move { await_anchor(store, &target, &selected).await });
+        let target_id = d.id.clone();
+        let pending =
+            tokio::spawn(async move { await_anchor(store, &target_id, &target, &selected).await });
         subscribed(&room).await;
         let (locked, acquired) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
@@ -1206,7 +1219,9 @@ mod tests {
         let target = room.clone();
         let selected = anchor.clone();
         let store = s.clone();
-        let pending = tokio::spawn(async move { await_anchor(store, &target, &selected).await });
+        let target_id = d.id.clone();
+        let pending =
+            tokio::spawn(async move { await_anchor(store, &target_id, &target, &selected).await });
         subscribed(&room).await;
         // This current-thread runtime cannot poll the waiter during the burst,
         // so its bounded receiver must report lag before seeing the commit.
@@ -1225,7 +1240,7 @@ mod tests {
             .unwrap();
         // A commit preceding registration must succeed from the atomic initial
         // check, even though there will never be another update notification.
-        await_anchor(s, &room, &anchor).await.unwrap();
+        await_anchor(s, &d.id, &room, &anchor).await.unwrap();
     }
 
     #[tokio::test]
@@ -1233,7 +1248,7 @@ mod tests {
         let (_directory, s, d, room, anchor, _frame) = causal_fixture();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            await_anchor(s.clone(), &room, &anchor),
+            await_anchor(s.clone(), &d.id, &room, &anchor),
         )
         .await
         .unwrap();

@@ -146,6 +146,8 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         ("disk_state", "BLOB"),
         ("write_intent", "INTEGER NOT NULL DEFAULT 0"),
         ("write_target", "BLOB"),
+        ("write_before_hash", "TEXT"),
+        ("write_before", "BLOB"),
         ("line_ending", "TEXT NOT NULL DEFAULT 'lf'"),
         ("line_ending_migrated", "INTEGER NOT NULL DEFAULT 0"),
         ("browser_generation", "INTEGER NOT NULL DEFAULT 0"),

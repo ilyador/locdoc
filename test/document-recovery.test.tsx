@@ -297,3 +297,22 @@ test("pending checkpoints show saving until the server actually reports a blocke
   await act(async () => serverMessage(session, 127, receipt));
   assert.equal(session.drafts.pending, false);
 });
+
+test("opening accepted text with a pending projection cannot report Saved to disk", async () => {
+  const doc = { ...fixture(false), diskSaving: true };
+  respond(doc);
+  const { result } = renderHook(() => useDocument(doc.id, true, doc));
+  await waitFor(() => assert.ok(result.current.session));
+  const session = result.current.session!;
+  await act(async () => {
+    session.provider.synced = true;
+    session.provider.emit("sync", [true]);
+  });
+  assert.equal(result.current.status, "Saving…");
+  await act(async () => serverMessage(session, 121, "1"));
+  assert.equal(result.current.status, "Waiting for desktop file");
+  await act(async () => serverMessage(session, 121, "2"));
+  assert.equal(result.current.status, "Saving…");
+  await act(async () => serverMessage(session, 121, "0"));
+  assert.equal(result.current.status, "Saved to disk");
+});

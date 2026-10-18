@@ -36,8 +36,35 @@ impl Drop for StateLock {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct Stamp {
+    device: u64,
+    inode: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+impl Stamp {
+    fn metadata(value: fs::Metadata) -> Self {
+        Self {
+            device: value.dev(),
+            inode: value.ino(),
+            bytes: value.len(),
+            modified: (value.mtime(), value.mtime_nsec()),
+            changed: (value.ctime(), value.ctime_nsec()),
+        }
+    }
+    pub(super) fn read(path: &Path) -> Option<Self> {
+        fs::metadata(path).ok().map(Self::metadata)
+    }
+}
+
 pub(super) struct DiskFile(fs::File, libc::c_int);
 impl DiskFile {
+    pub(super) fn stamp(&self) -> Option<Stamp> {
+        self.0.metadata().ok().map(Stamp::metadata)
+    }
+
     pub(super) fn open(path: &Path) -> Result<Option<Self>> {
         Self::leased(path, libc::F_WRLCK)
     }

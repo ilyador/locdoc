@@ -5,6 +5,7 @@ mod documents;
 mod folders;
 mod links;
 mod maintenance;
+mod peers;
 #[cfg(test)]
 mod persistence_adversarial_tests;
 #[cfg(test)]
@@ -17,6 +18,7 @@ mod social;
 mod text;
 mod validation;
 mod web;
+mod work;
 use disk::DiskFile;
 
 use axum::{
@@ -141,6 +143,8 @@ struct StoredRoom {
     baseline: Option<Vec<u8>>,
     intent: bool,
     target: Option<Vec<u8>>,
+    before_hash: Option<String>,
+    before: Option<Vec<u8>>,
     ending: String,
     migrated: bool,
     browser_generation: i64,
@@ -161,8 +165,9 @@ struct Store {
     root_identity: documents::RootIdentity,
     _state_lock: disk::StateLock,
     work: Arc<tokio::sync::Semaphore>,
+    document_jobs: work::Documents,
     uploads: Arc<tokio::sync::Semaphore>,
-    visitors: Arc<tokio::sync::Semaphore>,
+    visitors: Arc<peers::Visitors>,
     data: PathBuf,
     db: Mutex<Connection>,
     rooms: Mutex<HashMap<String, Arc<Mutex<Room>>>>,
@@ -197,6 +202,21 @@ async fn job<T: Send + 'static>(
             "Storage worker stopped. Your draft is kept locally.".into(),
         )
     })?
+}
+
+async fn doc_job<T: Send + 'static>(
+    s: App,
+    id: String,
+    f: impl FnOnce(&Store) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let document = s.document_jobs.acquire(id).await;
+    job(s, move |s| {
+        // The closure owns admission until it actually finishes, including when
+        // the waiting HTTP/socket task has already been cancelled.
+        let _document = document;
+        f(s)
+    })
+    .await
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -248,8 +268,9 @@ impl Store {
             root_identity,
             _state_lock: state_lock,
             work: Arc::new(tokio::sync::Semaphore::new(4)),
+            document_jobs: work::Documents::default(),
             uploads: Arc::new(tokio::sync::Semaphore::new(2)),
-            visitors: Arc::new(tokio::sync::Semaphore::new(64)),
+            visitors: Arc::new(peers::Visitors::default()),
             data,
             db: Mutex::new(db),
             rooms: Mutex::new(HashMap::new()),
@@ -343,14 +364,38 @@ impl Store {
     fn grant_new_references(&self, d: &Document, before: &str, after: &str) -> Result<()> {
         let previous = Self::references(before);
         let current = Self::references(after);
+        self.grant_references(d, current.difference(&previous))
+    }
+    fn grant_desktop_references(
+        &self,
+        d: &Document,
+        baseline: &str,
+        live: &str,
+        after: &str,
+    ) -> Result<()> {
+        let previous = Self::references(baseline);
+        let existing = Self::references(live);
+        let current = Self::references(after);
+        // An unrelated desktop save must not bless an anonymous reference
+        // already present in accepted browser source, even before projection.
+        self.grant_references(
+            d,
+            current
+                .difference(&previous)
+                .filter(|r| !existing.contains(*r)),
+        )
+    }
+    fn grant_references<'a>(
+        &self,
+        d: &Document,
+        references: impl Iterator<Item = &'a String>,
+    ) -> Result<()> {
         let db = self.db.lock().unwrap();
-        for reference in &current {
+        for reference in references {
             db.execute(
                 "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
                 params![d.id, reference],
             )?;
-        }
-        for reference in current.difference(&previous) {
             // Remember explicit owner references even before their file exists.
             // Loading a cached room never upgrades anonymous references to trusted ones.
             db.execute(
@@ -450,12 +495,15 @@ impl Store {
                 "Too many active documents. Try again shortly.".into(),
             ));
         }
-        let StoredRoom { state:saved, baseline, intent:recovering, target, ending:mut line_ending, migrated:mut line_ending_migrated, browser_generation, protected_generation } =
+        let StoredRoom { state:saved, baseline, intent:recovering, target, before_hash, before, ending:mut line_ending, migrated:mut line_ending_migrated, browser_generation, protected_generation } =
             self.db.lock().unwrap().query_row(
-                "SELECT state,disk_state,write_intent,line_ending,line_ending_migrated,browser_generation,protected_generation,write_target FROM docs WHERE id=?",
+                "SELECT state,disk_state,write_intent,line_ending,line_ending_migrated,browser_generation,protected_generation,write_target,write_before_hash,write_before FROM docs WHERE id=?",
                 [&d.id],
-                |r| Ok(StoredRoom { state:r.get(0)?, baseline:r.get(1)?, intent:r.get(2)?, ending:r.get(3)?, migrated:r.get(4)?, browser_generation:r.get(5)?, protected_generation:r.get(6)?, target:r.get(7)? }),
+                |r| Ok(StoredRoom { state:r.get(0)?, baseline:r.get(1)?, intent:r.get(2)?, ending:r.get(3)?, migrated:r.get(4)?, browser_generation:r.get(5)?, protected_generation:r.get(6)?, target:r.get(7)?, before_hash:r.get(8)?, before:r.get(9)? }),
             )?;
+        if before.as_ref().is_some_and(|bytes| bytes.len() > 5 * MB) {
+            return Err(bad("Invalid saved write preimage."));
+        }
         let updates: Vec<Vec<u8>> = {
             let db = self.db.lock().unwrap();
             let mut q = db.prepare("SELECT content FROM doc_updates WHERE doc=? ORDER BY seq")?;
@@ -579,6 +627,8 @@ impl Store {
                 ending: line_ending,
                 migrated: line_ending_migrated,
                 target: write_target,
+                before_hash,
+                before: before.map(Arc::from),
                 generation: browser_generation,
                 protected: protected_generation,
             }),
@@ -680,7 +730,38 @@ impl Store {
         db.execute("DELETE FROM revisions WHERE doc=? AND kind=? AND id NOT IN(SELECT id FROM revisions WHERE doc=? AND kind=? ORDER BY rowid DESC LIMIT ?)",params![d.id, if force { "recovery" } else { "autosave" }, d.id, if force { "recovery" } else { "autosave" }, if force { 20 } else { 50 }])?;
         Ok(())
     }
+    fn project(&self, d: &Document, r: &mut Room) -> Result<bool> {
+        if self
+            .safe(&d.path, false)
+            .ok()
+            .is_some_and(|path| !r.save.observed_file(disk::Stamp::read(&path)))
+        {
+            r.save.desktop_changed();
+        }
+        let large = r
+            .awareness
+            .doc()
+            .get_or_insert_text("content")
+            .len(&r.awareness.doc().transact())
+            >= 128 * 1024;
+        if r.save.projection_delayed(large) {
+            self.store_room(d, r)?;
+            return Ok(!r.save.needs_projection());
+        }
+        self.persist(d, r)
+    }
     fn persist(&self, d: &Document, r: &mut Room) -> Result<bool> {
+        let result = self.persist_now(d, r);
+        let large = r
+            .awareness
+            .doc()
+            .get_or_insert_text("content")
+            .len(&r.awareness.doc().transact())
+            >= 128 * 1024;
+        r.save.projection_result(&result, large);
+        result
+    }
+    fn persist_now(&self, d: &Document, r: &mut Room) -> Result<bool> {
         // A client may have queued an update just before an owner rename.
         let current = self.doc(&d.id)?;
         let d = &current;
@@ -688,7 +769,6 @@ impl Store {
             self.snapshot(d, r.save.source(), false)?;
             r.save.snapshot_at = now();
         }
-        let was_waiting = r.save.waiting();
         let was_synced = !r.save.needs_projection() && r.pending_updates.lock().unwrap().is_empty();
         r.save.request();
         // Accepted updates are durable before examining the filesystem. An
@@ -716,12 +796,18 @@ impl Store {
             r.waiting();
             return Ok(false);
         };
-        let observed = file.read_bytes()?;
+        let observed = file.read_bytes();
+        r.save.observe_file(file.stamp());
+        let observed = observed?;
         let old_projection = text::render(r.save.source(), r.save.ending());
-        let recoverable = r
+        let before = r.save.before().unwrap_or(old_projection.as_bytes());
+        let baseline_intact = r
             .save
-            .target()
-            .is_some_and(|target| text::interrupted(old_projection.as_bytes(), target, &observed));
+            .before_hash()
+            .is_none_or(|expected| hex::encode(Sha256::digest(before)) == expected);
+        let recoverable = r.save.target().is_some_and(|target| {
+            observed == target || (baseline_intact && text::interrupted(before, target, &observed))
+        });
         let raw_disk = match String::from_utf8(observed.clone()) {
             Ok(source) => source,
             Err(_) if recoverable => String::from_utf8_lossy(&observed).into_owned(),
@@ -740,7 +826,9 @@ impl Store {
                 r.save.external_save();
             }
         }
-        r.save.observe_ending(&raw_disk);
+        if !recoverable {
+            r.save.observe_ending(&raw_disk);
+        }
         let disk = text::canonical(&raw_disk);
         if was_synced && disk == r.save.source() {
             // A read of an unchanged, already fsynced document must not create
@@ -759,7 +847,7 @@ impl Store {
                 self.snapshot(d, &room_text(r), true)?;
                 r.save.protect();
             }
-            self.grant_new_references(d, r.save.source(), &disk)?;
+            self.grant_desktop_references(d, r.save.source(), &room_text(r), &disk)?;
             let baseline = Doc::with_options(Options {
                 offset_kind: OffsetKind::Utf16,
                 ..Options::default()
@@ -804,17 +892,30 @@ impl Store {
             r.waiting();
             return Ok(false);
         }
+        let projection = if source != disk {
+            text::projection(
+                r.awareness.doc(),
+                r.save.baseline(),
+                r.save.source(),
+                &source,
+                r.save.ending(),
+            )?
+        } else {
+            raw_disk
+        };
         if source != disk {
             // Intent is its own durable phase. Any error after this transition
             // is retried as an interrupted write, including SQL/fsync errors.
             r.save
-                .prepare_write(text::render(&source, r.save.ending()).into_bytes());
+                .prepare_observed_write(projection.as_bytes().to_vec(), &observed);
             self.store_room(d, r)?;
             if !file.intact() {
                 r.waiting();
                 return Ok(false);
             }
-            file.write(&text::render(&source, r.save.ending()))?;
+            let written = file.write(&projection);
+            r.save.observe_file(file.stamp());
+            written?;
         }
         if !file.is_current(&path) {
             r.save.external_save();
@@ -827,6 +928,7 @@ impl Store {
             .doc()
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
+        r.save.observe_ending(&projection);
         r.save.projected(source, state);
         self.store_room(d, r)?;
         r.save.complete();
@@ -840,9 +942,9 @@ impl Store {
             let _ =
                 r.tx.send(Message::Custom(127, receipt.into_bytes()).encode_v1());
         }
-        if was_waiting {
-            let _ = r.tx.send(Message::Custom(121, b"0".to_vec()).encode_v1());
-        }
+        // All readers, including a new read-only visitor, now observe the same
+        // fsynced projection state. Receipts remain ordered per writing socket.
+        r.publish_projection();
         Ok(true)
     }
     fn store_room(&self, d: &Document, r: &mut Room) -> Result<()> {
@@ -887,12 +989,12 @@ impl Store {
         }
         if r.save.target_changed() {
             tx.execute(
-                "UPDATE docs SET write_target=? WHERE id=?",
-                params![r.save.target(), d.id],
+                "UPDATE docs SET write_target=?,write_before=? WHERE id=?",
+                params![r.save.target(), r.save.before(), d.id],
             )?;
         }
-        tx.execute("UPDATE docs SET write_intent=?,line_ending=?,line_ending_migrated=?,browser_generation=?,protected_generation=? WHERE id=?",
-            params![r.save.interrupted(), r.save.ending(), r.save.migrated(), r.save.generation(), r.save.protected(), d.id])?;
+        tx.execute("UPDATE docs SET write_intent=?,write_before_hash=?,line_ending=?,line_ending_migrated=?,browser_generation=?,protected_generation=? WHERE id=?",
+            params![r.save.interrupted(), r.save.before_hash(), r.save.ending(), r.save.migrated(), r.save.generation(), r.save.protected(), d.id])?;
         for c in rows {
             tx.execute("INSERT INTO comments(id,doc,guest,data) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET guest=excluded.guest,data=excluded.data", params![c["id"].as_str(),d.id,c["guest"].as_str().unwrap_or(""),c.to_string()])?;
         }
@@ -928,12 +1030,23 @@ impl Store {
     }
 }
 impl Room {
+    fn projection_status(&self) -> Vec<u8> {
+        let state = if self.save.waiting() {
+            b"1"
+        } else if self.save.needs_projection() {
+            b"2"
+        } else {
+            b"0"
+        };
+        Message::Custom(121, state.to_vec()).encode_v1()
+    }
+    fn publish_projection(&self) {
+        let _ = self.tx.send(self.projection_status());
+    }
     fn waiting(&mut self) {
         if !self.save.waiting() {
             self.save.block();
-            let _ = self
-                .tx
-                .send(Message::Custom(121, b"1".to_vec()).encode_v1());
+            self.publish_projection();
         }
     }
 }
@@ -1237,7 +1350,7 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
     let (owner, edit) = s.access(h, d, access)?;
     let room = s.room(d)?;
     let mut room = room.lock().unwrap();
-    if let Err(error) = s.persist(d, &mut room) {
+    if let Err(error) = s.project(d, &mut room) {
         room.waiting();
         tracing::warn!("durable document opened with projection pending: {error}");
         // A failed desktop import may have changed the in-memory CRDT. Never
@@ -1257,7 +1370,7 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         None
     };
     Ok(
-        json!({"id":d.id,"path":if owner{d.path.clone()}else{Path::new(&d.path).file_name().unwrap().to_string_lossy().to_string()},"owner":owner,"edit":edit,"permission":if owner{d.permission.as_str()}else if edit{"edit"}else{"view"},"shareUrl":link,"usage":usage,"modified":s.safe(&d.path,false).ok().and_then(|path| fs::metadata(path).ok()).and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|d|d.as_secs()),"content":content,"state":BASE64.encode(state),"diskPending":room.save.waiting(),"lineEndingMigrated":room.save.migrated(),"collaborationEpoch":s.epoch(&d.id)?,"mediaToken":if owner {browser_auth::media_token(s,h,&d.id)} else {None}}),
+        json!({"id":d.id,"path":if owner{d.path.clone()}else{Path::new(&d.path).file_name().unwrap().to_string_lossy().to_string()},"owner":owner,"edit":edit,"permission":if owner{d.permission.as_str()}else if edit{"edit"}else{"view"},"shareUrl":link,"usage":usage,"modified":s.safe(&d.path,false).ok().and_then(|path| fs::metadata(path).ok()).and_then(|m|m.modified().ok()).and_then(|t|t.duration_since(UNIX_EPOCH).ok()).map(|d|d.as_secs()),"content":content,"state":BASE64.encode(state),"diskPending":room.save.waiting(),"diskSaving":room.save.needs_projection(),"lineEndingMigrated":room.save.migrated(),"collaborationEpoch":s.epoch(&d.id)?,"mediaToken":if owner {browser_auth::media_token(s,h,&d.id)} else {None}}),
     )
 }
 async fn document(
@@ -1267,7 +1380,10 @@ async fn document(
     h: HeaderMap,
 ) -> Result<Json<Value>> {
     Ok(Json(
-        job(s, move |s| document_payload(s, &h, &s.doc(&id)?, &a)).await?,
+        doc_job(s, id.clone(), move |s| {
+            document_payload(s, &h, &s.doc(&id)?, &a)
+        })
+        .await?,
     ))
 }
 fn shared_document(s: &Store, token: &str) -> Result<Document> {
@@ -1300,51 +1416,50 @@ async fn open_shared(
     h: HeaderMap,
     Query(selection): Query<folders::Selection>,
 ) -> Result<Response> {
-    job(s, move |s| open_shared_payload(s, token, h, selection)).await
-}
-fn open_shared_payload(
-    s: &Store,
-    token: String,
-    h: HeaderMap,
-    selection: folders::Selection,
-) -> Result<Response> {
-    if let Ok(folder) = folders::grant(s, &token) {
-        let entries = folders::entries(s, &folder)?;
-        let selected = selection
-            .doc
-            .as_deref()
-            .or_else(|| entries.iter().find_map(|entry| entry.id.as_deref()));
-        let document = folders::document(s, &folder, selected)?
-            .map(|doc| {
+    let (document, folder, token) = job(s.clone(), move |s| {
+        if let Ok(folder) = folders::grant(s, &token) {
+            let entries = folders::entries(s, &folder)?;
+            let selected = selection
+                .doc
+                .as_deref()
+                .or_else(|| entries.iter().find_map(|entry| entry.id.as_deref()));
+            let document = folders::document(s, &folder, selected)?;
+            Ok((document, Some((folder.value(s), json!(entries))), token))
+        } else {
+            Ok((Some(shared_document(s, &token)?), None, token))
+        }
+    })
+    .await?;
+    let headers = h.clone();
+    let document = if let Some(document) = document {
+        Some(
+            doc_job(s.clone(), document.id.clone(), move |s| {
                 document_payload(
                     s,
-                    &h,
-                    &doc,
+                    &headers,
+                    &document,
                     &Access {
-                        token: Some(token.clone()),
+                        token: Some(token),
                         ..Access::default()
                     },
                 )
             })
-            .transpose()?;
-        return Ok(configuration_extra(
-            s,
-            &h,
-            json!({"folder":folder.value(s),"entries":entries,"document":document}),
-        ));
-    }
-    let document = shared_document(s, &token)?;
-    let value = document_payload(
-        s,
-        &h,
-        &document,
-        &Access {
-            token: Some(token),
-            client: None,
-            epoch: None,
-        },
-    )?;
-    Ok(configuration(s, &h, Some(value)))
+            .await?,
+        )
+    } else {
+        None
+    };
+    job(s, move |s| {
+        Ok(match folder {
+            Some((folder, entries)) => configuration_extra(
+                s,
+                &h,
+                json!({"folder":folder,"entries":entries,"document":document}),
+            ),
+            None => configuration(s, &h, document),
+        })
+    })
+    .await
 }
 #[derive(Deserialize)]
 struct Share {
@@ -1358,6 +1473,7 @@ async fn share(
     _owner: security::Owner,
     Json(b): Json<Share>,
 ) -> Result<Json<Value>> {
+    doc_job(s, id.clone(), move |s| {
     if !["private", "view", "edit"].contains(&b.permission.as_str()) {
         return Err(bad("Choose private, view, or edit."));
     }
@@ -1375,12 +1491,12 @@ async fn share(
         params![b.permission, t, id],
     )?;
     // Permissions are rechecked on every frame and existing visitors reconnect with the new mode.
-    if let Some(room) = s.rooms.lock().unwrap().get(&id) {
-        let _ = room.lock().unwrap().tx.send(vec![126]);
-    }
+    let room = s.rooms.lock().unwrap().get(&id).cloned();
+    if let Some(room) = room { let _ = room.lock().unwrap().tx.send(vec![126]); }
     Ok(Json(
         json!({"permission":b.permission,"shareUrl":if b.permission=="private"{None}else{t.map(|t| format!("{}/s/{t}",s.public_url))}}),
     ))
+    }).await
 }
 #[derive(Deserialize)]
 struct Rename {
@@ -1392,8 +1508,11 @@ async fn rename(
     _owner: security::Owner,
     Json(b): Json<Rename>,
 ) -> Result<Json<Value>> {
-    s.rename_document(&id, &b.path)?;
-    Ok(Json(json!({"ok":true})))
+    doc_job(s, id.clone(), move |s| {
+        s.rename_document(&id, &b.path)?;
+        Ok(Json(json!({"ok":true})))
+    })
+    .await
 }
 fn guest_id(h: &HeaderMap) -> Result<String> {
     cookie(h, "locdoc_guest")
@@ -1428,7 +1547,7 @@ async fn upload(
         .bytes()
         .await
         .map_err(|_| bad("The file is too large. Images: 5 MB; videos: 20 MB."))?;
-    job(s, move |s| {
+    doc_job(s, id.clone(), move |s| {
         let _permit = permit;
         let current = s.doc(&d.id)?;
         if !s.access(&h, &current, &a)?.1 {
@@ -1486,47 +1605,10 @@ async fn media(
     Query(q): Query<Media>,
     h: HeaderMap,
 ) -> Result<Response> {
-    let d = s.doc(&id)?;
-    let capability = q
-        .token
-        .as_deref()
-        .is_some_and(|token| browser_auth::media_allowed(&s, &d.id, token));
-    let owner = capability
-        || s.access(
-            &h,
-            &d,
-            &Access {
-                token: q.token,
-                ..Access::default()
-            },
-        )?
-        .0;
-    let path = s.media_path(&d, &q.path)?;
-    if !owner || capability {
-        let text = fs::read_to_string(s.safe(&d.path, false)?)?;
-        let allowed = Store::references(&text)
-            .iter()
-            .filter_map(|p| s.media_path(&d, p).ok())
-            .any(|p| p == path);
-        if !allowed || (!capability && !s.active_attachment_allowed(&d, &path)) {
-            return Err(denied());
-        }
-    }
-    use std::io::Read;
+    let authorize = h.clone();
+    let (path, len, mime) =
+        doc_job(s, id.clone(), move |s| media_file(s, &id, &q, &authorize)).await?;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let len = fs::metadata(&path)?.len() as usize;
-    if len == 0 || len > 20 * MB {
-        return Err(bad("Attachment is empty or exceeds the 20 MB maximum."));
-    }
-    let mut prefix = [0; 512];
-    let n = fs::File::open(&path)?.read(&mut prefix)?;
-    let kind = infer::get(&prefix[..n]).ok_or_else(|| bad("Unsupported attachment."))?;
-    if !allowed_mime(kind.mime_type()) {
-        return Err(denied());
-    }
-    if kind.mime_type().starts_with("image/") && len > 5 * MB {
-        return Err(bad("Image exceeds 5 MB."));
-    }
     let mut start = 0;
     let mut end = len - 1;
     let mut partial = false;
@@ -1572,7 +1654,7 @@ async fn media(
     )
         .into_response();
     res.headers_mut()
-        .insert(header::CONTENT_TYPE, kind.mime_type().parse().unwrap());
+        .insert(header::CONTENT_TYPE, mime.parse().unwrap());
     res.headers_mut().insert(
         header::CONTENT_LENGTH,
         (end - start + 1).to_string().parse().unwrap(),
@@ -1589,6 +1671,67 @@ async fn media(
     }
 
     Ok(res)
+}
+fn media_file(
+    s: &Store,
+    id: &str,
+    q: &Media,
+    h: &HeaderMap,
+) -> Result<(PathBuf, usize, &'static str)> {
+    let d = s.doc(id)?;
+    let capability = q
+        .token
+        .as_deref()
+        .is_some_and(|token| browser_auth::media_allowed(s, &d.id, token));
+    let owner = capability
+        || s.access(
+            h,
+            &d,
+            &Access {
+                token: q.token.clone(),
+                ..Access::default()
+            },
+        )?
+        .0;
+    let path = s.media_path(&d, &q.path)?;
+    if !owner || capability {
+        // Never open the Markdown file here: even a read would break our
+        // projection lease. Room source is committed before its lock is freed.
+        let existing = s.rooms.lock().unwrap().get(&d.id).cloned();
+        let room = match existing {
+            Some(room) => room,
+            None => s.room(&d)?,
+        };
+        let mut room = room.lock().unwrap();
+        let Room {
+            awareness,
+            validation,
+            ..
+        } = &mut *room;
+        let allowed = validation
+            .references(awareness.doc())?
+            .iter()
+            .filter_map(|p| s.media_path(&d, p).ok())
+            .any(|p| p == path);
+        if !allowed || (!capability && !s.active_attachment_allowed(&d, &path)) {
+            return Err(denied());
+        }
+    }
+    use std::io::Read;
+    let len = fs::metadata(&path)?.len() as usize;
+    if len == 0 || len > 20 * MB {
+        return Err(bad("Attachment is empty or exceeds the 20 MB maximum."));
+    }
+    let mut prefix = [0; 512];
+    let n = fs::File::open(&path)?.read(&mut prefix)?;
+    let kind = infer::get(&prefix[..n]).ok_or_else(|| bad("Unsupported attachment."))?;
+    if !allowed_mime(kind.mime_type()) {
+        return Err(denied());
+    }
+    if kind.mime_type().starts_with("image/") && len > 5 * MB {
+        return Err(bad("Image exceeds 5 MB."));
+    }
+    Ok((path, len, kind.mime_type()))
 }
 async fn font_list(State(s): State<App>) -> Result<Json<Value>> {
     let db = s.db.lock().unwrap();
@@ -1703,6 +1846,7 @@ async fn websocket(
     State(s): State<App>,
     AxPath(id): AxPath<String>,
     Query(a): Query<Access>,
+    axum::extract::ConnectInfo(remote): axum::extract::ConnectInfo<std::net::SocketAddr>,
     h: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
@@ -1711,15 +1855,10 @@ async fn websocket(
     let visitor = if owner {
         None
     } else {
-        Some(s.visitors.clone().try_acquire_owned().map_err(|_| {
-            ApiError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "All visitor connections are busy. Try again shortly.".into(),
-            )
-        })?)
+        Some(s.visitors.enter(peers::address(&h, remote.ip()))?)
     };
     let target = d.clone();
-    let r = job(s.clone(), move |s| s.room(&target)).await?;
+    let r = doc_job(s.clone(), d.id.clone(), move |s| s.room(&target)).await?;
     let protocols = browser_auth::websocket_protocol(&h)
         .into_iter()
         .collect::<Vec<_>>();
@@ -1730,6 +1869,25 @@ async fn websocket(
             let _visitor = visitor;
             socket_loop(socket, s, d.id, r, h, a).await
         }))
+}
+async fn socket_access(s: App, id: String, headers: HeaderMap, access: Access) -> Result<()> {
+    // Authorization also touches SQLite. Keep it off network workers while
+    // checking permission before each passive broadcast and heartbeat.
+    job(s, move |s| {
+        s.doc(&id).and_then(|d| s.access(&headers, &d, &access))?;
+        Ok(())
+    })
+    .await
+}
+async fn send_socket(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
+    frame: WsMessage,
+) -> bool {
+    // A peer which never reads must not keep a visitor slot by blocking the
+    // heartbeat in a full TCP send buffer. Slow clients retain their draft.
+    tokio::time::timeout(peers::PING_INTERVAL * 2, sender.send(frame))
+        .await
+        .is_ok_and(|result| result.is_ok())
 }
 async fn close_socket(
     sender: &mut futures_util::stream::SplitSink<WebSocket, WsMessage>,
@@ -1759,60 +1917,74 @@ async fn socket_loop(
     a: Access,
 ) {
     let (mut sender, mut receiver) = socket.split();
-    if (h.contains_key(header::ORIGIN) && a.client.as_deref() != Some("plain-text-v2"))
-        || s.epoch(&id)
-            .is_ok_and(|epoch| a.epoch.as_deref().unwrap_or("") != epoch)
+    let document_id = id.clone();
+    let access_epoch = a.epoch.clone();
+    let outdated = job(s.clone(), move |s| {
+        Ok(s.epoch(&document_id)
+            .is_ok_and(|epoch| access_epoch.as_deref().unwrap_or("") != epoch))
+    })
+    .await
+    .unwrap_or(true);
+    if (h.contains_key(header::ORIGIN) && a.client.as_deref() != Some("plain-text-v2")) || outdated
     {
         // Old editors cannot safely interpret the new source records. Their
         // existing error handler stops reconnecting and preserves local drafts.
-        let _ = sender.send(WsMessage::Binary(Message::Custom(125,
+        let _ = send_socket(&mut sender, WsMessage::Binary(Message::Custom(125,
             b"Locdoc was updated. Reload to continue. Your unsaved browser draft is kept here.".to_vec()
         ).encode_v1().into())).await;
         close_socket(&mut sender, &mut receiver).await;
         return;
     }
-    let mut rx = room.lock().unwrap().tx.subscribe();
     let mut peer = Peer::default();
-    if s.doc(&id).and_then(|d| s.access(&h, &d, &a)).is_err() {
-        return;
-    }
-    let initial = {
-        let r = room.lock().unwrap();
-        let mut v = vec![
-            Message::Custom(121, if r.save.waiting() { b"1" } else { b"0" }.to_vec()).encode_v1(),
+    let target = room.clone();
+    let document_id = id.clone();
+    let headers = h.clone();
+    let access = a.clone();
+    let initial = doc_job(s.clone(), id.clone(), move |s| {
+        s.doc(&document_id)
+            .and_then(|d| s.access(&headers, &d, &access))?;
+        let r = target.lock().unwrap();
+        let rx = r.tx.subscribe();
+        let mut frames = vec![
+            r.projection_status(),
             Message::Sync(SyncMessage::SyncStep1(
                 r.awareness.doc().transact().state_vector(),
             ))
             .encode_v1(),
         ];
         if let Ok(u) = r.awareness.update() {
-            v.push(Message::Awareness(u).encode_v1());
+            frames.push(Message::Awareness(u).encode_v1());
         }
-        v
+        Ok((rx, frames))
+    })
+    .await;
+    let Ok((mut rx, initial)) = initial else {
+        return;
     };
     for data in initial {
-        if sender.send(WsMessage::Binary(data.into())).await.is_err() {
+        if !send_socket(&mut sender, WsMessage::Binary(data.into())).await {
             return;
         }
     }
-    let mut pulse = tokio::time::interval(std::time::Duration::from_secs(20));
+    let mut pulse = tokio::time::interval(peers::PING_INTERVAL);
+    pulse.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut heartbeat = peers::Heartbeat::default();
     let mut frames = 0u32;
-    loop {
+    'connection: loop {
         tokio::select! {
             incoming = receiver.next() => match incoming {
                 Some(Ok(WsMessage::Binary(bytes))) => {
                     frames += 1;
                     if frames > 1500 { break; }
-                    let Ok(d) = s.doc(&id) else { break; };
-                    if s.access(&h, &d, &a).is_err() { break; }
+                    let document_id = id.clone();
                     let mut state = std::mem::take(&mut peer);
                     let target = room.clone();
                     let headers = h.clone();
                     let access = a.clone();
-                    let outcome = job(s.clone(), move |s| {
+                    let outcome = doc_job(s.clone(), id.clone(), move |s| {
                         // Authorization belongs after the work queue as well:
                         // a link may have been revoked while this job waited.
-                        let result = s.doc(&d.id).and_then(|current| {
+                        let result = s.doc(&document_id).and_then(|current| {
                             let (owner, edit) = s.access(&headers, &current, &access)?;
                             process_frame(s, &current, &target, &bytes, edit, owner, &mut state)
                         });
@@ -1822,16 +1994,17 @@ async fn socket_loop(
                     match result {
                         Ok(responses) => {
                             for frame in responses {
-                                if sender.send(WsMessage::Binary(frame.into())).await.is_err() { break; }
+                                if !send_socket(&mut sender, WsMessage::Binary(frame.into())).await { break 'connection; }
                             }
                         }
                         Err(e) => {
                             tracing::warn!("sync rejected: {}", e.1);
-                            let _ = sender.send(WsMessage::Binary(Message::Custom(if e.0.is_server_error() {120} else {125}, e.1.into_bytes()).encode_v1().into())).await;
+                            let _ = send_socket(&mut sender, WsMessage::Binary(Message::Custom(if e.0.is_server_error() {120} else {125}, e.1.into_bytes()).encode_v1().into())).await;
                             break;
                         }
                     }
                 }
+                Some(Ok(WsMessage::Pong(bytes))) => heartbeat.pong(&bytes),
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
             },
@@ -1841,28 +2014,32 @@ async fn socket_loop(
                     // Directory replacement can invalidate a folder capability
                     // without a settings request. Passive visitors must not
                     // receive another user's edits until the next heartbeat.
-                    if s.doc(&id).and_then(|d| s.access(&h, &d, &a)).is_err() { break; }
-                    if sender.send(WsMessage::Binary(data.into())).await.is_err() { break; }
+                    if socket_access(s.clone(), id.clone(), h.clone(), a.clone()).await.is_err() { break; }
+                    let Some(data) = peer.presence.outgoing(data) else { continue; };
+                    if !send_socket(&mut sender, WsMessage::Binary(data.into())).await { break; }
                 }
                 Err(_) => break,
             },
             _ = pulse.tick() => {
                 frames = 0;
-                if s.doc(&id).and_then(|d| s.access(&h, &d, &a)).is_err() { break; }
-                if sender.send(WsMessage::Ping(vec![].into())).await.is_err() { break; }
+                if socket_access(s.clone(), id.clone(), h.clone(), a.clone()).await.is_err() { break; }
+                let Some(nonce) = heartbeat.ping() else { break; };
+                if !send_socket(&mut sender, WsMessage::Ping(nonce.to_vec().into())).await { break; }
             }
         }
     }
-    {
+    let _ = doc_job(s.clone(), id, move |_| {
         let mut r = room.lock().unwrap();
         r.save.receipts.remove(&peer.id);
-        for client in &peer.clients {
-            r.awareness.remove_state(*client);
+        if let Some(client) = peer.presence.client() {
+            r.awareness.remove_state(client);
+            if let Ok(update) = r.awareness.update_with_clients([client]) {
+                let _ = r.tx.send(Message::Awareness(update).encode_v1());
+            }
         }
-        if let Ok(update) = r.awareness.update_with_clients(peer.clients) {
-            let _ = r.tx.send(Message::Awareness(update).encode_v1());
-        }
-    }
+        Ok(())
+    })
+    .await;
     close_socket(&mut sender, &mut receiver).await;
 }
 fn valid_presence(json: &str) -> bool {
@@ -1921,7 +2098,7 @@ fn valid_presence(json: &str) -> bool {
 }
 struct Peer {
     id: uuid::Uuid,
-    clients: HashSet<yrs::ClientID>,
+    presence: peers::Presence,
     media_paths: HashSet<PathBuf>,
     awaiting_sync: bool,
     held_receipt: Option<String>,
@@ -1930,7 +2107,7 @@ impl Default for Peer {
     fn default() -> Self {
         Self {
             id: uuid::Uuid::new_v4(),
-            clients: HashSet::new(),
+            presence: peers::Presence::default(),
             media_paths: HashSet::new(),
             awaiting_sync: false,
             held_receipt: None,
@@ -1946,7 +2123,7 @@ fn process_frame(
     owner: bool,
     peer: &mut Peer,
 ) -> Result<Vec<Vec<u8>>> {
-    let message = security::decode_frame(bytes)?;
+    let mut message = security::decode_frame(bytes)?;
     let mutation = matches!(
         &message,
         Message::Sync(SyncMessage::SyncStep2(_) | SyncMessage::Update(_))
@@ -1954,28 +2131,25 @@ fn process_frame(
     if mutation && !edit {
         return Ok(vec![]);
     }
-    let clients = &mut peer.clients;
-    if let Message::Awareness(ref update) = message {
-        if update.clients.len() > 16
-            || clients
-                .iter()
-                .copied()
-                .chain(update.clients.keys().copied())
-                .collect::<HashSet<_>>()
-                .len()
-                > 16
+    if let Message::Awareness(ref update) = message
+        && (update.clients.len() > peers::AWARENESS_CLIENT_LIMIT
             || update
                 .clients
                 .values()
-                .any(|u| u.json.len() > 2048 || !valid_presence(&u.json))
-        {
-            return Err(bad("Too many or invalid presence updates."));
-        }
-        for client in update.clients.keys() {
-            clients.insert(*client);
-        }
+                .any(|u| u.json.len() > 2048 || !valid_presence(&u.json)))
+    {
+        return Err(bad("Too many or invalid presence updates."));
     }
     let mut r = room.lock().unwrap();
+    let presence = if let Message::Awareness(ref mut update) = message {
+        peer.presence.accept(update, &r.awareness)?;
+        if update.clients.is_empty() {
+            return Ok(vec![]);
+        }
+        Some(message.encode_v1())
+    } else {
+        None
+    };
     // A previous SQLite failure may have left accepted deltas queued in the
     // authoritative room. No bootstrap, receipt or sync response may expose
     // them until its durable outbox has committed successfully.
@@ -2052,6 +2226,8 @@ fn process_frame(
             return Err(error);
         }
     }
+    let was_projected = !r.save.needs_projection();
+    let mut receipt_response = None;
     let before_updates = r.pending_updates.lock().unwrap().len();
     let response = match DefaultProtocol.handle_message(&mut r.awareness, message) {
         Ok(response) => response,
@@ -2066,21 +2242,31 @@ fn process_frame(
         }
 
         r.pending_media.extend(approved_media);
-        r.save.request();
         s.store_room(d, &mut r)?;
+        if was_projected && r.save.needs_projection() {
+            r.publish_projection();
+        }
         if peer.awaiting_sync {
             peer.awaiting_sync = false;
             if let Some(receipt) = peer.held_receipt.take() {
-                r.save.receipts.insert(peer.id, receipt);
+                if r.save.needs_projection() {
+                    r.save.receipts.insert(peer.id, receipt);
+                } else {
+                    receipt_response = Some(Message::Custom(127, receipt.into_bytes()).encode_v1());
+                }
             }
         }
         // Projection is coalesced by the coordinator. Broadcast immediately
         // after SQLite durability; save receipts wait for its next fsynced pass.
     }
-    if !mutation && bytes.first() == Some(&1) {
-        let _ = r.tx.send(bytes.to_vec());
+    if let Some(presence) = presence {
+        let _ = r.tx.send(presence);
     }
-    let responses = response.map(|r| vec![r.encode_v1()]).unwrap_or_default();
+    let mut responses = response
+        .and_then(|response| peer.presence.outgoing(response.encode_v1()))
+        .map(|frame| vec![frame])
+        .unwrap_or_default();
+    responses.extend(receipt_response);
     Ok(responses)
 }
 fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
@@ -2124,8 +2310,9 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                         r.save.request();
                     }
                     if r.save.needs_projection()
+                        && r.save.projection_due()
                         && let Ok(d) = s.doc(&id)
-                        && let Err(error) = s.persist(&d, &mut r)
+                        && let Err(error) = s.project(&d, &mut r)
                     {
                         r.waiting();
                         tracing::warn!("pending disk save failed: {error}");
@@ -2161,6 +2348,7 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                 notify::EventKind::Access(notify::event::AccessKind::Close(
                     notify::event::AccessMode::Write
                 )) | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
             ) {
                 continue;
             }
@@ -2172,13 +2360,12 @@ fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                     let room = s.rooms.lock().unwrap().get(&d.id).cloned();
                     if let Some(room) = room {
                         let mut r = room.lock().unwrap();
-                        if !r.save.needs_projection()
-                            && fs::read_to_string(&p).is_ok_and(|source| {
-                                text::canonical(&source) != r.save.source()
-                                    || text::ending(&source, r.save.ending()) != r.save.ending()
-                            })
-                        {
-                            r.save.request();
+                        // Close-write also fires when our writable descriptor
+                        // closes after a read/validation error. Compare the exact
+                        // metadata observed under our lease, without reopening
+                        // the note and accidentally cancelling retry backoff.
+                        if !r.save.observed_file(disk::Stamp::read(&p)) {
+                            r.save.desktop_changed();
                         }
                     }
                 }
@@ -2223,7 +2410,7 @@ async fn restore(
     AxPath((id, revision)): AxPath<(String, String)>,
     _owner: security::Owner,
 ) -> Result<Json<Value>> {
-    job(s, move |s| restore_document(s, id, revision))
+    doc_job(s, id.clone(), move |s| restore_document(s, id, revision))
         .await
         .map(Json)
 }
@@ -2305,18 +2492,8 @@ async fn guard(
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|p| p.0.ip());
-        let forwarded = if peer.is_some_and(|p| p.is_loopback()) {
-            req.headers()
-                .get("x-forwarded-for")
-                .and_then(|x| x.to_str().ok())
-                .and_then(|s| s.rsplit(',').next())
-                .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
-        } else {
-            None
-        };
-        let ip = forwarded
-            .or(peer)
-            .map(|p| p.to_string())
+        let ip = peer
+            .map(|peer| peers::address(req.headers(), peer).to_string())
             .unwrap_or_else(|| "local".into());
         let (method, limit) = if path == "/api/login" || path == "/api/redeem" {
             ("login", 15)
@@ -2331,12 +2508,16 @@ async fn guard(
         } else {
             ("api", 600)
         };
+        let headers = req.headers().clone();
+        let owner = match job(s.clone(), move |s| Ok(s.owner(&headers))).await {
+            Ok(owner) => owner,
+            Err(error) => return error.into_response(),
+        };
         let mut rates = s.rates.lock().unwrap();
         let time = now();
         if rates.len() > 10_000 {
             rates.retain(|_, v| time - v.0 < 60);
         }
-        let owner = s.owner(req.headers());
         let bucket = if owner {
             format!("owner:{method}")
         } else {
@@ -2820,6 +3001,125 @@ mod tests {
         s.grant_new_references(&d, "", "![approved](intentional.png)")
             .unwrap();
         assert!(s.attachment_allowed(&d, &s.media_path(&d, "intentional.png").unwrap()));
+    }
+    #[test]
+    fn desktop_import_only_activates_references_introduced_by_that_change() {
+        let (_dir, s) = store();
+        fs::write(s.root.join("trust.md"), "Hello").unwrap();
+        let d = s.index_document("trust.md").unwrap();
+        let room = s.room(&d).unwrap();
+        let planted = "\n![planted](future.png";
+        process_frame(
+            &s,
+            &d,
+            &room,
+            &peer_update(&room, planted),
+            true,
+            false,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        // Finishing guest markup in the browser does not publish the image.
+        process_frame(
+            &s,
+            &d,
+            &room,
+            &peer_update(&room, ")"),
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        fs::write(s.root.join("future.png"), b"private").unwrap();
+        let untrusted = s.media_path(&d, "future.png").unwrap();
+        // A desktop save while browser projection is pending must not bless
+        // a reference already present in accepted source.
+        fs::write(
+            s.root.join("trust.md"),
+            "Hello\n![planted](future.png)\nDesktop sentence.",
+        )
+        .unwrap();
+        s.persist(&d, &mut room.lock().unwrap()).unwrap();
+        assert!(!s.active_attachment_allowed(&d, &untrusted));
+        assert!(!s.attachment_allowed(&d, &untrusted));
+        fs::write(
+            s.root.join("trust.md"),
+            format!(
+                "{}\nAnother sentence.",
+                fs::read_to_string(s.root.join("trust.md")).unwrap()
+            ),
+        )
+        .unwrap();
+        s.persist(&d, &mut room.lock().unwrap()).unwrap();
+        assert!(!s.active_attachment_allowed(&d, &untrusted));
+        fs::write(s.root.join("intentional.png"), b"public").unwrap();
+        fs::write(
+            s.root.join("trust.md"),
+            format!(
+                "{}\n![added locally](intentional.png)",
+                fs::read_to_string(s.root.join("trust.md")).unwrap()
+            ),
+        )
+        .unwrap();
+        s.persist(&d, &mut room.lock().unwrap()).unwrap();
+        assert!(s.active_attachment_allowed(&d, &s.media_path(&d, "intentional.png").unwrap()));
+    }
+    #[test]
+    fn guest_media_uses_committed_room_source_without_breaking_its_projection_lease() {
+        let (_dir, s) = store();
+        fs::write(s.root.join("media.md"), "Hello").unwrap();
+        let d = s.index_document("media.md").unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='edit',token='media-share' WHERE id=?",
+                [&d.id],
+            )
+            .unwrap();
+        let d = s.doc(&d.id).unwrap();
+        let room = s.room(&d).unwrap();
+        let image = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+        s.write_upload(&d, ".assets/media.png", &image).unwrap();
+        process_frame(
+            &s,
+            &d,
+            &room,
+            &peer_update(&room, "\n![new](.assets/media.png)"),
+            true,
+            false,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(s.root.join("media.md")).unwrap(),
+            "Hello"
+        );
+        let lease = DiskFile::open(&s.root.join("media.md")).unwrap().unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = s.clone();
+        let id = d.id.clone();
+        let request = std::thread::spawn(move || {
+            let result = media_file(
+                &worker,
+                &id,
+                &Media {
+                    path: ".assets/media.png".into(),
+                    token: Some("media-share".into()),
+                },
+                &HeaderMap::new(),
+            );
+            send.send(result.map(|(_, size, mime)| (size, mime)))
+                .unwrap();
+        });
+        let response = receive.recv_timeout(std::time::Duration::from_secs(1));
+        let intact = lease.intact();
+        drop(lease);
+        request.join().unwrap();
+        assert!(
+            intact,
+            "Image requests must not interrupt the note's write lease"
+        );
+        assert_eq!(response.unwrap().unwrap(), (image.len(), "image/png"));
     }
     #[test]
     fn concurrent_unicode_edits_merge_against_the_disk_baseline() {

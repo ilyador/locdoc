@@ -71,6 +71,195 @@ fn crlf_files_have_canonical_positions_and_preserve_disk_endings() {
     );
 }
 #[test]
+fn mixed_line_endings_follow_existing_newlines_through_browser_edits_and_restart() {
+    let (dir, s) = fixture();
+    let path = s.root.join("mixed.md");
+    fs::write(&path, "😀 A\r\nB\nC\rD\r\n").unwrap();
+    let d = s.index_document("mixed.md").unwrap();
+    let r = s.room(&d).unwrap();
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    apply(&s, &d, &r, 5, 0, "Inserted\n");
+    apply(&s, &d, &r, 0, 0, "Prefix ");
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "Prefix 😀 A\r\nInserted\r\nB\nC\rD\r\n"
+    );
+    // Delete one newline and insert another elsewhere. Existing LF and CR
+    // separators must stay with their CRDT characters, rather than line numbers.
+    apply(&s, &d, &r, 20, 1, "");
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    let before_restart = fs::read_to_string(&path).unwrap();
+    drop(r);
+    drop(s);
+    let s = Store::open(
+        dir.path().join("docs"),
+        dir.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    let r = s.room(&d).unwrap();
+    apply(&s, &d, &r, 0, 0, "Next ");
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("Next {before_restart}")
+    );
+    fs::write(&path, "Desktop\nSecond\r\nThird\r").unwrap();
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    apply(&s, &d, &r, 0, 0, "Web ");
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "Web Desktop\nSecond\r\nThird\r"
+    );
+}
+#[test]
+fn first_mixed_ending_projection_recovers_its_exact_prewrite_bytes_after_a_crash() {
+    let (dir, s) = fixture();
+    let path = s.root.join("mixed-crash.md");
+    let original = "First\r\nSecond\nThird\r";
+    fs::write(&path, original).unwrap();
+    let d = s.index_document("mixed-crash.md").unwrap();
+    let r = s.room(&d).unwrap();
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    apply(&s, &d, &r, 0, 5, "Changed");
+    {
+        let mut room = r.lock().unwrap();
+        let target = text::projection(
+            room.awareness.doc(),
+            room.save.baseline(),
+            room.save.source(),
+            &room_text(&room),
+            room.save.ending(),
+        )
+        .unwrap();
+        room.save
+            .prepare_observed_write(target.into_bytes(), original.as_bytes());
+        s.store_room(&d, &mut room).unwrap();
+        let (digest, preimage): (String, Option<Vec<u8>>) =
+            s.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT write_before_hash,write_before FROM docs WHERE id=?",
+                    [&d.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+        assert_eq!(digest, hex::encode(Sha256::digest(original.as_bytes())));
+        assert!(
+            preimage.is_none(),
+            "ordinary writes must not store another full file copy"
+        );
+    }
+    let mut torn = original.as_bytes().to_vec();
+    torn[..3].copy_from_slice(b"Cha");
+    fs::write(&path, &torn).unwrap();
+    drop(r);
+    drop(s);
+    let s = Store::open(
+        dir.path().join("docs"),
+        dir.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    s.recover_pending().unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "Changed\r\nSecond\nThird\r"
+    );
+    let room = s.room(&d).unwrap();
+    assert_eq!(room_text(&room.lock().unwrap()), "Changed\nSecond\nThird\n");
+    assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+}
+#[test]
+fn repeated_crashes_preserve_exact_torn_preimages_when_new_edits_retarget_the_write() {
+    let (dir, s) = fixture();
+    let path = s.root.join("repeated-crash.md");
+    let original = "Original\r\nSecond\nThird\r";
+    fs::write(&path, original).unwrap();
+    let d = s.index_document("repeated-crash.md").unwrap();
+    let r = s.room(&d).unwrap();
+    s.persist(&d, &mut r.lock().unwrap()).unwrap();
+    apply(&s, &d, &r, 0, 8, "😀 First attempt");
+    {
+        let mut room = r.lock().unwrap();
+        let target = text::projection(
+            room.awareness.doc(),
+            room.save.baseline(),
+            room.save.source(),
+            &room_text(&room),
+            room.save.ending(),
+        )
+        .unwrap();
+        room.save
+            .prepare_observed_write(target.into_bytes(), original.as_bytes());
+        s.store_room(&d, &mut room).unwrap();
+    }
+    let mut first_torn = original.as_bytes().to_vec();
+    first_torn[..2].copy_from_slice(&"😀".as_bytes()[..2]);
+    fs::write(&path, &first_torn).unwrap();
+    drop(r);
+    drop(s);
+    let s = Store::open(
+        dir.path().join("docs"),
+        dir.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    let r = s.room(&d).unwrap();
+    apply(&s, &d, &r, 0, 0, "Newest ");
+    let expected;
+    {
+        let mut room = r.lock().unwrap();
+        expected = text::projection(
+            room.awareness.doc(),
+            room.save.baseline(),
+            room.save.source(),
+            &room_text(&room),
+            room.save.ending(),
+        )
+        .unwrap();
+        room.save
+            .prepare_observed_write(expected.as_bytes().to_vec(), &first_torn);
+        s.store_room(&d, &mut room).unwrap();
+        assert_eq!(room.save.before(), Some(first_torn.as_slice()));
+    }
+    let mut second_torn = first_torn;
+    second_torn[0] = expected.as_bytes()[0];
+    fs::write(&path, &second_torn).unwrap();
+    assert!(
+        String::from_utf8(second_torn).is_err(),
+        "fixture must include an interrupted UTF-8 scalar"
+    );
+    drop(r);
+    drop(s);
+    let s = Store::open(
+        dir.path().join("docs"),
+        dir.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    s.recover_pending().unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+    let room = s.room(&d).unwrap();
+    assert_eq!(room_text(&room.lock().unwrap()), text::canonical(&expected));
+    let retained: bool = s
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_before IS NOT NULL OR write_before_hash IS NOT NULL FROM docs WHERE id=?",
+            [&d.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        !retained,
+        "successful projection must release the exceptional preimage"
+    );
+}
+#[test]
 fn accepted_delta_replays_on_startup_without_a_browser_open() {
     let (dir, s) = fixture();
     let path = s.root.join("pending.md");
