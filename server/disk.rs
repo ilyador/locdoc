@@ -114,6 +114,10 @@ impl DiskFile {
         let file = match fs::OpenOptions::new()
             .read(true)
             .write(lease == libc::F_WRLCK)
+            // Opening a file can itself wait for another lease to break (45 s
+            // on a typical Linux installation), before F_SETLEASE runs. Let
+            // the coordinator retry instead of stalling every document.
+            .custom_flags(libc::O_NONBLOCK)
             .open(path)
         {
             Ok(file) => file,
@@ -235,6 +239,58 @@ mod tests {
         assert!(StateLock::acquire(dir.path()).is_err());
         drop(first);
         assert!(StateLock::acquire(dir.path()).is_ok());
+    }
+    #[test]
+    fn conflicting_leases_return_promptly_and_retry_after_release() {
+        use std::time::Duration;
+        for (held_write, requested_write) in [(false, true), (true, false), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("busy.md");
+            fs::write(&path, "Unchanged synthetic document").unwrap();
+            let inode = fs::metadata(&path).unwrap().ino();
+            let held = if held_write {
+                DiskFile::open(&path)
+            } else {
+                DiskFile::open_read(&path)
+            }
+            .unwrap()
+            .unwrap();
+            let (done, result) = std::sync::mpsc::channel();
+            let target = path.clone();
+            let worker = std::thread::spawn(move || {
+                let result = if requested_write {
+                    DiskFile::open(&target)
+                } else {
+                    DiskFile::open_read(&target)
+                };
+                done.send(result.unwrap().is_none()).unwrap();
+            });
+            let promptly_unavailable = result.recv_timeout(Duration::from_millis(500));
+            // Release before asserting so the old blocking implementation
+            // fails quickly without leaving a thread stuck on the kernel lease.
+            drop(held);
+            worker.join().unwrap();
+            assert!(
+                promptly_unavailable.unwrap_or(false),
+                "A conflicting lease must return unavailable without waiting for its kernel timeout"
+            );
+            let retry = if requested_write {
+                DiskFile::open(&path)
+            } else {
+                DiskFile::open_read(&path)
+            }
+            .unwrap();
+            assert!(
+                retry.is_some(),
+                "The same inode must become available after release"
+            );
+            drop(retry);
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "Unchanged synthetic document"
+            );
+        }
     }
     #[test]
     fn a_desktop_opener_waiting_for_our_lease_keeps_the_same_inode() {

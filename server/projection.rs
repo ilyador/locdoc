@@ -292,6 +292,50 @@ mod tests {
     }
 
     #[test]
+    fn a_conflicting_file_lease_cannot_stall_other_documents_projection() {
+        use std::time::Duration;
+        let (_directory, store, busy, ready) = fixture();
+        for document in [&busy, &ready] {
+            let room = store.room(document).unwrap();
+            let mut room = room.lock().unwrap();
+            let source = room_text(&room);
+            apply_text(room.awareness.doc(), &source, "Accepted browser edit\n");
+            room.engine.edited();
+            store.store_room(document, &mut room).unwrap();
+        }
+        let busy_path = store.root.join(&busy.path);
+        let before = fs::read_to_string(&busy_path).unwrap();
+        let held = DiskFile::open_read(&busy_path).unwrap().unwrap();
+        std::thread::sleep(Duration::from_millis(110));
+        let (done, result) = std::sync::mpsc::channel();
+        let worker = store.clone();
+        let thread = std::thread::spawn(move || {
+            Coordinator::default().sweep(&worker, false);
+            done.send(()).unwrap();
+        });
+        let completed = result.recv_timeout(Duration::from_millis(500));
+        // An old blocking open must not make this regression wait 45 seconds.
+        drop(held);
+        thread.join().unwrap();
+        assert!(
+            completed.is_ok(),
+            "A leased file must not block the projection sweep"
+        );
+        assert_eq!(fs::read_to_string(&busy_path).unwrap(), before);
+        assert_eq!(
+            fs::read_to_string(store.root.join(&ready.path)).unwrap(),
+            "Accepted browser edit\n"
+        );
+        let room = store.room(&busy).unwrap();
+        assert!(room.lock().unwrap().engine.needs_projection());
+        assert!(store.persist(&busy, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(
+            fs::read_to_string(busy_path).unwrap(),
+            "Accepted browser edit\n"
+        );
+    }
+
+    #[test]
     fn an_overflow_rescan_remembers_busy_rooms_and_own_closes_preserve_backoff() {
         let (_directory, store, busy, _ready) = fixture();
         let room = store.room(&busy).unwrap();

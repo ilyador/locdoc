@@ -334,8 +334,8 @@ fn a_stale_room_cannot_accept_edits_or_receipts_after_its_identity_is_retired() 
 }
 
 #[test]
-fn a_cold_document_waiting_for_its_file_does_not_block_an_unrelated_cached_document() {
-    use std::time::{Duration, Instant};
+fn a_cold_document_with_a_leased_file_retries_promptly_and_leaves_cached_documents_available() {
+    use std::time::Duration;
     let (_directory, store, cached, _cached_room) = fixture("Already available\n");
     fs::write(store.root.join("cold.md"), "Cold document\n").unwrap();
     let cold = store.index_document("cold.md").unwrap();
@@ -352,14 +352,14 @@ fn a_cold_document_waiting_for_its_file_does_not_block_an_unrelated_cached_docum
         .unwrap();
     let (cold_done, cold_result) = std::sync::mpsc::channel();
     let worker = store.clone();
+    let cold_document = cold.clone();
     let cold_thread = std::thread::spawn(move || {
-        cold_done.send(worker.room(&cold).is_ok()).unwrap();
+        let outcome = worker.room(&cold_document);
+        cold_done
+            .send(matches!(outcome, Err(ApiError(StatusCode::CONFLICT, _))))
+            .unwrap();
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while lease.intact() && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    let cold_is_waiting = !lease.intact();
+    let promptly_retryable = cold_result.recv_timeout(Duration::from_millis(500));
     let (cached_done, cached_result) = std::sync::mpsc::channel();
     let worker = store.clone();
     let cached_thread = std::thread::spawn(move || {
@@ -371,14 +371,15 @@ fn a_cold_document_waiting_for_its_file_does_not_block_an_unrelated_cached_docum
     cold_thread.join().unwrap();
     cached_thread.join().unwrap();
     assert!(
-        cold_is_waiting,
-        "The fixture must reach the real blocked file open"
+        promptly_retryable.unwrap_or(false),
+        "A cold leased file must return a retryable error without waiting for the lease timeout"
     );
-    assert!(cold_result.recv_timeout(Duration::from_secs(2)).unwrap());
     assert!(
         independently_available.unwrap_or(false),
         "A cold file open must not hold the global document cache map"
     );
+    let reopened = store.room(&cold).unwrap();
+    assert_eq!(room_text(&reopened.lock().unwrap()), "Cold document\n");
 }
 
 #[test]
