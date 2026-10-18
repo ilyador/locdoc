@@ -21,6 +21,11 @@ enum Phase {
     InterruptedBlocked(Arc<WriteIntent>),
     Conflict(Arc<WriteIntent>),
 }
+
+/// A newly prepared intent has not touched the file yet. Keep its preceding
+/// phase until the final lease check so an aborted attempt cannot be mistaken
+/// for an interrupted write. The token is consumed only when cancelling.
+pub(super) struct WriteAttempt(Phase);
 impl Phase {
     fn intent(&self) -> Option<&Arc<WriteIntent>> {
         match self {
@@ -216,7 +221,7 @@ impl SaveState {
         target: Vec<u8>,
         target_state: Vec<u8>,
         before: &[u8],
-    ) {
+    ) -> WriteAttempt {
         use sha2::Digest;
         let before_hash = Some(hex::encode(sha2::Sha256::digest(before)));
         // Normal writes reconstruct their exact preimage from the baseline and
@@ -224,12 +229,18 @@ impl SaveState {
         // retain that exceptional preimage before attempting another overwrite.
         let baseline = crate::text::render(&self.source, &self.ending);
         let before = (baseline.as_bytes() != before).then(|| before.into());
-        self.phase = Phase::Interrupted(Arc::new(WriteIntent {
+        let intent = Phase::Interrupted(Arc::new(WriteIntent {
             bytes: target.into(),
             state: Some(target_state.into()),
             before_hash,
             before,
         }));
+        WriteAttempt(std::mem::replace(&mut self.phase, intent))
+    }
+    /// Only call before file.write: after that point even an I/O error can have
+    /// changed bytes. A prior interrupted intent must survive a cancelled retry.
+    pub fn cancel_unwritten(&mut self, attempt: WriteAttempt) {
+        self.phase = attempt.0;
     }
     pub fn before_hash(&self) -> Option<&str> {
         self.phase

@@ -150,6 +150,7 @@ struct Room {
 }
 struct Store {
     root: PathBuf,
+    web_root: PathBuf,
     root_identity: documents::RootIdentity,
     _state_lock: disk::StateLock,
     work: Arc<tokio::sync::Semaphore>,
@@ -284,6 +285,9 @@ impl Store {
         let sessions = browser_auth::Sessions::load(&db)?;
         let store = Arc::new(Self {
             root,
+            web_root: std::env::var_os("LOCDOC_WEB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("dist")),
             root_identity,
             _state_lock: state_lock,
             work: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -1827,7 +1831,7 @@ fn router(s: App) -> Router {
         .route("/s/{token}", get(web::shell))
         .route("/s/{token}/", get(web::shell))
         .route("/s/{token}/preview.png", get(web::preview_image))
-        .fallback_service(ServeDir::new("dist"))
+        .fallback_service(ServeDir::new(s.web_root.clone()))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(axum::middleware::from_fn(response_headers))
         .layer(axum::middleware::from_fn_with_state(s.clone(), guard))

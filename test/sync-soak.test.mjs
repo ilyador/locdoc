@@ -171,6 +171,11 @@ test(
     async function connect(draftKey = crypto.randomUUID()) {
       const snapshot = await request(`/api/docs/${doc.id}`),
         ydoc = new Y.Doc();
+      assert.equal(
+        snapshot.diskConflict,
+        false,
+        "Ordinary desktop/browser co-editing must not require manual recovery",
+      );
       Y.applyUpdate(ydoc, Buffer.from(snapshot.state, "base64"));
       Y.applyUpdate(oracle, Y.encodeStateAsUpdate(ydoc));
       ydoc.on("update", (u) => Y.applyUpdate(oracle, u));
@@ -207,7 +212,10 @@ test(
         stats.checkpoints++;
         return true;
       });
-      provider.messageHandlers[121] = () => {};
+      provider.messageHandlers[121] = (_e, decoder) => {
+        if (readVarString(decoder) === "3")
+          errors.push("Unexpected recovery lock during ordinary co-editing");
+      };
       provider.messageHandlers[122] = () => {};
       provider.messageHandlers[123] = () => {};
       provider.messageHandlers[125] = (_e, d) => errors.push(readVarString(d));
@@ -330,7 +338,10 @@ test(
         writer = null;
       }
       await until(
-        () => peers.every((p) => p.text.toString().includes(token)),
+        () => {
+          assert.deepEqual(errors, [], "Desktop saves must not lock the document");
+          return peers.every((p) => p.text.toString().includes(token));
+        },
         "Completed desktop save did not reach every peer",
       );
       assert.equal((await stat(path)).ino, inode);
@@ -353,6 +364,7 @@ test(
     async function settle() {
       await until(
         async () => {
+          assert.deepEqual(errors, [], "Ordinary edits must remain writable");
           const target = oracle.getText("content").toString();
           return (
             peers.every(

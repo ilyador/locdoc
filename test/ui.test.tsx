@@ -264,7 +264,7 @@ async function openWorkspace() {
   await screen.findByRole("textbox", { name: "Markdown document" });
 }
 
-test("the visible footer suppresses short remote saves but shows a sustained save", async () => {
+test("the visible footer delays remote save progress but immediately shows completion and recovery", async () => {
   await openWorkspace();
   const socket = sockets.at(-1);
   assert.ok(socket, "a document socket must exist");
@@ -311,12 +311,17 @@ test("the visible footer suppresses short remote saves but shows a sustained sav
     timeout: 3500,
   });
   await act(async () => status("0"));
-  await waitFor(() => assert.equal(footer.textContent, "Saved to disk"), {
-    timeout: 3500,
-  });
+  assert.equal(footer.textContent, "Saved to disk");
+  // Recovery must cancel an already scheduled progress label; a late timer
+  // must never hide it or suggest that the document is saving normally.
+  await act(async () => status("2"));
   await act(async () => status("3"));
   assert.equal(footer.textContent, "Recovery needed");
   assert.equal(footer.classList.contains("has-warning"), true);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 2100));
+  });
+  assert.equal(footer.textContent, "Recovery needed");
   assert.equal(
     screen
       .getByRole("textbox", { name: "Markdown document" })

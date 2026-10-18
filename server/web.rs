@@ -74,7 +74,7 @@ pub(super) async fn shell(
     OriginalUri(uri): OriginalUri,
     Query(selection): Query<folders::Selection>,
 ) -> Result<Html<String>> {
-    let template = tokio::fs::read_to_string("dist/index.html").await?;
+    let template = tokio::fs::read_to_string(s.web_root.join("index.html")).await?;
     let token = uri
         .path()
         .strip_prefix("/s/")

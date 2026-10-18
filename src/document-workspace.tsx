@@ -179,10 +179,13 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const [footerStatus, setFooterStatus] = useState(currentFooterStatus);
   useEffect(() => {
     if (currentFooterStatus === footerStatus) return;
+    // Brief local or remote projection cycles should not animate the footer.
+    // Completion and warnings are authoritative and must never wait on this
+    // presentation-only delay.
     if (
-      currentFooterStatus.startsWith("Offline") ||
-      currentFooterStatus === "Recovery needed" ||
-      currentFooterStatus === "Unable to open document"
+      currentFooterStatus !== "Saving…" &&
+      currentFooterStatus !== "Saving draft…" &&
+      currentFooterStatus !== "Waiting for desktop file"
     ) {
       setFooterStatus(currentFooterStatus);
       return;

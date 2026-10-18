@@ -622,23 +622,33 @@ impl Store {
             raw_disk
         };
         if source != disk {
-            // Intent is its own durable phase. Any error after this transition
-            // is retried as an interrupted write, including SQL/fsync errors.
+            // Freeze before touching bytes. Cancellation before file.write
+            // restores the previous phase, including any older recovery intent.
             let frozen = r
                 .awareness
                 .doc()
                 .transact()
                 .encode_state_as_update_v1(&StateVector::default());
-            r.engine.state.prepare_observed_write(
+            let attempt = r.engine.state.prepare_observed_write(
                 projection.as_bytes().to_vec(),
                 frozen,
                 &observed,
             );
-            self.commit_pending(d, r)?;
-            if !file.intact() {
+            if let Err(error) = self.commit_pending(d, r) {
+                r.engine.state.cancel_unwritten(attempt);
+                return Err(error);
+            }
+            if !file.is_current(&path) || !file.intact() {
+                r.engine.state.cancel_unwritten(attempt);
+                // Keep the lease until cancellation is durable. If SQLite
+                // fails, the restored phase remains pending for the commit
+                // barrier to retry; a crash still retains the durable intent.
+                self.commit_pending(d, r)?;
                 r.waiting();
                 return Ok(false);
             }
+            // From this call onward any failure may have changed file bytes;
+            // preserve the durable intent for actual interrupted-write recovery.
             let written = file.write(&projection);
             r.engine.state.observe_file(file.stamp());
             written?;

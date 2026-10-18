@@ -11,6 +11,7 @@
     "start": "node --env-file-if-exists=.env scripts/start.mjs",
     "build": "vite build && cargo build --release",
     "test": "cargo test && cargo build && npm run test:js",
+    "pretest:js": "vite build --outDir .locdoc/verified-web",
     "test:js": "bash scripts/test-node.sh --test --test-concurrency=1 test/*.test.mjs && bash scripts/test-node.sh --import tsx --test --test-concurrency=1 test/*.test.tsx",
     "owner": "node --env-file-if-exists=.env scripts/owner.mjs",
     "check": "tsc --noEmit && cargo fmt --check && cargo clippy --all-targets -- -D warnings",
@@ -18,7 +19,7 @@
     "fonts:update": "node scripts/update-font-catalog.mjs",
     "icons:build": "node scripts/build-icons.mjs",
     "social:build": "node scripts/build-social.mjs",
-    "verify": "npm run check && vite build --outDir .locdoc/verified-web && npm test",
+    "verify": "npm run check && npm test",
     "install:service": "node scripts/install-service.mjs"
   },
   "dependencies": {

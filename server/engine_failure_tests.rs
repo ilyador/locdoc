@@ -122,6 +122,336 @@ fn checkpoint(
     id
 }
 
+/// Break the real Linux lease at the intent transaction's final metadata
+/// statement, immediately before the engine's last pre-write lease check.
+/// O_NONBLOCK causes the opener to yield rather than wait for our own lease.
+fn desktop_opener_during_intent(store: &Store, document: &Document) {
+    use rusqlite::functions::FunctionFlags;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = store.root.join(&document.path);
+    let db = store.db.lock().unwrap();
+    db.create_scalar_function(
+        "break_projection_lease",
+        0,
+        FunctionFlags::SQLITE_UTF8,
+        move |_| match fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(1),
+            _ => Err(rusqlite::Error::UserFunctionError(Box::new(
+                std::io::Error::other(
+                    "The deterministic desktop opener must encounter the projection lease",
+                ),
+            ))),
+        },
+    )
+    .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER desktop_opener BEFORE UPDATE OF write_intent ON docs
+         WHEN NEW.write_intent=1 BEGIN SELECT break_projection_lease(); END;",
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_desktop_opener_before_the_first_byte_cancels_the_intent_and_merges_normally() {
+    for restart in [false, true] {
+        let (directory, store, document, room) = fixture("Original\r\nEnding\n");
+        let mut peer = Peer::default();
+        accepted(
+            &store,
+            &document,
+            &room,
+            &append(&replica(&room), "Browser line\n"),
+            &mut peer,
+        );
+        checkpoint(&store, &document, &room, &mut peer);
+        let mut events = room.lock().unwrap().tx.subscribe();
+        desktop_opener_during_intent(&store, &document);
+        assert!(!store.persist(&document, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(
+            fs::read(store.root.join(&document.path)).unwrap(),
+            b"Original\r\nEnding\n"
+        );
+        assert_no_source_or_receipt(&mut events);
+        {
+            let room = room.lock().unwrap();
+            assert!(room.engine.waiting());
+            assert!(
+                !room.engine.interrupted(),
+                "No bytes were written, so this is not an interrupted projection"
+            );
+            assert!(!room.engine.conflicted());
+        }
+        let (intent, target): (i64, Option<Vec<u8>>) = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_intent,write_target FROM docs WHERE id=?",
+                [&document.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            intent, 0,
+            "Cancellation must be durable before releasing the lease"
+        );
+        assert!(target.is_none());
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER desktop_opener;")
+            .unwrap();
+        fs::write(store.root.join(&document.path), "Desktop\r\nEnding\n").unwrap();
+        drop(events);
+        let store = if restart {
+            drop(room);
+            drop(store);
+            Store::open(
+                directory.path().join("docs"),
+                directory.path().join("state"),
+                "http://localhost:3477".into(),
+            )
+            .unwrap()
+        } else {
+            store
+        };
+        let room = store.room(&document).unwrap();
+        assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+        let expected = "Desktop\nEnding\nBrowser line\n";
+        assert_eq!(room_text(&room.lock().unwrap()), expected);
+        assert_eq!(durable_source(&store, &document), expected);
+        assert_eq!(
+            text::canonical(&fs::read_to_string(store.root.join(&document.path)).unwrap()),
+            expected
+        );
+        assert!(!room.lock().unwrap().conflicted());
+    }
+}
+
+#[test]
+fn a_rejected_intent_commit_does_not_invent_an_interrupted_write_in_the_live_room() {
+    let (_directory, store, document, room) = fixture("Original\nEnding\n");
+    let mut peer = Peer::default();
+    accepted(
+        &store,
+        &document,
+        &room,
+        &append(&replica(&room), "Browser line\n"),
+        &mut peer,
+    );
+    checkpoint(&store, &document, &room, &mut peer);
+    let mut events = room.lock().unwrap().tx.subscribe();
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_unwritten_intent BEFORE UPDATE OF write_intent ON docs
+         WHEN NEW.write_intent=1 BEGIN SELECT RAISE(ABORT,'simulated intent outage'); END;",
+        )
+        .unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).is_err());
+    assert!(!room.lock().unwrap().engine.interrupted());
+    assert_eq!(
+        fs::read_to_string(store.root.join(&document.path)).unwrap(),
+        "Original\nEnding\n"
+    );
+    assert_no_source_or_receipt(&mut events);
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_unwritten_intent;")
+        .unwrap();
+    fs::write(store.root.join(&document.path), "Desktop\nEnding\n").unwrap();
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(
+        room_text(&room.lock().unwrap()),
+        "Desktop\nEnding\nBrowser line\n"
+    );
+    assert_eq!(
+        durable_source(&store, &document),
+        "Desktop\nEnding\nBrowser line\n"
+    );
+    assert!(!room.lock().unwrap().conflicted());
+}
+
+#[test]
+fn cancellation_commit_failures_retry_before_import_and_remain_conservative_across_crashes() {
+    for restart in [false, true] {
+        let (directory, store, document, room) = fixture("Original\nEnding\n");
+        let mut peer = Peer::default();
+        accepted(
+            &store,
+            &document,
+            &room,
+            &append(&replica(&room), "Browser line\n"),
+            &mut peer,
+        );
+        checkpoint(&store, &document, &room, &mut peer);
+        let mut events = room.lock().unwrap().tx.subscribe();
+        desktop_opener_during_intent(&store, &document);
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_cancellation BEFORE UPDATE OF write_intent ON docs
+             WHEN OLD.write_intent=1 AND NEW.write_intent=0
+             BEGIN SELECT RAISE(ABORT,'simulated cancellation outage'); END;",
+            )
+            .unwrap();
+        assert!(store.persist(&document, &mut room.lock().unwrap()).is_err());
+        {
+            let mut room = room.lock().unwrap();
+            assert!(!room.engine.interrupted());
+            assert!(
+                room.engine.needs_commit(),
+                "The known cancellation must remain pending for retry"
+            );
+            assert!(
+                room.ensure_committed(&store, &document).is_err(),
+                "Readers cannot bypass an uncommitted cancellation"
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(store.root.join(&document.path)).unwrap(),
+            "Original\nEnding\n"
+        );
+        assert_no_source_or_receipt(&mut events);
+        let durable_intent: i64 = store
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT write_intent FROM docs WHERE id=?",
+                [&document.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_intent, 1,
+            "A failed cancellation cannot erase the durable crash evidence"
+        );
+        store
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER desktop_opener; DROP TRIGGER reject_cancellation;")
+            .unwrap();
+        let desktop = "Desktop\nEnding\n";
+        fs::write(store.root.join(&document.path), desktop).unwrap();
+        drop(events);
+        let store = if restart {
+            drop(room);
+            drop(store);
+            Store::open(
+                directory.path().join("docs"),
+                directory.path().join("state"),
+                "http://localhost:3477".into(),
+            )
+            .unwrap()
+        } else {
+            store
+        };
+        let room = store.room(&document).unwrap();
+        let saved = store.persist(&document, &mut room.lock().unwrap()).unwrap();
+        if restart {
+            assert!(!saved);
+            assert!(room.lock().unwrap().conflicted());
+            assert_eq!(
+                room_text(&room.lock().unwrap()),
+                "Original\nEnding\nBrowser line\n"
+            );
+            assert_eq!(
+                fs::read_to_string(store.root.join(&document.path)).unwrap(),
+                desktop
+            );
+        } else {
+            assert!(saved);
+            assert!(!room.lock().unwrap().conflicted());
+            assert_eq!(
+                room_text(&room.lock().unwrap()),
+                "Desktop\nEnding\nBrowser line\n"
+            );
+        }
+    }
+}
+
+#[test]
+fn cancelling_a_recovery_retry_preserves_the_older_frozen_intent() {
+    let (_directory, store, document, room) = fixture("Original\nEnding\n");
+    let mut peer = Peer::default();
+    accepted(
+        &store,
+        &document,
+        &room,
+        &append(&replica(&room), "Earlier browser line\n"),
+        &mut peer,
+    );
+    {
+        let mut room = room.lock().unwrap();
+        let target = room_text(&room).into_bytes();
+        room.freeze_projection(target);
+        store.store_room(&document, &mut room).unwrap();
+    }
+    accepted(
+        &store,
+        &document,
+        &room,
+        &append(&replica(&room), "Latest browser line\n"),
+        &mut peer,
+    );
+    let previous: (Vec<u8>, Vec<u8>, String) = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_target,write_state,write_before_hash FROM docs WHERE id=?",
+            [&document.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    desktop_opener_during_intent(&store, &document);
+    assert!(!store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    store
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER desktop_opener;")
+        .unwrap();
+    let restored: (Vec<u8>, Vec<u8>, String) = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT write_target,write_state,write_before_hash FROM docs WHERE id=?",
+            [&document.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        restored, previous,
+        "Cancellation must restore the prior exact bytes and causal state"
+    );
+    assert!(room.lock().unwrap().engine.interrupted());
+    assert!(!room.lock().unwrap().conflicted());
+    assert_eq!(
+        fs::read_to_string(store.root.join(&document.path)).unwrap(),
+        "Original\nEnding\n"
+    );
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(
+        room_text(&room.lock().unwrap()),
+        "Original\nEnding\nEarlier browser line\nLatest browser line\n"
+    );
+}
+
 #[test]
 fn checkpoint_compaction_abort_preserves_the_previous_journal_and_retries_exactly_once() {
     let (_directory, store, document, room) = fixture("Base");
