@@ -920,6 +920,36 @@ test("bootstrap failures settle on an error instead of an indefinite loading sta
   assert.notEqual(result.current.config, null);
 });
 
+test("sidebar choices survive reopening on desktop and mobile", async () => {
+  const previous = localStorage.getItem("locdoc.sidebar");
+  const width = window.innerWidth;
+  try {
+    for (const deviceWidth of [1200, 390]) {
+      window.innerWidth = deviceWidth;
+      localStorage.removeItem("locdoc.sidebar");
+      const initial = deviceWidth > 760;
+      for (const expected of [initial, !initial, initial]) {
+        const hook = renderHook(() => useWorkspace());
+        try {
+          // Restoration is synchronous, before bootstrap or the first paint.
+          assert.equal(hook.result.current.sidebar, expected);
+          await waitFor(() =>
+            assert.notEqual(hook.result.current.config, null),
+          );
+          act(() => hook.result.current.setSidebar(!expected));
+          assert.equal(hook.result.current.sidebar, !expected);
+        } finally {
+          hook.unmount();
+        }
+      }
+    }
+  } finally {
+    window.innerWidth = width;
+    if (previous === null) localStorage.removeItem("locdoc.sidebar");
+    else localStorage.setItem("locdoc.sidebar", previous);
+  }
+});
+
 test("device font defaults and explicit sizes survive resizing and reopening", async () => {
   const previous = new Map(Object.entries(localStorage));
   const width = window.innerWidth;

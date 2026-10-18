@@ -48,7 +48,22 @@ export function useWorkspace() {
     setName(person.name);
     setNeedsName(false);
   };
-  const [sidebar, setSidebar] = useState(window.innerWidth > 760);
+  const [sidebar, setSidebar] = useState(() => {
+    try {
+      const saved = localStorage.getItem("locdoc.sidebar");
+      if (saved === "open" || saved === "closed") return saved === "open";
+    } catch {
+      // A blocked preference store must not prevent opening the workspace.
+    }
+    return window.innerWidth > 760;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("locdoc.sidebar", sidebar ? "open" : "closed");
+    } catch {
+      // The sidebar still works when preferences cannot be saved.
+    }
+  }, [sidebar]);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [scope, setScope] = useState("all");
