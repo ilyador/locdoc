@@ -9,6 +9,9 @@ const PADDING = 40;
 
 let dom: JSDOM;
 let stops: (() => void)[];
+let animationFrames: Map<number, FrameRequestCallback>;
+let nextAnimationFrame: number;
+let resizes: Set<() => void>;
 beforeEach(() => {
   dom = new JSDOM("<!doctype html><body></body>", {
     url: "https://locdoc.test/",
@@ -20,6 +23,29 @@ beforeEach(() => {
       writable: true,
     });
   stops = [];
+  animationFrames = new Map();
+  nextAnimationFrame = 0;
+  window.requestAnimationFrame = (callback) => {
+    const id = ++nextAnimationFrame;
+    animationFrames.set(id, callback);
+    return id;
+  };
+  window.cancelAnimationFrame = (id) => {
+    animationFrames.delete(id);
+  };
+  resizes = new Set();
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: class {
+      constructor(readonly callback: () => void) {}
+      observe() {
+        resizes.add(this.callback);
+      }
+      disconnect() {
+        resizes.delete(this.callback);
+      }
+    },
+  });
 });
 afterEach(() => {
   for (const stop of stops) stop();
@@ -44,7 +70,13 @@ function reading(text: Y.Text, key = "position") {
 
 // The pane's top is at screen y=0, below the canvas padding. CodeMirror's
 // height estimate is LINE for every line; `heights` is the drawn layout.
-function open(key: string, text = lines(), height = 5000) {
+function open(
+  key: string,
+  text = lines(),
+  height = 5000,
+  wrap = 0,
+  glyphInset = 0,
+) {
   const pane = document.createElement("div");
   pane.className = "writing-pane";
   Object.defineProperties(pane, {
@@ -59,6 +91,11 @@ function open(key: string, text = lines(), height = 5000) {
     for (let index = 0; index < line; index++) top += heights[index] ?? LINE;
     return top;
   };
+  const wrapped = (pos: number) => {
+    const line = lineOf(text, pos);
+    const column = pos - starts()[line];
+    return drawn(line) + (wrap ? Math.floor(column / wrap) * LINE : 0);
+  };
   const starts = () => {
     const result = [0];
     const source = text.toString();
@@ -66,6 +103,13 @@ function open(key: string, text = lines(), height = 5000) {
       if (source[index] === "\n") result.push(index + 1);
     return result;
   };
+  if (wrap)
+    text
+      .toString()
+      .split("\n")
+      .forEach((line, index) => {
+        heights[index] = Math.max(1, Math.ceil(line.length / wrap)) * LINE;
+      });
   let queue: any[] = [];
   const view = {
     dom: editor,
@@ -80,10 +124,12 @@ function open(key: string, text = lines(), height = 5000) {
       const all = starts();
       let line = 0;
       while (line + 1 < all.length && drawn(line + 1) <= y) line++;
-      return all[line];
+      const row = wrap ? Math.max(0, Math.floor((y - drawn(line)) / LINE)) : 0;
+      const end = all[line + 1] === undefined ? text.length : all[line + 1] - 1;
+      return Math.min(all[line] + row * wrap, end);
     },
     coordsAtPos(pos: number) {
-      const top = drawn(lineOf(text, pos));
+      const top = wrapped(pos) + glyphInset;
       return { top, bottom: top + LINE, left: 0, right: 0 };
     },
     lineBlockAt(pos: number) {
@@ -98,24 +144,45 @@ function open(key: string, text = lines(), height = 5000) {
   };
   const stop = rememberEditorScroll(view as any, key, text)!;
   stops.push(stop);
+  let maxMeasures = 0;
   return {
     pane,
     stop,
     text,
     heights,
     drawn,
-    // One animation frame: CodeMirror reads every request, then writes.
+    wrapped,
+    get maxMeasures() {
+      return maxMeasures;
+    },
+    // CodeMirror can drain requests added by a write in the SAME frame. An
+    // alignment callback must yield to a real animation frame between passes.
     frame() {
-      const requests = queue;
-      queue = [];
-      const values = requests.map((request) => request.read());
-      requests.forEach((request, index) => request.write?.(values[index]));
+      const callbacks = [...animationFrames.values()];
+      animationFrames.clear();
+      callbacks.forEach((callback) => callback(0));
+      let measured = 0;
+      for (let pass = 0; queue.length && pass < 6; pass++) {
+        const requests = queue;
+        queue = [];
+        measured += requests.length;
+        const values = requests.map((request) => request.read());
+        requests.forEach((request, index) => request.write?.(values[index]));
+      }
+      maxMeasures = Math.max(maxMeasures, measured);
     },
     settle() {
-      for (let frames = 0; queue.length && frames < 500; frames++) this.frame();
+      for (
+        let frames = 0;
+        (queue.length || animationFrames.size) && frames < 500;
+        frames++
+      )
+        this.frame();
       assert.equal(queue.length, 0, "restoration must finish");
+      assert.equal(animationFrames.size, 0, "restoration must stop polling");
     },
     scroll(position: number) {
+      pane.dispatchEvent(new window.Event("wheel"));
       pane.scrollTop = position;
       pane.dispatchEvent(new window.Event("scroll"));
       this.frame();
@@ -167,6 +234,105 @@ test("the saved line stays at the top while CodeMirror measures taller text abov
   assert.deepEqual(reading(document), { line: 61, offset: 7 });
 });
 
+test("restoration yields between CodeMirror measure passes and stops polling once stable", () => {
+  localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
+  const page = open("position");
+  page.settle();
+  assert.equal(
+    page.maxMeasures,
+    1,
+    "alignment must not recurse in a measure pass",
+  );
+  assert.equal(animationFrames.size, 0);
+  assert.equal(
+    resizes.size,
+    1,
+    "idle layout changes retain the reading anchor",
+  );
+  page.stop();
+  assert.equal(resizes.size, 0);
+});
+
+test("late layout changes preserve the saved text after initial restoration has settled", () => {
+  const note = lines();
+  const page = open("position", note);
+  page.scroll(PADDING + 58 * LINE + 7);
+  page.stop();
+  page.pane.remove();
+  const saved = localStorage.getItem("position");
+  const reopened = open("position", note);
+  reopened.settle();
+  // Lazy media or a font can change layout long after the first stable frames.
+  for (let line = 40; line < 58; line++) reopened.heights[line] = 55;
+  for (const resize of resizes) resize();
+  reopened.settle();
+  assert.equal(reopened.drawn(58), -7);
+  window.dispatchEvent(new window.Event("pagehide"));
+  assert.equal(localStorage.getItem("position"), saved);
+  reopened.pane.dispatchEvent(new window.Event("wheel"));
+  const landed = reopened.pane.scrollTop;
+  for (let line = 40; line < 58; line++) reopened.heights[line] = 70;
+  for (const resize of resizes) resize();
+  reopened.settle();
+  assert.equal(reopened.pane.scrollTop, landed, "reader input ends alignment");
+});
+
+test("font readiness realigns after settling, while cancelled and detached views stay put", async () => {
+  let ready!: () => void;
+  const fonts = new window.EventTarget();
+  Object.defineProperty(fonts, "ready", {
+    value: new Promise<void>((resolve) => {
+      ready = resolve;
+    }),
+  });
+  Object.defineProperty(document, "fonts", { value: fonts });
+  localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
+  const page = open("position");
+  page.settle();
+  const line = lineOf(page.text, 120);
+  page.heights[0] = 80;
+  ready();
+  await Promise.resolve();
+  page.settle();
+  assert.equal(page.drawn(line), -7);
+  page.heights[0] = 100;
+  fonts.dispatchEvent(new window.Event("loadingdone"));
+  page.settle();
+  assert.equal(page.drawn(line), -7);
+  page.stop();
+  const landed = page.pane.scrollTop;
+  page.heights[0] = 200;
+  fonts.dispatchEvent(new window.Event("loadingdone"));
+  page.settle();
+  assert.equal(page.pane.scrollTop, landed);
+  const pending = open("position");
+  pending.frame();
+  assert.equal(animationFrames.size, 1);
+  pending.stop();
+  assert.equal(animationFrames.size, 0, "cleanup cancels the queued frame");
+});
+
+test("wrapped visual lines retain their text anchor when reopening at a different width", () => {
+  const note = new Y.Doc().getText("content");
+  note.insert(
+    0,
+    Array.from(
+      { length: 80 },
+      (_, index) => `line ${index} ${"word ".repeat(18)}\n`,
+    ).join(""),
+  );
+  const page = open("position", note, 15000, 24);
+  page.scroll(page.drawn(28) + 2 * LINE + 7);
+  page.stop();
+  page.pane.remove();
+  const { pos, offset } = JSON.parse(localStorage.getItem("position")!);
+  assert.equal(lineOf(note, pos), 28);
+  assert.equal(offset, 7);
+  const reopened = open("position", note, 18000, 20);
+  reopened.settle();
+  assert.equal(reopened.wrapped(pos), -7);
+});
+
 test("reader input stops aligning the restored line", () => {
   const document = lines();
   const page = open("position", document);
@@ -209,6 +375,20 @@ test("collaborator edits above the reading position keep the same text at the to
   reopened.settle();
   assert.equal(reopened.pane.scrollTop, PADDING + 68 * LINE + 7);
   assert.equal(document.toString().split("\n")[68], "line 58");
+});
+
+test("late alignment resolves the current CRDT anchor after edits above a restored page", () => {
+  const note = lines();
+  const page = open("position", note);
+  page.scroll(PADDING + 58 * LINE + 7);
+  page.stop();
+  page.pane.remove();
+  const reopened = open("position", note);
+  reopened.settle();
+  note.insert(0, "inserted\n".repeat(10));
+  for (const resize of resizes) resize();
+  reopened.settle();
+  assert.equal(reopened.drawn(68), -7);
 });
 
 test("a position from another collaboration generation falls back to its index within the document", () => {
@@ -279,6 +459,41 @@ test("the canvas above the first line is remembered as a negative offset", () =>
   const reopened = open("position", document);
   reopened.settle();
   assert.equal(reopened.pane.scrollTop, 15);
+});
+
+test("canvas offsets use the line box and never accumulate glyph inset on reload", () => {
+  const note = lines();
+  const page = open("position", note, 5000, 0, -2);
+  page.scroll(12);
+  page.stop();
+  page.pane.remove();
+  for (let reload = 0; reload < 4; reload++) {
+    const reopened = open("position", note, 5000, 0, -2);
+    reopened.settle();
+    assert.equal(reopened.pane.scrollTop, 12);
+    reopened.stop();
+    reopened.pane.remove();
+  }
+  // Existing text-position records used documentTop for this case too.
+  const { at, pos, offset } = JSON.parse(localStorage.getItem("position")!);
+  localStorage.setItem("position", JSON.stringify({ at, pos, offset }));
+  const legacy = open("position", note, 5000, 0, -2);
+  legacy.settle();
+  assert.equal(legacy.pane.scrollTop, 12);
+});
+
+test("a negative first-line glyph offset remains distinct from canvas space", () => {
+  const note = lines();
+  const page = open("position", note, 5000, 0, 4);
+  page.scroll(PADDING + 1);
+  page.stop();
+  page.pane.remove();
+  const saved = JSON.parse(localStorage.getItem("position")!);
+  assert.equal(saved.offset, -3);
+  assert.equal(saved.canvas, false);
+  const reopened = open("position", note, 5000, 0, 4);
+  reopened.settle();
+  assert.equal(reopened.pane.scrollTop, PADDING + 1);
 });
 
 test("invalid positions and unavailable storage cannot break reading", () => {
