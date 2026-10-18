@@ -1475,7 +1475,11 @@ export const MarkdownEditor = forwardRef<
   }, [ydoc, provider, id]);
   useLayoutEffect(() => {
     if (view.current && scrollKey)
-      return rememberEditorScroll(view.current, scrollKey);
+      return rememberEditorScroll(
+        view.current,
+        scrollKey,
+        ydoc.getText("content"),
+      );
   }, [ydoc, provider, id, scrollKey]);
   useLayoutEffect(() => {
     const v = view.current;

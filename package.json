@@ -11,7 +11,7 @@
     "start": "node --env-file-if-exists=.env scripts/start.mjs",
     "build": "vite build && cargo build --release",
     "test": "cargo test && cargo build && npm run test:js",
-    "pretest:js": "vite build --outDir .locdoc/verified-web",
+    "pretest:js": "vite build --outDir node_modules/.cache/locdoc-verified-web",
     "test:js": "bash scripts/test-node.sh --test --test-concurrency=1 test/*.test.mjs && bash scripts/test-node.sh --import tsx --test --test-concurrency=1 test/*.test.tsx",
     "owner": "node --env-file-if-exists=.env scripts/owner.mjs",
     "check": "tsc --noEmit && cargo fmt --check && cargo clippy --all-targets -- -D warnings",

@@ -263,7 +263,7 @@ fn read_guarded_file(
         "The desktop file is unavailable or still being saved. Finish that save before rebuilding.",
     ))?;
     let source = file.read_bytes()?;
-    if !file.intact() || !file.is_current(&path) {
+    if !file.excludes_writers() || !file.is_current(&path) {
         return Err(conflict(
             "The desktop file changed. Retry after its save finishes.",
         ));
@@ -407,7 +407,7 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
     };
     let bundle = capture(store, &document, Ok(bytes), live.as_deref(), true)?;
     let saved_archive = archive(store, &bundle)?;
-    if !file.intact() || !file.is_current(&path) {
+    if !file.excludes_writers() || !file.is_current(&path) {
         return Err(conflict(
             "The desktop file changed. Recovery was archived; retry after the save finishes.",
         ));
@@ -417,7 +417,7 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
         // desktop save. Preserve both originals before touching the same inode.
         let ending = text::ending(&raw, &bundle.line_ending);
         file.write(&text::render(&chosen, &ending))?;
-        if !file.intact() || !file.is_current(&path) {
+        if !file.excludes_writers() || !file.is_current(&path) {
             return Err(conflict(
                 "The desktop file changed during recovery. Its originals were archived; retry after its save finishes.",
             ));

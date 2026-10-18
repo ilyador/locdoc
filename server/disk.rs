@@ -176,9 +176,15 @@ impl DiskFile {
         self.1 == libc::F_WRLCK
     }
     pub(super) fn intact(&self) -> bool {
-        // F_GETLEASE reports the target lease while a break is pending. Yield
-        // before starting a write if an opener arrived during reconciliation.
+        // F_GETLEASE reports the target lease while a break is pending.
         unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_GETLEASE) == self.1 }
+    }
+    /// A pending reader break asks only for consistent bytes: its open waits
+    /// until this handle closes, then sees the finished write. Only writers
+    /// and truncation must cancel a projection before its first byte.
+    pub(super) fn excludes_writers(&self) -> bool {
+        let lease = unsafe { libc::fcntl(self.0.as_raw_fd(), libc::F_GETLEASE) };
+        lease == self.1 || (self.1 == libc::F_WRLCK && lease == libc::F_RDLCK)
     }
     pub(super) fn is_current(&self, path: &Path) -> bool {
         let Ok(held) = self.0.metadata() else {
@@ -291,6 +297,35 @@ mod tests {
                 "Unchanged synthetic document"
             );
         }
+    }
+    #[test]
+    fn readers_waiting_for_a_write_lease_do_not_cancel_it_but_writers_do() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lease.md");
+        fs::write(&path, "Browser projection").unwrap();
+        let guard = DiskFile::open(&path).unwrap().unwrap();
+        // A nonblocking opener still starts the kernel's lease break.
+        let open = |write: bool| {
+            fs::OpenOptions::new()
+                .read(!write)
+                .write(write)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap_err()
+                .kind()
+        };
+        assert_eq!(open(false), std::io::ErrorKind::WouldBlock);
+        assert!(!guard.intact());
+        assert!(
+            guard.excludes_writers(),
+            "A reader only needs the finished bytes"
+        );
+        assert_eq!(open(true), std::io::ErrorKind::WouldBlock);
+        assert!(
+            !guard.excludes_writers(),
+            "A desktop writer must win before the first projected byte"
+        );
     }
     #[test]
     fn a_desktop_opener_waiting_for_our_lease_keeps_the_same_inode() {

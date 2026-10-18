@@ -3,7 +3,7 @@ set -euo pipefail
 
 # All server fixtures serve the frontend tested by this checkout, including
 # fixtures whose isolated documents/state use a different working directory.
-export LOCDOC_WEB="$(pwd)/.locdoc/verified-web"
+export LOCDOC_WEB="$(pwd)/node_modules/.cache/locdoc-verified-web"
 
 # Limit native allocations too: V8's heap flag does not cover Buffer/ArrayBuffer
 # storage. RLIMIT_DATA includes anonymous mmap allocations on supported Linux.

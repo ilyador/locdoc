@@ -122,10 +122,14 @@ fn checkpoint(
     id
 }
 
+fn desktop_opener_during_intent(store: &Store, document: &Document) {
+    opener_during_intent(store, document, true);
+}
+
 /// Break the real Linux lease at the intent transaction's final metadata
 /// statement, immediately before the engine's last pre-write lease check.
 /// O_NONBLOCK causes the opener to yield rather than wait for our own lease.
-fn desktop_opener_during_intent(store: &Store, document: &Document) {
+fn opener_during_intent(store: &Store, document: &Document, write: bool) {
     use rusqlite::functions::FunctionFlags;
     use std::os::unix::fs::OpenOptionsExt;
     let path = store.root.join(&document.path);
@@ -135,7 +139,8 @@ fn desktop_opener_during_intent(store: &Store, document: &Document) {
         0,
         FunctionFlags::SQLITE_UTF8,
         move |_| match fs::OpenOptions::new()
-            .write(true)
+            .read(!write)
+            .write(write)
             .custom_flags(libc::O_NONBLOCK)
             .open(&path)
         {
@@ -231,6 +236,43 @@ fn a_desktop_opener_before_the_first_byte_cancels_the_intent_and_merges_normally
         );
         assert!(!room.lock().unwrap().conflicted());
     }
+}
+
+#[test]
+fn a_desktop_reader_during_the_intent_waits_for_the_completed_projection() {
+    let (_directory, store, document, room) = fixture("Original\nEnding\n");
+    let mut peer = Peer::default();
+    accepted(
+        &store,
+        &document,
+        &room,
+        &append(&replica(&room), "Browser line\n"),
+        &mut peer,
+    );
+    let receipt = checkpoint(&store, &document, &room, &mut peer);
+    let mut events = room.lock().unwrap().tx.subscribe();
+    opener_during_intent(&store, &document, false);
+    // A polling reader only needs consistent bytes. Its open waits for this
+    // write instead of cancelling every projection that it happens to overlap.
+    assert!(store.persist(&document, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(
+        fs::read_to_string(store.root.join(&document.path)).unwrap(),
+        "Original\nEnding\nBrowser line\n"
+    );
+    let mut acknowledged = false;
+    while let Ok(frame) = events.try_recv() {
+        if let Message::Custom(127, id) = Message::decode_v1(&frame).unwrap() {
+            acknowledged |= id == receipt.as_bytes();
+        }
+    }
+    assert!(
+        acknowledged,
+        "The save receipt follows the completed projection"
+    );
+    let room = room.lock().unwrap();
+    assert!(!room.engine.waiting());
+    assert!(!room.engine.interrupted());
+    assert!(!room.engine.conflicted());
 }
 
 #[test]

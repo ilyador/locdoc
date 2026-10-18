@@ -606,7 +606,7 @@ impl Store {
             r.waiting();
             return Ok(false);
         }
-        if !file.is_current(&path) || !file.intact() {
+        if !file.is_current(&path) || !file.excludes_writers() {
             r.waiting();
             return Ok(false);
         }
@@ -638,7 +638,7 @@ impl Store {
                 r.engine.state.cancel_unwritten(attempt);
                 return Err(error);
             }
-            if !file.is_current(&path) || !file.intact() {
+            if !file.is_current(&path) || !file.excludes_writers() {
                 r.engine.state.cancel_unwritten(attempt);
                 // Keep the lease until cancellation is durable. If SQLite
                 // fails, the restored phase remains pending for the commit

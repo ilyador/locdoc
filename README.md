@@ -170,7 +170,7 @@ npm run verify  # TypeScript, formatting, strict Clippy, staged web build, Rust/
 npm test
 ```
 
-The JavaScript test entry point builds its frontend once in `.locdoc/verified-web`; its server fixtures use that exact folder through `LOCDOC_WEB`, leaving the running `dist` untouched. This also works for `npm test` and `npm run test:js` in a fresh checkout. Production defaults to `dist`. Tests use temporary directories, never your documents or owner key. The suite covers concurrent clients, comments, desktop writers, server restarts, permission changes, folder boundaries, request races and durable browser drafts.
+The JavaScript test entry point builds its frontend once in `node_modules/.cache/locdoc-verified-web`; its server fixtures use that exact folder through `LOCDOC_WEB`, leaving the running `dist` and the state folder untouched. This also works for `npm test` and `npm run test:js` in a fresh checkout. Production defaults to `dist`. Tests use temporary directories, never your documents or owner key. The suite covers concurrent clients, comments, desktop writers, server restarts, permission changes, folder boundaries, request races and durable browser drafts.
 
 Node test files run serially through `scripts/test-node.sh`, with a 256 MiB V8 old-space limit, a 2 GiB Linux data-allocation limit per process (including native buffers), no core dumps and a ten-minute suite timeout. The allocation limit is not a combined process-tree or RSS limit. Explicit sync soaks up to thirty minutes extend the timeout. Use the same wrapper for focused tests:
 
