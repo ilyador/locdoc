@@ -858,10 +858,36 @@ impl Room {
         document: &Document,
         content: &str,
     ) -> Result<()> {
+        self.restore_checked(store, document, content, None)
+    }
+    pub(super) fn restore_if_current(
+        &mut self,
+        store: &Store,
+        document: &Document,
+        content: &str,
+        expected_revision: &str,
+    ) -> Result<()> {
+        self.restore_checked(store, document, content, Some(expected_revision))
+    }
+    fn restore_checked(
+        &mut self,
+        store: &Store,
+        document: &Document,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> Result<()> {
         if !self.flush_to_disk(store, document)? {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "Finish the desktop save before restoring a version.".into(),
+            ));
+        }
+        // The flush can import a completed desktop save. Preconditions belong
+        // here, after that import, rather than in an HTTP/MCP adapter before it.
+        if expected_revision.is_some_and(|expected| hash(&room_text(self)) != expected) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Document changed. Read it again before restoring.".into(),
             ));
         }
         store.snapshot(document, self.engine.state.source(), true)?;

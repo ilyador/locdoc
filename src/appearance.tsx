@@ -547,28 +547,26 @@ export function AppearancePanel({
                   onChange={(e) => setLineHeight(Number(e.target.value))}
                 />
               </div>
-              {format === "markdown" && (
-                <div className="writing-control">
-                  <div className="writing-control-label">
-                    <label htmlFor="paragraph-spacing">Paragraph spacing</label>
-                    <output htmlFor="paragraph-spacing">
-                      {Math.round(paragraphSpacing * 100)}%
-                    </output>
-                  </div>
-                  <input
-                    id="paragraph-spacing"
-                    type="range"
-                    min={0}
-                    max={1}
-                    step={0.05}
-                    value={paragraphSpacing}
-                    aria-valuetext={`${Math.round(paragraphSpacing * 100)} percent of line height`}
-                    onChange={(event) =>
-                      setParagraphSpacing(Number(event.target.value))
-                    }
-                  />
+              <div className="writing-control">
+                <div className="writing-control-label">
+                  <label htmlFor="paragraph-spacing">Paragraph spacing</label>
+                  <output htmlFor="paragraph-spacing">
+                    {Math.round(paragraphSpacing * 100)}%
+                  </output>
                 </div>
-              )}
+                <input
+                  id="paragraph-spacing"
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={paragraphSpacing}
+                  aria-valuetext={`${Math.round(paragraphSpacing * 100)} percent of line height`}
+                  onChange={(event) =>
+                    setParagraphSpacing(Number(event.target.value))
+                  }
+                />
+              </div>
               <div className="writing-control">
                 <div className="writing-control-label">
                   <label htmlFor="page-width">Page width</label>
@@ -603,13 +601,13 @@ export function AppearancePanel({
                   fontSize === defaultFontSize &&
                   lineHeight === 1.85 &&
                   pageWidth === null &&
-                  (format !== "markdown" || paragraphSpacing === 0.15)
+                  paragraphSpacing === 0.15
                 }
                 onClick={() => {
                   setFontSize(defaultFontSize);
                   setLineHeight(1.85);
                   setPageWidth(null);
-                  if (format === "markdown") setParagraphSpacing(0.15);
+                  setParagraphSpacing(0.15);
                 }}
               >
                 Reset size &amp; spacing

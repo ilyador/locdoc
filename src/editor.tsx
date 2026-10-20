@@ -27,7 +27,9 @@ import { documentFormat } from "./document-format";
 import { rememberEditorScroll } from "./editor-scroll";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
 import { fountainPreview, fountainInlineParser } from "./fountain-preview";
+import { fountainSpeakerCompletion } from "./fountain-completion";
 import { parseFountain, type FountainForce } from "./fountain";
+import { emphasisContentRange } from "./emphasis-range";
 import type { Entry } from "./model";
 import type { Comment } from "./model";
 import {
@@ -615,14 +617,14 @@ export function livePreview(
                 state.doc.lineAt(from).from,
               ),
             );
-          if (name === "StrongEmphasis")
+          if (name === "StrongEmphasis" || name === "Emphasis") {
+            const content = emphasisContentRange(n);
             decorations.push(
-              Decoration.mark({ class: "md-strong" }).range(from, to),
+              Decoration.mark({
+                class: name === "StrongEmphasis" ? "md-strong" : "md-em",
+              }).range(content.from, content.to),
             );
-          if (name === "Emphasis")
-            decorations.push(
-              Decoration.mark({ class: "md-em" }).range(from, to),
-            );
+          }
           if (name === "InlineCode")
             decorations.push(
               Decoration.mark({ class: "md-inline-code" }).range(from, to),
@@ -871,7 +873,7 @@ function documentPreview(
   const fountain = documentFormat(path) === "fountain";
   return [
     fountain
-      ? fountainPreview()
+      ? [fountainPreview(), fountainSpeakerCompletion()]
       : [markdownSupport, livePreview(id, token, path, entries)],
     EditorView.editorAttributes.of({
       class: fountain ? "fountain-editor" : "",

@@ -8,6 +8,8 @@ mod engine_failure_tests;
 mod folders;
 mod links;
 mod maintenance;
+mod mcp;
+mod mcp_auth;
 mod peers;
 #[cfg(test)]
 mod persistence_adversarial_tests;
@@ -161,6 +163,7 @@ struct Store {
     data: PathBuf,
     db: Mutex<Connection>,
     sessions: browser_auth::Sessions,
+    mcp_credentials: mcp_auth::Credentials,
     rooms: Mutex<HashMap<String, Arc<Mutex<Room>>>>,
     room_loads: work::RoomLoads,
     key: String,
@@ -282,7 +285,9 @@ impl Store {
         browser_auth::migrate(&db)?;
         documents::migrate(&db)?;
         folders::migrate(&db)?;
+        mcp_auth::migrate(&db)?;
         let sessions = browser_auth::Sessions::load(&db)?;
+        let mcp_credentials = mcp_auth::Credentials::load(&db)?;
         let store = Arc::new(Self {
             root,
             web_root: std::env::var_os("LOCDOC_WEB")
@@ -298,6 +303,7 @@ impl Store {
             data,
             db: Mutex::new(db),
             sessions,
+            mcp_credentials,
             rooms: Mutex::new(HashMap::new()),
             room_loads: work::RoomLoads::default(),
             key,
@@ -1689,16 +1695,38 @@ async fn guard(
         return denied().into_response();
     }
     let path = req.uri().path();
+    let oauth_exchange = matches!(path, "/oauth/register" | "/oauth/token" | "/oauth/revoke");
+    let mcp = path == "/mcp";
+    if mcp
+        && req.headers().contains_key(header::ORIGIN)
+        && !security::origin_allowed(&s.public_url, &s.bind, req.headers())
+        && !req.headers().get(header::ORIGIN).is_some_and(|origin| {
+            matches!(
+                origin.as_bytes(),
+                b"https://chatgpt.com" | b"https://platform.openai.com"
+            )
+        })
+    {
+        return denied().into_response();
+    }
     if (path.starts_with("/ws/")
         || !matches!(
             *req.method(),
             axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
         ))
+        && !oauth_exchange
+        && !mcp
         && let Err(error) = origin_check(&s, req.headers())
     {
         return error.into_response();
     }
-    if path.starts_with("/api/") || path.starts_with("/ws/") || path.starts_with("/s/") {
+    if path.starts_with("/api/")
+        || path.starts_with("/ws/")
+        || path.starts_with("/s/")
+        || path.starts_with("/oauth/")
+        || path.starts_with("/.well-known/")
+        || mcp
+    {
         let peer = req
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -1706,7 +1734,11 @@ async fn guard(
         let ip = peer
             .map(|peer| peers::address(req.headers(), peer).to_string())
             .unwrap_or_else(|| "local".into());
-        let (method, limit) = if path == "/api/login" || path == "/api/redeem" {
+        let (method, limit) = if path == "/api/login"
+            || path == "/api/redeem"
+            || path == "/oauth/register"
+            || path == "/oauth/authorize"
+        {
             ("login", 15)
         } else if path == "/api/fonts" && req.method() == axum::http::Method::POST {
             ("fonts", 6)
@@ -1750,7 +1782,52 @@ async fn guard(
             .into_response();
         }
     }
+    if mcp
+        && *req.method() != axum::http::Method::OPTIONS
+        && let Err(error) = mcp_auth::authorize(&s, req.headers())
+    {
+        let mut response = error.into_response();
+        if let Ok(challenge) = axum::http::HeaderValue::from_str(&format!(
+            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",
+            s.public_url
+        )) {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, challenge);
+        }
+        mcp_cors(req.headers(), response.headers_mut());
+        return response;
+    }
+    if *req.method() == axum::http::Method::OPTIONS
+        && (mcp || oauth_exchange || path.starts_with("/.well-known/"))
+    {
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        mcp_cors(req.headers(), response.headers_mut());
+        return response;
+    }
     next.run(req).await
+}
+fn mcp_cors(request: &HeaderMap, response: &mut HeaderMap) {
+    if let Some(origin) = request.get(header::ORIGIN) {
+        response.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+        response.insert(header::VARY, axum::http::HeaderValue::from_static("Origin"));
+    }
+    response.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        axum::http::HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    response.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        axum::http::HeaderValue::from_static(
+            "Content-Type, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID",
+        ),
+    );
+    response.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        axum::http::HeaderValue::from_static(
+            "WWW-Authenticate, Mcp-Session-Id, MCP-Protocol-Version",
+        ),
+    );
 }
 const CONTENT_SECURITY_POLICY: &str = concat!(
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; ",
@@ -1759,9 +1836,16 @@ const CONTENT_SECURITY_POLICY: &str = concat!(
 );
 async fn response_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let cacheable = req.uri().path().starts_with("/assets/");
+    let connector = req.uri().path() == "/mcp"
+        || req.uri().path().starts_with("/oauth/")
+        || req.uri().path().starts_with("/.well-known/");
+    let request_headers = connector.then(|| req.headers().clone());
     let mut response = next.run(req).await;
     let ok = response.status().is_success();
     let headers = response.headers_mut();
+    if let Some(request) = &request_headers {
+        mcp_cors(request, headers);
+    }
     let html = headers
         .get(header::CONTENT_TYPE)
         .is_some_and(|v| v.as_bytes().starts_with(b"text/html"));
@@ -1788,6 +1872,41 @@ async fn response_headers(req: axum::extract::Request, next: axum::middleware::N
 }
 fn router(s: App) -> Router {
     Router::new()
+        .route_service("/mcp", mcp::service(s.clone()))
+        .route(
+            "/.well-known/oauth-protected-resource/mcp",
+            get(mcp_auth::resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp_auth::resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(mcp_auth::authorization_metadata),
+        )
+        .route(
+            "/oauth/register",
+            post(mcp_auth::register).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/oauth/authorize", get(mcp_auth::begin_authorization))
+        .route(
+            "/oauth/token",
+            post(mcp_auth::exchange).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/oauth/revoke",
+            post(mcp_auth::revoke_token).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/mcp/authorize",
+            get(mcp_auth::consent_preview).post(mcp_auth::consent),
+        )
+        .route("/api/mcp/connections", get(mcp_auth::connections))
+        .route(
+            "/api/mcp/connections/{id}/revoke",
+            post(mcp_auth::disconnect),
+        )
         .route("/api/recovery/removed", get(maintenance::removed))
         .route("/api/docs/{id}/recovery", get(maintenance::export))
         .route("/api/docs/{id}/rebuild", post(maintenance::rebuild))

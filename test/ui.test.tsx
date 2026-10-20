@@ -154,6 +154,7 @@ before(async () => {
     requests.push({ path, body });
     if (path === "/api/fonts" || path === "/font-catalog.json")
       return response({ fonts: [] });
+    if (path === "/api/mcp/connections") return response({ connections: [] });
     if (failBootstrap && path === "/api/config")
       return new Response(JSON.stringify({ error: "Config unavailable" }), {
         status: 503,
@@ -492,6 +493,64 @@ test("workspace settings hand off to nonmodal appearance and other dialogs still
     "Opening a modal removes the appearance column",
   );
   assert.ok(screen.getByRole("dialog", { name: "Share document" }).open);
+});
+test("paragraph spacing is adjustable and resettable in each writing profile", async () => {
+  const { AppearancePanel } = await import("../src/appearance.tsx");
+  const previous = new Map(Object.entries(localStorage));
+  function Profile({ format }: { format: "markdown" | "fountain" }) {
+    const appearance = useAppearance();
+    return (
+      <AppearancePanel
+        owner
+        value={appearance.forFormat(format)}
+        onClose={() => {}}
+      />
+    );
+  }
+  try {
+    localStorage.clear();
+    for (const format of ["markdown", "fountain"] as const) {
+      const other = format === "markdown" ? "fountain" : "markdown";
+      localStorage.setItem(
+        `locdoc.writing.${other}`,
+        JSON.stringify({ paragraphSpacing: 0.6 }),
+      );
+      const page = render(<Profile format={format} />);
+      try {
+        fireEvent.click(page.getByRole("tab", { name: "Layout" }));
+        const slider = page.getByRole("slider", { name: "Paragraph spacing" });
+        fireEvent.change(slider, { target: { value: "0.4" } });
+        assert.equal(slider.value, "0.4");
+        assert.equal(
+          JSON.parse(localStorage.getItem(`locdoc.writing.${format}`)!)
+            .paragraphSpacing,
+          0.4,
+        );
+        assert.equal(
+          JSON.parse(localStorage.getItem(`locdoc.writing.${other}`)!)
+            .paragraphSpacing,
+          0.6,
+        );
+        const reset = page.getByRole("button", {
+          name: "Reset size & spacing",
+        });
+        assert.equal(reset.disabled, false);
+        fireEvent.click(reset);
+        assert.equal(slider.value, "0.15");
+        assert.equal(reset.disabled, true);
+        assert.equal(
+          JSON.parse(localStorage.getItem(`locdoc.writing.${other}`)!)
+            .paragraphSpacing,
+          0.6,
+        );
+      } finally {
+        page.unmount();
+      }
+    }
+  } finally {
+    localStorage.clear();
+    for (const [key, value] of previous) localStorage.setItem(key, value);
+  }
 });
 test("late sharing response cannot change the next document's permissions", async () => {
   await openWorkspace();
@@ -1067,6 +1126,103 @@ test("device font defaults and explicit sizes survive resizing and reopening", a
   }
 });
 
+test("MCP consent identifies the callback origin and never approves access automatically", async () => {
+  const { McpAuthorization, authorizationRedirect } =
+    await import("../src/mcp-authorization");
+  const original = globalThis.fetch;
+  const mutations: { request: string; allow: boolean }[] = [];
+  globalThis.fetch = async (_url, init = {}) => {
+    if (init.method === "POST") {
+      mutations.push(JSON.parse(String(init.body)));
+      return new Response(JSON.stringify({ error: "Connection failed" }), {
+        status: 503,
+      });
+    }
+    return response({
+      clientName: "ChatGPT <script>bad()</script>",
+      redirectUri: "https://callback.example.test/oauth/complete",
+      scopes: ["locdoc:read", "locdoc:write"],
+    });
+  };
+  const page = render(<McpAuthorization request="pending" />);
+  try {
+    await page.findByText("https://callback.example.test");
+    assert.ok(page.getByText("ChatGPT <script>bad()</script>"));
+    assert.equal(page.container.querySelectorAll("script").length, 0);
+    assert.equal(mutations.length, 0);
+    fireEvent.click(page.getByRole("button", { name: "Allow access" }));
+    await page.findByRole("alert");
+    assert.deepEqual(mutations, [{ request: "pending", allow: true }]);
+    assert.equal(
+      page.getByRole("button", { name: "Allow access" }).disabled,
+      false,
+    );
+    fireEvent.click(page.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => assert.equal(mutations.length, 2));
+    assert.equal(mutations[1].allow, false);
+    for (const url of [
+      "https://chatgpt.example.test/oauth/callback",
+      "http://127.0.0.2:6551/callback",
+      "http://[::1]:6551/callback",
+    ])
+      assert.equal(authorizationRedirect(url), url);
+    for (const url of [
+      "javascript:alert(1)",
+      "http://remote.example.test/callback",
+      "https://user:password@callback.example.test/",
+    ])
+      assert.throws(() => authorizationRedirect(url), /invalid redirect/);
+  } finally {
+    page.unmount();
+    globalThis.fetch = original;
+  }
+});
+
+test("disconnecting an MCP connection keeps it visible on failure and removes it only after success", async () => {
+  const { McpConnections } = await import("../src/mcp-authorization");
+  const original = globalThis.fetch;
+  let fail = true;
+  globalThis.fetch = async (_url, init = {}) => {
+    if (init.method === "POST")
+      return fail
+        ? new Response(JSON.stringify({ error: "Storage unavailable" }), {
+            status: 503,
+          })
+        : response({ ok: true });
+    return response({
+      connections: [
+        {
+          id: "connection",
+          clientName: "A connected app",
+          scopes: ["locdoc:read"],
+          created: 0,
+        },
+      ],
+    });
+  };
+  const page = render(
+    <McpConnections publicUrl="https://notes.example.test" />,
+  );
+  try {
+    await page.findByText("A connected app");
+    assert.ok(page.getByText("https://notes.example.test/mcp"));
+    fireEvent.click(page.getByRole("button", { name: "Disconnect" }));
+    await page.findByRole("alert");
+    assert.ok(page.getByText("A connected app"));
+    fail = false;
+    fireEvent.click(page.getByRole("button", { name: "Disconnect" }));
+    await waitFor(() =>
+      assert.ok(
+        page.queryByText("A connected app") === null,
+        "Disconnected application should disappear",
+      ),
+    );
+  } finally {
+    page.unmount();
+    globalThis.fetch = original;
+  }
+});
+
 test("writing profiles migrate Markdown and isolate Fountain across tabs and reopening", async () => {
   const previous = new Map(Object.entries(localStorage));
   const width = window.innerWidth;
@@ -1093,6 +1249,7 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(profile("fountain").lineHeight, 1.85);
     assert.equal(profile("fountain").pageWidth, null);
     assert.equal(profile("markdown").paragraphSpacing, 0.15);
+    assert.equal(profile("fountain").paragraphSpacing, 0.15);
     assert.equal(profile("fountain").scrollPastEnd, true);
     act(() => {
       profile("fountain").setFontSize(16);
@@ -1100,6 +1257,7 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
       profile("fountain").setPageWidth(900);
       profile("markdown").setFont("Georgia");
       profile("markdown").setParagraphSpacing(0.3);
+      profile("fountain").setParagraphSpacing(0.5);
       profile("fountain").setScrollPastEnd(false);
     });
     assert.equal(profile("markdown").fontSize, 21);
@@ -1132,6 +1290,7 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(profile("markdown").paragraphSpacing, 0.25);
     assert.equal(profile("markdown").scrollPastEnd, true);
     assert.equal(profile("fountain").scrollPastEnd, false);
+    assert.equal(profile("fountain").paragraphSpacing, 0.5);
     page.unmount();
     const reopened = renderHook(() => useAppearance());
     assert.equal(reopened.result.current.forFormat("markdown").fontSize, 13);
@@ -1142,6 +1301,10 @@ test("writing profiles migrate Markdown and isolate Fountain across tabs and reo
     assert.equal(reopened.result.current.forFormat("fountain").fontSize, 16);
     assert.equal(reopened.result.current.forFormat("fountain").lineHeight, 1.4);
     assert.equal(reopened.result.current.forFormat("fountain").pageWidth, 900);
+    assert.equal(
+      reopened.result.current.forFormat("fountain").paragraphSpacing,
+      0.5,
+    );
     assert.equal(
       reopened.result.current.forFormat("fountain").scrollPastEnd,
       false,
@@ -1964,6 +2127,132 @@ test("Markdown gaps cover nested, ordered, task and multi-paragraph list items w
       ),
     );
     assert.equal(ydoc.getText("content").toString(), source);
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
+test("Enter immediately spaces source paragraphs in Markdown and Fountain without adding blank lines", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { insertNewline } = await import("@codemirror/commands");
+  const { Awareness } = await import("y-protocols/awareness");
+  const first = "An action begins.",
+    second = "Another action follows.";
+  for (const extension of ["md", "fountain"]) {
+    const ydoc = new Y.Doc(),
+      awareness = new Awareness(ydoc);
+    ydoc.getText("content").insert(0, first + second);
+    const page = render(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        editable
+        id={`enter-gap-${extension}`}
+        path={`gap.${extension}`}
+        onComment={() => {}}
+        onUpload={() => {}}
+      />,
+    );
+    try {
+      const view = EditorView.findFromDOM(
+        page.container.querySelector(".cm-editor")!,
+      )!;
+      await act(async () => {
+        view.dispatch({ selection: { anchor: first.length } });
+        assert.equal(insertNewline(view), true);
+      });
+      const selector =
+        extension === "md" ? ".md-block-end" : ".fountain-block-end";
+      assert.deepEqual(
+        [...page.container.querySelectorAll(selector)].map(
+          (line) => line.textContent,
+        ),
+        [first, second],
+      );
+      assert.equal(ydoc.getText("content").toString(), `${first}\n${second}`);
+      await act(async () => {
+        view.dispatch({ selection: { anchor: view.state.doc.length } });
+        assert.equal(insertNewline(view), true);
+      });
+      assert.equal(ydoc.getText("content").toString(), `${first}\n${second}\n`);
+      assert.equal(page.container.querySelectorAll(selector).length, 2);
+      const last = page.container.querySelectorAll(".cm-line");
+      assert.equal(
+        last[last.length - 1].classList.contains(selector.slice(1)),
+        false,
+      );
+    } finally {
+      page.unmount();
+      awareness.destroy();
+      ydoc.destroy();
+    }
+  }
+});
+
+test("Fountain paragraph gaps keep cues, parentheticals, blank lines and hidden comments tight", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { insertNewline } = await import("@codemirror/commands");
+  const { Awareness } = await import("y-protocols/awareness");
+  const source =
+    "INT. STUDIO - DAY\n\nA light comes on.\n[[comment(ana): A hidden comment]]\nAnother light follows.\n\n[[comment(ana): A cue comment]]\n@ANA\n(softly)\nFirst speech.Second speech.\n\n~A song\n\n> A centered thought <";
+  const ydoc = new Y.Doc(),
+    awareness = new Awareness(ydoc);
+  ydoc.getText("content").insert(0, source);
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="fountain-gap-groups"
+      path="gaps.fountain"
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    await act(async () => {
+      view.dispatch({
+        selection: { anchor: source.indexOf("Second speech.") },
+      });
+      assert.equal(insertNewline(view), true);
+    });
+    assert.deepEqual(
+      [...page.container.querySelectorAll(".fountain-block-end")].map((line) =>
+        line.textContent!.trim(),
+      ),
+      [
+        "A light comes on.",
+        "Another light follows.",
+        "First speech.",
+        "Second speech.",
+        "A song",
+        "A centered thought",
+      ],
+    );
+    assert.equal(
+      page.container.querySelectorAll(
+        ".fountain-character > .fountain-block-end, .fountain-parenthetical > .fountain-block-end, .fountain-blank > .fountain-block-end, .fountain-note > .fountain-block-end, .fountain-scene > .fountain-block-end",
+      ).length,
+      0,
+    );
+    assert.equal(
+      page.container.querySelector(".fountain-character")!.textContent,
+      "ANA",
+    );
+    assert.equal(
+      ydoc.getText("content").toString(),
+      source.replace(
+        "First speech.Second speech.",
+        "First speech.\nSecond speech.",
+      ),
+    );
   } finally {
     page.unmount();
     awareness.destroy();

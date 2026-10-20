@@ -1,14 +1,24 @@
-import { StateEffect, StateField, type EditorState } from "@codemirror/state";
+import {
+  Facet,
+  StateEffect,
+  StateField,
+  type EditorState,
+} from "@codemirror/state";
 import { BlockWrapper, Decoration, EditorView } from "@codemirror/view";
 import { commentParser } from "./comment-syntax";
-import { visibleTextRanges } from "./editor-comments";
+import { sourceCommentRanges, visibleTextRanges } from "./editor-comments";
 import { parseFountain, type FountainScript } from "./fountain";
+import { emphasisContentRange } from "./emphasis-range";
 
 // Reuse the established delimiter parser, with Fountain's underscore semantics.
 // Prefixing each isolated line prevents Markdown block rules from reclassifying it.
 export const fountainInlineParser = commentParser.configure({
   remove: ["InlineCode", "HTMLTag", "Autolink", "Link", "Image"],
 });
+export const fountainScript = Facet.define<
+  FountainScript,
+  FountainScript | null
+>({ combine: (values) => values[0] ?? null });
 
 export function fountainPreview() {
   const focus = StateEffect.define<boolean>();
@@ -33,14 +43,43 @@ export function fountainPreview() {
           }));
     const inactive = (from: number, to: number) =>
       !active.some((r) => r.from <= to && r.to >= from);
+    const visibleLineStarts = new Map<number, number>();
+    for (const hidden of sourceCommentRanges(state))
+      if (
+        state.doc.lineAt(hidden.from).from === hidden.from &&
+        state.doc.lineAt(hidden.to).from === hidden.to
+      )
+        visibleLineStarts.set(hidden.to, hidden.from);
     for (const line of script.lines) {
+      // Standalone comments hide their trailing newline. An empty wrapper at
+      // that position would take the following visible line's formatting.
+      if (
+        line.kind === "note" &&
+        !visibleTextRanges(state, line.from, line.to).some((part) =>
+          state.sliceDoc(part.from, part.to).trim(),
+        )
+      )
+        continue;
+      const from = visibleLineStarts.get(line.from) ?? line.from;
+      // Explicit source lines get breathing room; wrapping remains within the
+      // same measured line. Keep cues, parentheticals and blank rows attached.
+      if (
+        (line.kind === "action" ||
+          line.kind === "dialogue" ||
+          line.kind === "lyric" ||
+          line.kind === "centered") &&
+        line.text.trim()
+      )
+        marks.push(
+          Decoration.line({ class: "fountain-block-end" }).range(from),
+        );
       wrappers.push(
         BlockWrapper.create({
           tagName: "div",
           attributes: {
             class: `fountain-line fountain-${line.kind}`,
           },
-        }).range(line.from, line.to),
+        }).range(from, line.to),
       );
       if (inactive(line.from, line.to))
         for (const range of line.markers.filter(
@@ -78,7 +117,8 @@ export function fountainPreview() {
           const from = line.from + node.from - 2,
             to = line.from + node.to - 2;
           if (from < line.from || to > line.to) return;
-          if (node.name === "Emphasis" || node.name === "StrongEmphasis")
+          if (node.name === "Emphasis" || node.name === "StrongEmphasis") {
+            const content = emphasisContentRange(node);
             marks.push(
               Decoration.mark({
                 class:
@@ -87,8 +127,12 @@ export function fountainPreview() {
                     : node.name === "StrongEmphasis"
                       ? "md-strong"
                       : "md-em",
-              }).range(from, to),
+              }).range(
+                line.from + content.from - 2,
+                line.from + content.to - 2,
+              ),
             );
+          }
           if (
             (node.name === "EmphasisMark" || node.name === "Escape") &&
             inactive(line.from, line.to)
@@ -138,6 +182,7 @@ export function fountainPreview() {
         : value;
     },
     provide: (field) => [
+      fountainScript.from(field, (value) => value.script),
       EditorView.decorations.from(field, (value) => value.decorations),
       EditorView.blockWrappers.from(field, (value) => value.wrappers),
     ],

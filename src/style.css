@@ -1134,7 +1134,8 @@ button:hover {
   min-height: calc(var(--doc-line-height) * 1em);
 }
 /* Keep block spacing in CodeMirror's measured line box, never a margin. */
-.cm-line.md-block-end {
+.cm-line.md-block-end,
+.cm-line.fountain-block-end {
   padding-block-end: calc(
     var(--doc-paragraph-spacing, 0.15) * var(--doc-line-height) * 1em
   ) !important;
@@ -1151,6 +1152,100 @@ button:hover {
   height: 16px;
   margin: 0;
   accent-color: var(--accent);
+}
+.connection-page {
+  height: 100dvh;
+  overflow: auto;
+  display: grid;
+  place-items: center;
+  padding: max(32px, var(--safe-top)) max(24px, var(--safe-right)) 32px
+    max(24px, var(--safe-left));
+  font: var(--ui-body-size)/1.6 var(--ui-font);
+}
+.connection-page > section {
+  width: min(100%, 440px);
+}
+.connection-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  text-decoration: none;
+  font: 2rem/1 var(--display-font);
+  margin-bottom: 30px;
+}
+.connection-page h1 {
+  font-size: var(--ui-title-size);
+  line-height: 1.25;
+  font-weight: var(--weight-semibold);
+  margin: 0 0 14px;
+}
+.connection-page p {
+  margin: 0 0 20px;
+}
+.connection-app-name {
+  display: block;
+  margin-top: 4px;
+}
+.connection-origin {
+  color: var(--muted);
+  font-size: var(--ui-meta-size);
+}
+.connection-origin code {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: var(--ui-body-size);
+  overflow-wrap: anywhere;
+}
+.connection-permissions {
+  padding: 18px 0 18px 20px;
+  margin: 20px 0;
+  border-block: 1px solid var(--line);
+}
+.connection-permissions li + li {
+  margin-top: 10px;
+}
+.connection-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 28px;
+}
+.mcp-connections {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+.mcp-connections h3 {
+  margin: 0 0 8px;
+  font-size: var(--ui-body-size);
+  font-weight: var(--weight-semibold);
+}
+.mcp-endpoint,
+.mcp-connection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-block: 10px;
+}
+.mcp-endpoint code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: var(--ui-meta-size);
+}
+.mcp-connection strong,
+.mcp-connection small {
+  display: block;
+}
+.mcp-connection strong {
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.mcp-connection small {
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
 }
 .writing-toggle .field-help {
   margin: 0 0 0 auto;

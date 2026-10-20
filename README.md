@@ -9,6 +9,7 @@ A small, self-hosted Markdown and Fountain editor over real files. Write in your
 - Document and folder links with **view & comment** or **edit & comment** access.
 - Searchable document links, link previews, local fonts, automatic dark mode, and mobile layouts.
 - Scroll positions remembered in each browser, separately for each document and reader.
+- An authenticated MCP interface for ChatGPT and other MCP clients.
 - A local owner key; no email, hosted database, or third-party collaboration service.
 
 ## Install
@@ -98,6 +99,28 @@ both speeches remain in normal editing flow. Comments, shared folders, simultane
 desktop file sync and raw-file downloads use the same system as Markdown.
 
 
+Speaker names already used in a script appear as suggestions when typing a new character cue. **Tab** accepts a suggestion; **↑/↓** followed by **Enter** selects one, and **Esc** dismisses the list. Enter by itself still inserts a line break. Names in comments and omitted passages are excluded.
+
+Paragraph spacing is available under **aA → Layout** for both Markdown and Fountain. Each format remembers its own value. Spacing follows explicit source lines; wrapped text, blank lines, speaker cues and parentheticals keep their existing layout.
+
+## ChatGPT and MCP
+
+Locdoc includes a Streamable HTTP MCP server in the same Rust process. No extra daemon, database or firewall port is needed. For ChatGPT, configure public HTTPS as described below and set `LOCDOC_PUBLIC_URL` to that exact origin.
+
+1. Open [ChatGPT Plugins](https://chatgpt.com/plugins) and choose **Add custom MCP server**.
+2. Enter your Locdoc URL followed by `/mcp`, for example `https://notes.example.com/mcp`.
+3. Choose OAuth authentication and create the plugin. Locdoc supplies OAuth discovery and dynamic client registration.
+4. In the Locdoc authorization page, check the application's return address and approve the requested read, edit and sharing permissions as the workspace owner. If that browser is locked, open the workspace as its owner first, then restart the connection.
+5. Select the resulting plugin in a ChatGPT conversation.
+
+ChatGPT account and workspace policies control whether custom MCP connections are available. See OpenAI's [connection guide](https://developers.openai.com/plugins/deploy/connect-chatgpt). Other MCP clients can use the same endpoint and OAuth discovery.
+
+Tools can list and search documents, read source, create documents and folders, edit or rename documents, manage document/folder links, participate in comments, and read or restore history. Renames stay within the document's current folder to preserve relative attachments. File deletion and access outside the configured docs folder are not exposed.
+
+Every source read returns a SHA-256 revision. An edit must supply that revision; if a browser or desktop edit changed the source meanwhile, the command fails without replacing it. Use `replace_text` for a small change in a long document: the old text must match exactly once. A stale replacement retry fails without applying the change twice. Whole-source edits can also be retried harmlessly when their result is already present. Successful edits report durable acceptance separately from pending disk projection and use the same sync engine as the editor. Source offsets in paginated reads count Unicode characters.
+
+The local owner key is never a connector credential. OAuth uses separate, expiring, revocable grants with `locdoc:read`, `locdoc:write` and `locdoc:share` permissions. **Your workspace → ChatGPT & MCP** lists connected applications and lets the owner disconnect them. Disconnection blocks new calls and refreshes; an operation already admitted may finish. Document contents are untrusted data, not instructions for a tool or model.
+
 ## Public sharing
 
 For access outside this computer, point your hostname at it and reverse-proxy HTTPS to `127.0.0.1:3477`. A standalone [Caddy example](deployment/Caddyfile.snippet) includes WebSocket support. Set `LOCDOC_PUBLIC_URL=https://notes.example.com` in `.env`, restart Locdoc, then run `npm run owner -- --public` on the server computer to recognize your browser as owner at that address.
@@ -172,7 +195,7 @@ npm test
 
 The JavaScript test entry point builds its frontend once in `node_modules/.cache/locdoc-verified-web`; its server fixtures use that exact folder through `LOCDOC_WEB`, leaving the running `dist` and the state folder untouched. This also works for `npm test` and `npm run test:js` in a fresh checkout. Production defaults to `dist`. Tests use temporary directories, never your documents or owner key. The suite covers concurrent clients, comments, desktop writers, server restarts, permission changes, folder boundaries, request races and durable browser drafts.
 
-Node test files run serially through `scripts/test-node.sh`, with a 256 MiB V8 old-space limit, a 2 GiB Linux data-allocation limit per process (including native buffers), no core dumps and a ten-minute suite timeout. The allocation limit is not a combined process-tree or RSS limit. Explicit sync soaks up to thirty minutes extend the timeout. Use the same wrapper for focused tests:
+Rust tests use four workers so parallel SQLite fsync and lease tests do not saturate the host. Node test files run serially through `scripts/test-node.sh`, with a 256 MiB V8 old-space limit, a 2 GiB Linux data-allocation limit per process (including native buffers), no core dumps and a ten-minute suite timeout. The allocation limit is not a combined process-tree or RSS limit. Explicit sync soaks up to thirty minutes extend the timeout. Use the same wrapper for focused tests:
 
 ```sh
 bash scripts/test-node.sh --import tsx --test --test-name-pattern="sidebar refreshes" test/ui.test.tsx

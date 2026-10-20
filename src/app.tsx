@@ -1,5 +1,6 @@
 import { DocumentWorkspace } from "./document-workspace";
 import { useWorkspace, type Workspace } from "./workspace";
+import { McpAuthorization } from "./mcp-authorization";
 
 export function WorkspaceView({ workspace }: { workspace: Workspace }) {
   // A document has one mounted state owner. Async callbacks from an unmounted
@@ -8,6 +9,10 @@ export function WorkspaceView({ workspace }: { workspace: Workspace }) {
     <DocumentWorkspace key={workspace.id || "empty"} workspace={workspace} />
   );
 }
-export function App() {
+function WorkspaceApp() {
   return <WorkspaceView workspace={useWorkspace()} />;
+}
+export function App() {
+  const request = new URLSearchParams(location.search).get("mcp_authorize");
+  return request ? <McpAuthorization request={request} /> : <WorkspaceApp />;
 }

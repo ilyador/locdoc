@@ -848,7 +848,9 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
     })?;
     Ok(())
 }
-fn load(s: &Store, d: &Document, r: &mut Room) -> Result<(String, Vec<Thread>, Vec<Value>)> {
+type Loaded = (String, Vec<Thread>, Vec<Value>);
+
+fn load(s: &Store, d: &Document, r: &mut Room) -> Result<Loaded> {
     r.reconcile(s, d)?;
     let mut meta = metadata(s, &d.id)?;
     migrate(s, d, r, &mut meta)?;
@@ -926,77 +928,154 @@ pub(super) async fn add(
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
         let mut r = room.lock().unwrap();
-        let (source, threads, rows) = load(s, &d, &mut r)?;
-        if let Some(request) = &b.request_id
-            && let Some(c) = rows
-                .iter()
-                .find(|c| c["requestId"] == *request && c["guest"] == guest)
-        {
-            return Ok(Json(browser_auth::comment_value(
-                c.clone(),
-                owner || editor,
-                Some(&guest),
-            )));
-        }
-        if threads.len() >= 2000 {
-            return Err(bad("This document has reached its comment limit."));
-        }
-        let at = if let Some(anchor) = &b.anchor {
-            if anchor.to_string().len() > 2048 || offset(&r, &anchor["start"]).is_none() {
-                return Err(bad("Invalid comment anchor."));
-            }
-            offset(&r, &anchor["end"])
-                .ok_or_else(|| bad("This passage moved. Select it again before commenting."))?
-        } else {
-            source.encode_utf16().count() as u32
-        };
-        let at_byte = byte(&source, at).ok_or_else(|| bad("Invalid comment anchor."))?;
-        if threads.iter().any(|t| t.from < at_byte && at_byte < t.to) {
-            return Err(bad("Reply to this conversation instead."));
-        }
-        let Insertion {
-            at,
-            encoded,
-            marker,
-        } = root_record(
-            &source,
-            &threads,
-            at_byte,
-            &[MessageText {
-                name: b.name.trim().into(),
-                body: b.body.trim().into(),
-            }],
-        )?;
-        let marker = utf16(&source, at) + encoded[..marker - at].encode_utf16().count() as u32;
-        let at = utf16(&source, at);
-        if source.len() + encoded.len() > 5 * MB {
-            return Err(bad("Document exceeds 5 MB."));
-        }
-        let rows = r.edit(s, &d, |room| {
-            insert(room, at, &encoded);
-            vec![json!({
-                "id": uuid::Uuid::new_v4().to_string(),
-                "body": b.body.trim(),
-                "name": b.name.trim(),
-                "guest": guest,
-                "quote": b.quote.map(|v| v.chars().take(500).collect::<String>()),
-                "anchor": b.anchor,
-                "source": relative(room, marker, Assoc::After),
-                "created": now(),
-                "resolved": false,
-                "replies": [],
-                "requestId": b.request_id
-            })]
-        })?;
-        let c = rows.into_iter().next().unwrap();
-        Ok(Json(browser_auth::comment_value(
-            c,
+        Ok(Json(add_command(
+            s,
+            &d,
+            &mut r,
+            b,
+            guest,
             owner || editor,
-            Some(&guest),
-        )))
+            None,
+        )?))
     })
     .await
 }
+pub(super) fn add_from_connector(
+    s: &Store,
+    d: &Document,
+    r: &mut Room,
+    actor: String,
+    mut b: NewComment,
+    expected_revision: &str,
+) -> Result<Value> {
+    let loaded = load(s, d, r)?;
+    let (source, _, rows) = &loaded;
+    if let Some(request) = b.request_id.as_deref()
+        && let Some(existing) = rows
+            .iter()
+            .find(|row| row["requestId"] == request && row["guest"] == actor)
+    {
+        return Ok(browser_auth::comment_value(
+            existing.clone(),
+            true,
+            Some(&actor),
+        ));
+    }
+    if hash(source) != expected_revision {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Document changed. Read it again before commenting.".into(),
+        ));
+    }
+    if !valid(&b.body, &b.name)
+        || b.request_id
+            .as_ref()
+            .is_none_or(|id| uuid::Uuid::parse_str(id).is_err())
+    {
+        return Err(bad("Enter a valid name, comment and UUID request_id."));
+    }
+    b.anchor = if let Some(quote) = b.quote.as_deref() {
+        if quote.is_empty() || quote.len() > 8 * 1024 {
+            return Err(bad("Choose a nonempty passage up to 8 KB."));
+        }
+        let at = source
+            .find(quote)
+            .ok_or_else(|| bad("Passage not found. Read the document again."))?;
+        let next = at + quote.chars().next().expect("nonempty passage").len_utf8();
+        if source[next..].contains(quote) {
+            return Err(bad(
+                "Passage occurs more than once. Choose a longer unique passage.",
+            ));
+        }
+        Some(json!({
+            "start": relative(r, utf16(source, at), Assoc::After),
+            "end": relative(r, utf16(source, at + quote.len()), Assoc::Before)
+        }))
+    } else {
+        None
+    };
+    add_command(s, d, r, b, actor, true, Some(loaded))
+}
+
+// HTTP and MCP comments share validation, idempotency and the engine commit.
+fn add_command(
+    s: &Store,
+    d: &Document,
+    r: &mut Room,
+    b: NewComment,
+    guest: String,
+    may_edit: bool,
+    loaded: Option<Loaded>,
+) -> Result<Value> {
+    let (source, threads, rows) = match loaded {
+        Some(loaded) => loaded,
+        None => load(s, d, r)?,
+    };
+    if let Some(request) = &b.request_id
+        && let Some(c) = rows
+            .iter()
+            .find(|c| c["requestId"] == *request && c["guest"] == guest)
+    {
+        return Ok(browser_auth::comment_value(
+            c.clone(),
+            may_edit,
+            Some(&guest),
+        ));
+    }
+    if threads.len() >= 2000 {
+        return Err(bad("This document has reached its comment limit."));
+    }
+    let at = if let Some(anchor) = &b.anchor {
+        if anchor.to_string().len() > 2048 || offset(r, &anchor["start"]).is_none() {
+            return Err(bad("Invalid comment anchor."));
+        }
+        offset(r, &anchor["end"])
+            .ok_or_else(|| bad("This passage moved. Select it again before commenting."))?
+    } else {
+        source.encode_utf16().count() as u32
+    };
+    let at_byte = byte(&source, at).ok_or_else(|| bad("Invalid comment anchor."))?;
+    if threads.iter().any(|t| t.from < at_byte && at_byte < t.to) {
+        return Err(bad("Reply to this conversation instead."));
+    }
+    let Insertion {
+        at,
+        encoded,
+        marker,
+    } = root_record(
+        &source,
+        &threads,
+        at_byte,
+        &[MessageText {
+            name: b.name.trim().into(),
+            body: b.body.trim().into(),
+        }],
+    )?;
+    let marker = utf16(&source, at) + encoded[..marker - at].encode_utf16().count() as u32;
+    let at = utf16(&source, at);
+    if source.len() + encoded.len() > 5 * MB {
+        return Err(bad("Document exceeds 5 MB."));
+    }
+    let rows = r.edit(s, d, |room| {
+        insert(room, at, &encoded);
+        vec![json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "body": b.body.trim(),
+            "name": b.name.trim(),
+            "guest": guest,
+            "quote": b.quote.map(|v| v.chars().take(500).collect::<String>()),
+            "anchor": b.anchor,
+            "source": relative(room, marker, Assoc::After),
+            "created": now(),
+            "resolved": false,
+            "replies": [],
+            "requestId": b.request_id
+        })]
+    })?;
+    let c = rows.into_iter().next().unwrap();
+    Ok(browser_auth::comment_value(c, may_edit, Some(&guest)))
+}
+
 #[derive(Deserialize)]
 pub(super) struct Edit {
     resolved: Option<bool>,
@@ -1012,10 +1091,22 @@ pub(super) async fn edit(
     h: HeaderMap,
     Json(b): Json<Edit>,
 ) -> Result<Json<Value>> {
+    let actor = guest_id(&h)?;
+    edit_as(s, id, cid, a, h, b, actor).await
+}
+
+pub(super) async fn edit_as(
+    s: App,
+    id: String,
+    cid: String,
+    a: Access,
+    h: HeaderMap,
+    b: Edit,
+    guest: String,
+) -> Result<Json<Value>> {
     doc_job(s, id.clone(), move |s| {
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
-        let guest = guest_id(&h)?;
         let room = s.room(&d)?;
         let mut r = room.lock().unwrap();
         let (source, threads, rows) = load(s, &d, &mut r)?;

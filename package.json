@@ -10,7 +10,7 @@
     "dev": "cargo run",
     "start": "node --env-file-if-exists=.env scripts/start.mjs",
     "build": "vite build && cargo build --release",
-    "test": "cargo test && cargo build && npm run test:js",
+    "test": "cargo test -- --test-threads=4 && cargo build && npm run test:js",
     "pretest:js": "vite build --outDir node_modules/.cache/locdoc-verified-web",
     "test:js": "bash scripts/test-node.sh --test --test-concurrency=1 test/*.test.mjs && bash scripts/test-node.sh --import tsx --test --test-concurrency=1 test/*.test.tsx",
     "owner": "node --env-file-if-exists=.env scripts/owner.mjs",
@@ -23,6 +23,7 @@
     "install:service": "node scripts/install-service.mjs"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "6.20.3",
     "@codemirror/commands": "6.11.1",
     "@codemirror/lang-markdown": "6.5.2",
     "@codemirror/language": "6.13.1",

@@ -48,6 +48,7 @@ import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { DraftRecoveryNotice } from "./draft-recovery";
 import { useDocument } from "./use-document";
 import { AppearancePanel, documentFontFamily } from "./appearance";
+import { McpConnections } from "./mcp-authorization";
 import { VersionHistory } from "./version-history";
 import { RenameDocument } from "./rename-document";
 import { CommentThread, CommentComposer } from "./comments";
@@ -1422,6 +1423,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     />
                   )}
                   {config?.owner && <RemovedDocumentRecovery />}
+                  {config?.owner && (
+                    <McpConnections publicUrl={config.publicUrl} />
+                  )}
                   {config?.owner && (
                     <button
                       className="menu-action"
