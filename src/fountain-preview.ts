@@ -22,6 +22,13 @@ export const fountainScript = Facet.define<
 
 export function fountainPreview() {
   const focus = StateEffect.define<boolean>();
+  const editingLine = (state: EditorState, focused: boolean) =>
+    focused &&
+    !state.readOnly &&
+    state.selection.ranges.length === 1 &&
+    state.selection.main.empty
+      ? state.doc.lineAt(state.selection.main.head).number - 1
+      : undefined;
   const activeLines = (state: EditorState) =>
     state.readOnly
       ? ""
@@ -163,6 +170,7 @@ export function fountainPreview() {
     return {
       script,
       focused,
+      editingLine: editingLine(state, focused),
       decorations: Decoration.set(marks, true),
       wrappers: BlockWrapper.set(wrappers, true),
     };
@@ -172,8 +180,13 @@ export function fountainPreview() {
     update(value, tr) {
       const focused =
         tr.effects.find((effect) => effect.is(focus))?.value ?? value.focused;
-      if (tr.docChanged)
-        return build(tr.state, parseFountain(tr.state.doc.toString()), focused);
+      const context = editingLine(tr.state, focused);
+      if (tr.docChanged || context !== value.editingLine)
+        return build(
+          tr.state,
+          parseFountain(tr.state.doc.toString(), context),
+          focused,
+        );
       return (tr.selection &&
         activeLines(tr.state) !== activeLines(tr.startState)) ||
         tr.reconfigured ||

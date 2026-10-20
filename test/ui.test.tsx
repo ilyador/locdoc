@@ -2419,6 +2419,265 @@ test("Fountain previews stay editable, preserve comments and survive format/perm
   ydoc.destroy();
 });
 
+test("Fountain speaker completion survives sidebar refreshes and accepts into collaborative text", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { currentCompletions } = await import("@codemirror/autocomplete");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    text = ydoc.getText("content"),
+    awareness = new Awareness(ydoc);
+  const source = "SARA\nHello.\n\n@Morgan\nAgain.\n\n\n\nEXT. YARD - DAY";
+  const position = source.indexOf("\n\n\n\n") + 2;
+  text.insert(0, source);
+  const props = {
+    ydoc,
+    provider: { awareness } as any,
+    editable: true,
+    id: "fountain-completion-refresh",
+    path: "Completion.fountain",
+    onChange() {},
+    onComment() {},
+    onUpload() {},
+  };
+  const page = render(<MarkdownEditor {...props} entries={[]} />);
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    await act(async () => {
+      view.focus();
+      view.dispatch({
+        changes: { from: position, insert: "Sa" },
+        selection: { anchor: position + 2 },
+        userEvent: "input.type",
+      });
+    });
+    await waitFor(() =>
+      assert.deepEqual(
+        currentCompletions(view.state).map(({ label }) => label),
+        ["SARA"],
+      ),
+    );
+    page.rerender(
+      <MarkdownEditor
+        {...props}
+        entries={[
+          { id: "other", path: "Other.md", kind: "file", shared: false },
+        ]}
+      />,
+    );
+    assert.ok(
+      EditorView.findFromDOM(page.container.querySelector(".cm-editor")!) ===
+        view,
+      "Sidebar metadata must retain the editor instance",
+    );
+    assert.deepEqual(
+      currentCompletions(view.state).map(({ label }) => label),
+      ["SARA"],
+    );
+    // CodeMirror intentionally ignores acceptance just after opening a menu.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      fireEvent.keyDown(view.contentDOM, { key: "Tab" });
+    });
+    assert.equal(
+      text.toString(),
+      source.slice(0, position) + "SARA" + source.slice(position),
+    );
+    assert.equal(view.state.doc.toString(), text.toString());
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
+test("uppercase speaker names format immediately in a middle-of-script drafting slot", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { fountainScript } = await import("../src/fountain-preview");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    text = ydoc.getText("content"),
+    awareness = new Awareness(ydoc);
+  const source = "SARA\nHello.\n\n\n\nEXT. YARD - DAY";
+  const position = source.indexOf("\n\n\n\n") + 2;
+  text.insert(0, source);
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="fountain-live-speaker"
+      path="Rehearsal.fountain"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    await act(async () => {
+      view.focus();
+      view.dispatch({
+        changes: { from: position, insert: "SARA" },
+        selection: { anchor: position + 4 },
+        userEvent: "input.type",
+      });
+    });
+    await waitFor(() =>
+      assert.equal(
+        [...page.container.querySelectorAll(".fountain-character")].filter(
+          (node) => node.textContent === "SARA",
+        ).length,
+        2,
+        "A new all-caps speaker must format before any dialogue has been typed",
+      ),
+    );
+    await act(async () => {
+      fireEvent.keyDown(view.contentDOM, { key: "Enter" });
+    });
+    const current = view.state.doc.lineAt(view.state.selection.main.head);
+    assert.equal(
+      view.state.facet(fountainScript)!.lines[current.number - 1].kind,
+      "dialogue",
+      "The blank line after a new cue must remain ready for dialogue",
+    );
+    assert.equal(
+      text.toString(),
+      source.slice(0, position) + "SARA\n" + source.slice(position),
+      "Drafting presentation must preserve the exact source line breaks",
+    );
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
+test("Fountain speaker pointer acceptance writes to Yjs and respects a revoked edit permission", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { currentCompletions } = await import("@codemirror/autocomplete");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    text = ydoc.getText("content"),
+    awareness = new Awareness(ydoc);
+  const source = "@Morgan\nHello.\n\nSARA\nAgain.\n\n";
+  text.insert(0, source);
+  const props = {
+    ydoc,
+    provider: { awareness } as any,
+    id: "fountain-completion-permission",
+    path: "Completion.fountain",
+    onChange() {},
+    onComment() {},
+    onUpload() {},
+  };
+  const page = render(<MarkdownEditor {...props} editable />);
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    async function typePrefix() {
+      await act(async () => {
+        view.focus();
+        view.dispatch({
+          changes: { from: source.length, insert: "Mo" },
+          selection: { anchor: source.length + 2 },
+          userEvent: "input.type",
+        });
+      });
+      await waitFor(() =>
+        assert.deepEqual(
+          currentCompletions(view.state).map(({ label }) => label),
+          ["Morgan"],
+        ),
+      );
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      });
+      const option = page.container.querySelector(
+        ".cm-tooltip-autocomplete li",
+      );
+      assert.ok(option, "The known speaker must have a visible menu item");
+      return option;
+    }
+    const option = await typePrefix();
+    await act(async () => {
+      fireEvent.mouseDown(option);
+    });
+    assert.equal(text.toString(), source + "@Morgan");
+    await act(async () => {
+      view.dispatch({
+        changes: { from: source.length, to: view.state.doc.length },
+        selection: { anchor: source.length },
+      });
+    });
+    const revokedOption = await typePrefix();
+    page.rerender(<MarkdownEditor {...props} editable={false} />);
+    await act(async () => {
+      fireEvent.mouseDown(revokedOption);
+      fireEvent.keyDown(view.contentDOM, { key: "Tab" });
+    });
+    assert.equal(text.toString(), source + "Mo");
+    assert.equal(view.state.doc.toString(), text.toString());
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
+test("choosing the Fountain Character element immediately offers known speakers", async () => {
+  const { MarkdownEditor } = await import("../src/editor.tsx");
+  const { EditorView } = await import("@codemirror/view");
+  const { currentCompletions } = await import("@codemirror/autocomplete");
+  const { Awareness } = await import("y-protocols/awareness");
+  const ydoc = new Y.Doc(),
+    text = ydoc.getText("content"),
+    awareness = new Awareness(ydoc);
+  const source = "SARA\nHello.\n\n@Morgan\nAgain.\n\n";
+  text.insert(0, source);
+  const ref = React.createRef<any>();
+  const page = render(
+    <MarkdownEditor
+      ref={ref}
+      ydoc={ydoc}
+      provider={{ awareness } as any}
+      editable
+      id="fountain-character-element-completion"
+      path="Completion.fountain"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />,
+  );
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    await act(async () => {
+      view.dispatch({ selection: { anchor: source.length } });
+      ref.current.formatFountain("character");
+    });
+    assert.equal(text.toString(), source + "@");
+    await waitFor(() =>
+      assert.deepEqual(
+        currentCompletions(view.state).map(({ label }) => label),
+        ["Morgan", "SARA"],
+      ),
+    );
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
 test("measured viewport and footer visibility survive keyboard resize, rotation and Done", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport");
   const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");

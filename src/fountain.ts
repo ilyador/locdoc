@@ -43,7 +43,11 @@ export type FountainScript = {
 // Layout never rewrites the source. Ranges are UTF-16 offsets, like CodeMirror
 // and Y.Text. Comments/notes are masked in place so their contents cannot become
 // character cues or move collaborative anchors.
-export function parseFountain(source: string): FountainScript {
+// A focused editing line may preview an unfinished cue before dialogue exists.
+export function parseFountain(
+  source: string,
+  editingLine?: number,
+): FountainScript {
   const hidden = sourceComments(source);
   let visible = "",
     start = 0;
@@ -123,7 +127,10 @@ export function parseFountain(source: string): FountainScript {
     }
     if (!text) {
       line.kind =
-        dialogue && (value.length >= 2 || i === raw.length - 1)
+        dialogue &&
+        (value.length >= 2 ||
+          i === raw.length - 1 ||
+          (editingLine === i && lines[i - 1]?.kind === "character"))
           ? "dialogue"
           : "blank";
       if (line.kind === "blank") {
@@ -204,7 +211,10 @@ export function parseFountain(source: string): FountainScript {
           /\p{L}/u.test(name) &&
           name === name.toUpperCase() &&
           !/[.!?:;]$/.test(name) &&
-          (raw[i + 1]?.trim() || i >= raw.length - 2));
+          (raw[i + 1]?.trim() ||
+            i >= raw.length - 2 ||
+            editingLine === i ||
+            (editingLine === i + 1 && !raw[i + 1]?.trim())));
       if (cue) {
         line.kind = "character";
         if (text.startsWith("@")) line.prefix = marker(lead, lead + 1);

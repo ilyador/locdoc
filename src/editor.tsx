@@ -28,6 +28,7 @@ import { rememberEditorScroll } from "./editor-scroll";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
 import { fountainPreview, fountainInlineParser } from "./fountain-preview";
 import { fountainSpeakerCompletion } from "./fountain-completion";
+import { startCompletion } from "@codemirror/autocomplete";
 import { parseFountain, type FountainForce } from "./fountain";
 import { emphasisContentRange } from "./emphasis-range";
 import type { Entry } from "./model";
@@ -1028,6 +1029,7 @@ export const MarkdownEditor = forwardRef<
           scrollIntoView: true,
         });
         v.focus();
+        if (kind === "character") startCompletion(v);
       },
       insertLink(url, label, anchor) {
         const v = view.current;

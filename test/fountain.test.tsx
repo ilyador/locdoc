@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { parseFountain } from "../src/fountain";
+import { fountainPreview, fountainScript } from "../src/fountain-preview";
 import {
   documentFormat,
   documentName,
@@ -98,6 +101,78 @@ test("in-progress cues and parentheticals format while typing without capturing 
     "action",
   );
   assert.equal(parseFountain("MORGAN\n(soft").lines[1].kind, "parenthetical");
+});
+
+test("active Fountain cues preview before dialogue in the middle of a script", () => {
+  const source = "An action.\n\nSARA\n\n\n# Next section";
+  assert.equal(parseFountain(source).lines[2].kind, "action");
+  assert.equal(parseFountain(source, 2).lines[2].kind, "character");
+  const afterEnter = parseFountain(source, 3);
+  assert.equal(afterEnter.lines[2].kind, "character");
+  assert.equal(afterEnter.lines[3].kind, "dialogue");
+  assert.equal(parseFountain(source, 4).lines[2].kind, "action");
+  for (const [text, line, expected] of [
+    ["An action.\nSARA\n\n# Next section", 1, "action"],
+    ["SARA\nHello.\nSARA\n\n# Next section", 2, "dialogue"],
+    ["[[SARA]]\n\n# Next section", 0, "note"],
+    ["/*\nSARA\n*/\n\n# Next section", 1, "omitted"],
+  ] as const)
+    assert.equal(parseFountain(text, line).lines[line].kind, expected);
+});
+
+test("Fountain cue drafting follows focus and permissions without reparsing within a line", () => {
+  const source = "An action.\n\nSARA\n\n\n# Next section";
+  const cue = source.indexOf("SARA");
+  const access = new Compartment();
+  let state = EditorState.create({
+    doc: source,
+    selection: { anchor: cue },
+    extensions: [
+      fountainPreview(),
+      access.of(EditorState.readOnly.of(false)),
+      EditorState.allowMultipleSelections.of(true),
+    ],
+  });
+  const script = () => state.facet(fountainScript)!;
+  const focus = (focused: boolean) => {
+    state = state.update({
+      effects: state
+        .facet(EditorView.focusChangeEffect)
+        .flatMap((effect) => effect(state, focused) ?? []),
+    }).state;
+  };
+  assert.equal(script().lines[2].kind, "action");
+  focus(true);
+  assert.equal(script().lines[2].kind, "character");
+  const withinCue = script();
+  state = state.update({ selection: { anchor: cue + 2 } }).state;
+  assert.ok(
+    script() === withinCue,
+    "Moving within one cue must reuse the parsed script",
+  );
+  state = state.update({ selection: { anchor: cue + 5 } }).state;
+  assert.equal(script().lines[2].kind, "character");
+  assert.equal(script().lines[3].kind, "dialogue");
+  focus(false);
+  assert.equal(script().lines[2].kind, "action");
+  assert.equal(script().lines[3].kind, "blank");
+  focus(true);
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(true)),
+  }).state;
+  assert.equal(script().lines[2].kind, "action");
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(false)),
+  }).state;
+  assert.equal(script().lines[2].kind, "character");
+  state = state.update({
+    selection: EditorSelection.create([
+      EditorSelection.cursor(0),
+      EditorSelection.cursor(cue + 5),
+    ]),
+  }).state;
+  assert.equal(script().lines[2].kind, "action");
+  assert.equal(state.doc.toString(), source);
 });
 
 test("file labels, names, document links and counts understand Fountain", () => {

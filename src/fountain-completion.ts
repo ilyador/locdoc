@@ -28,16 +28,23 @@ export function completeFountainSpeaker(
   const script = state.facet(fountainScript);
   if (!script) return null;
   const line = state.doc.lineAt(pos);
-  const prefix = /^([ \t]*)(@?)([\p{L}\p{M}\p{N} .’'_-]*)$/u.exec(
+  const prefix = /^([ \t]*)(@?)([\p{L}\p{M}\p{N} .’'_#-]*)$/u.exec(
     state.sliceDoc(line.from, pos),
   );
   if (!prefix || (!prefix[2] && !prefix[3].trim() && !explicit)) return null;
   const current = script.lines[line.number - 1];
   if (!["blank", "action", "character"].includes(current.kind)) return null;
+  // Standalone annotations are transparent to Fountain's cue boundaries.
+  let previous = line.number - 2;
+  while (
+    previous >= 0 &&
+    ["note", "omitted"].includes(script.lines[previous].kind)
+  )
+    previous--;
   if (
     current.kind !== "character" &&
     !prefix[2] &&
-    !(line.number === 1 || script.lines[line.number - 2].kind === "blank")
+    !(previous < 0 || script.lines[previous].kind === "blank")
   )
     return null;
   // Never replace text after the caret, comment records, or cue extensions.
@@ -72,7 +79,7 @@ export function completeFountainSpeaker(
         });
       },
     })),
-    validFor: /^[\p{L}\p{M}\p{N} .’'_-]*$/u,
+    validFor: /^[\p{L}\p{M}\p{N} .’'_#-]*$/u,
   };
 }
 

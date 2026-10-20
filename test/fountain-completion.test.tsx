@@ -94,6 +94,25 @@ test("completion never replaces the remainder of a name, cue extensions or hidde
   assert.ok(complete(cues + "SARA", false, cues.length + 2) === null);
 });
 
+test("standalone annotations preserve a cue boundary without creating one after prose or dialogue", () => {
+  const annotations = [
+    "[[A script note]]\n",
+    "[[comment(Reviewer): Keep this]]\n",
+    "/*\nAn omitted section.\n*/\n",
+  ];
+  for (const annotation of annotations) {
+    assert.ok(
+      complete(cues + annotation + "Sa") !== null,
+      "Annotations after a blank line must preserve speaker completion",
+    );
+    for (const preceding of ["An action line.\n", "SARA\nHello.\n"])
+      assert.ok(
+        complete(cues + preceding + annotation + "Sa") === null,
+        "Annotations must not create a new cue boundary",
+      );
+  }
+});
+
 let dom: JSDOM;
 const views: EditorView[] = [];
 before(() => {
@@ -184,6 +203,29 @@ function key(view: EditorView, value: string) {
     }),
   );
 }
+
+test("typing a numbered speaker prefix retains its suggestions through the hash", async () => {
+  const source = cues + "GUARD #1\nHalt.\n\n";
+  const { view } = open(source);
+  view.dispatch({
+    changes: { from: source.length, insert: "GUARD" },
+    selection: { anchor: source.length + 5 },
+    userEvent: "input.type",
+  });
+  await suggestions(view, ["GUARD #1"]);
+  view.dispatch({
+    changes: { from: view.state.doc.length, insert: " #" },
+    selection: { anchor: view.state.doc.length + 2 },
+    userEvent: "input.type",
+  });
+  await suggestions(view, ["GUARD #1"]);
+  assert.ok(
+    complete(source + "GUARD #") !== null,
+    "A numbered speaker prefix must also open completion directly",
+  );
+  key(view, "Tab");
+  assert.equal(view.state.doc.toString(), source + "GUARD #1");
+});
 
 test("typing offers prefix matches; Tab accepts, while ordinary Enter still inserts one newline", async () => {
   const { view } = open(cues);
