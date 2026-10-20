@@ -31,7 +31,7 @@ export function completeFountainSpeaker(
   const prefix = /^([ \t]*)(@?)([\p{L}\p{M}\p{N} .’'_#-]*)$/u.exec(
     state.sliceDoc(line.from, pos),
   );
-  if (!prefix || (!prefix[2] && !prefix[3].trim() && !explicit)) return null;
+  if (!prefix || (!explicit && !/^\p{Lu}{2}/u.test(prefix[3]))) return null;
   const current = script.lines[line.number - 1];
   if (!["blank", "action", "character"].includes(current.kind)) return null;
   // Standalone annotations are transparent to Fountain's cue boundaries.
@@ -79,7 +79,9 @@ export function completeFountainSpeaker(
         });
       },
     })),
-    validFor: /^[\p{L}\p{M}\p{N} .’'_#-]*$/u,
+    validFor: explicit
+      ? /^[\p{L}\p{M}\p{N} .’'_#-]*$/u
+      : /^\p{Lu}{2}[\p{L}\p{M}\p{N} .’'_#-]*$/u,
   };
 }
 

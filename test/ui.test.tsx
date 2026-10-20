@@ -2448,7 +2448,7 @@ test("Fountain speaker completion survives sidebar refreshes and accepts into co
     await act(async () => {
       view.focus();
       view.dispatch({
-        changes: { from: position, insert: "Sa" },
+        changes: { from: position, insert: "SA" },
         selection: { anchor: position + 2 },
         userEvent: "input.type",
       });
@@ -2586,7 +2586,7 @@ test("Fountain speaker pointer acceptance writes to Yjs and respects a revoked e
       await act(async () => {
         view.focus();
         view.dispatch({
-          changes: { from: source.length, insert: "Mo" },
+          changes: { from: source.length, insert: "MO" },
           selection: { anchor: source.length + 2 },
           userEvent: "input.type",
         });
@@ -2623,7 +2623,7 @@ test("Fountain speaker pointer acceptance writes to Yjs and respects a revoked e
       fireEvent.mouseDown(revokedOption);
       fireEvent.keyDown(view.contentDOM, { key: "Tab" });
     });
-    assert.equal(text.toString(), source + "Mo");
+    assert.equal(text.toString(), source + "MO");
     assert.equal(view.state.doc.toString(), text.toString());
   } finally {
     page.unmount();

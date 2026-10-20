@@ -30,13 +30,13 @@ function complete(source: string, explicit = false, pos = source.length) {
 }
 
 test("Fountain completion reuses known cues, deduplicates extensions and preserves forced names", () => {
-  const result = complete(cues + "M")!;
+  const result = complete(cues + "MC")!;
   assert.equal(result.from, cues.length);
   assert.deepEqual(
     result.options.map(({ label }) => label),
     ["SARA", "IBRAHIM", "McLane", "李明"],
   );
-  const source = cues + "  @M";
+  const source = cues + "  @MC";
   const forced = complete(source)!;
   assert.equal(forced.from, cues.length + 3);
   const { view } = open(source);
@@ -68,14 +68,35 @@ test("speaker suggestions do not interrupt action continuations, dialogue, scene
     "Explicit completion can list known speakers",
   );
   assert.ok(
-    complete(cues + "@") !== null,
+    complete(cues + "@", true) !== null,
     "The forced cue marker lists known speakers",
   );
   const hidden =
     "[[comment(Reviewer): FALSE NAME]]\n\n/*\nFAKE NAME\nSpeech.\n*/\n\n";
   assert.deepEqual(
-    complete(cues + hidden + "S")!.options.map((cue) => cue.label),
+    complete(cues + hidden + "SA")!.options.map((cue) => cue.label),
     ["SARA", "IBRAHIM", "McLane", "李明"],
+  );
+});
+
+test("automatic speaker suggestions require two leading capital letters", () => {
+  for (const prefix of ["", "S", "Sa", "sa", "sA", "word SA", "@", "@S"])
+    assert.ok(
+      complete(cues + prefix) === null,
+      `No automatic menu for ${JSON.stringify(prefix)}`,
+    );
+  for (const prefix of ["SA", "  SA", "@SA", "SAra"])
+    assert.ok(
+      complete(cues + prefix) !== null,
+      `Automatic menu for ${JSON.stringify(prefix)}`,
+    );
+  assert.ok(
+    complete(cues + "ÉVA\nHello.\n\nÉV") !== null,
+    "Accented capitals also count",
+  );
+  assert.ok(
+    complete(cues + "Sa", true) !== null,
+    "Explicit speaker selection stays available",
   );
 });
 
@@ -102,12 +123,12 @@ test("standalone annotations preserve a cue boundary without creating one after 
   ];
   for (const annotation of annotations) {
     assert.ok(
-      complete(cues + annotation + "Sa") !== null,
+      complete(cues + annotation + "SA") !== null,
       "Annotations after a blank line must preserve speaker completion",
     );
     for (const preceding of ["An action line.\n", "SARA\nHello.\n"])
       assert.ok(
-        complete(cues + preceding + annotation + "Sa") === null,
+        complete(cues + preceding + annotation + "SA") === null,
         "Annotations must not create a new cue boundary",
       );
   }
@@ -230,7 +251,7 @@ test("typing a numbered speaker prefix retains its suggestions through the hash"
 test("typing offers prefix matches; Tab accepts, while ordinary Enter still inserts one newline", async () => {
   const { view } = open(cues);
   view.dispatch({
-    changes: { from: cues.length, insert: "Sa" },
+    changes: { from: cues.length, insert: "SA" },
     selection: { anchor: cues.length + 2 },
     userEvent: "input.type",
   });
@@ -239,13 +260,40 @@ test("typing offers prefix matches; Tab accepts, while ordinary Enter still inse
   assert.equal(view.state.doc.toString(), cues + "SARA");
   assert.equal(view.state.selection.main.head, view.state.doc.length);
   view.dispatch({
-    changes: { from: cues.length, to: view.state.doc.length, insert: "Sa" },
+    changes: { from: cues.length, to: view.state.doc.length, insert: "SA" },
     selection: { anchor: cues.length + 2 },
   });
   startCompletion(view);
   await suggestions(view, ["SARA"]);
   key(view, "Enter");
-  assert.equal(view.state.doc.toString(), cues + "Sa\n");
+  assert.equal(view.state.doc.toString(), cues + "SA\n");
+});
+
+test("automatic speaker suggestions close when the two-capital prefix is removed", async () => {
+  const { view } = open(cues);
+  view.dispatch({
+    changes: { from: cues.length, insert: "SA" },
+    selection: { anchor: cues.length + 2 },
+    userEvent: "input.type",
+  });
+  await suggestions(view, ["SARA"]);
+  view.dispatch({
+    changes: { from: cues.length + 1, to: cues.length + 2 },
+    selection: { anchor: cues.length + 1 },
+    userEvent: "delete.backward",
+  });
+  await suggestions(view, []);
+  view.dispatch({
+    changes: { from: cues.length + 1, insert: "A" },
+    selection: { anchor: cues.length + 2 },
+    userEvent: "input.type",
+  });
+  await suggestions(view, ["SARA"]);
+  view.dispatch({
+    changes: { from: cues.length + 1, to: cues.length + 2, insert: "a" },
+    userEvent: "input.type",
+  });
+  await suggestions(view, []);
 });
 
 test("arrow and Enter accept deliberately; Escape and a revoked edit permission never insert", async () => {
