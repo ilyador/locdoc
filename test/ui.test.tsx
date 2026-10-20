@@ -2493,7 +2493,7 @@ test("Fountain speaker completion survives sidebar refreshes and accepts into co
   }
 });
 
-test("uppercase speaker names format immediately in a middle-of-script drafting slot", async () => {
+test("speaker formatting starts at two capitals and resets after backspace while drafting", async () => {
   const { MarkdownEditor } = await import("../src/editor.tsx");
   const { EditorView } = await import("@codemirror/view");
   const { fountainScript } = await import("../src/fountain-preview");
@@ -2523,7 +2523,48 @@ test("uppercase speaker names format immediately in a middle-of-script drafting 
     await act(async () => {
       view.focus();
       view.dispatch({
-        changes: { from: position, insert: "SARA" },
+        changes: { from: position, insert: "S" },
+        selection: { anchor: position + 1 },
+        userEvent: "input.type",
+      });
+    });
+    assert.equal(
+      view.state.facet(fountainScript)!.lines[
+        view.state.doc.lineAt(position).number - 1
+      ].kind,
+      "action",
+      "One capital must stay ordinary text",
+    );
+    await act(async () => {
+      view.dispatch({
+        changes: { from: position + 1, insert: "A" },
+        selection: { anchor: position + 2 },
+        userEvent: "input.type",
+      });
+    });
+    assert.ok(
+      [...page.container.querySelectorAll(".fountain-character")].some(
+        (node) => node.textContent === "SA",
+      ),
+      "Two capitals must trigger speaker formatting",
+    );
+    await act(async () => {
+      view.dispatch({
+        changes: { from: position + 1, to: position + 2 },
+        selection: { anchor: position + 1 },
+        userEvent: "delete.backward",
+      });
+    });
+    assert.equal(
+      view.state.facet(fountainScript)!.lines[
+        view.state.doc.lineAt(position).number - 1
+      ].kind,
+      "action",
+      "Deleting back to one capital must restore ordinary text",
+    );
+    await act(async () => {
+      view.dispatch({
+        changes: { from: position + 1, insert: "ARA" },
         selection: { anchor: position + 4 },
         userEvent: "input.type",
       });

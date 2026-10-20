@@ -40,6 +40,10 @@ export type FountainScript = {
   omissions: FountainRange[];
 };
 
+export function hasSpeakerPrefix(text: string) {
+  return /^\p{Lu}{2}/u.test(text);
+}
+
 // Layout never rewrites the source. Ranges are UTF-16 offsets, like CodeMirror
 // and Y.Text. Comments/notes are masked in place so their contents cannot become
 // character cues or move collaborative anchors.
@@ -208,7 +212,7 @@ export function parseFountain(
       const cue =
         text.startsWith("@") ||
         (boundary &&
-          /\p{L}/u.test(name) &&
+          hasSpeakerPrefix(name) &&
           name === name.toUpperCase() &&
           !/[.!?:;]$/.test(name) &&
           (raw[i + 1]?.trim() ||

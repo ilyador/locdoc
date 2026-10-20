@@ -120,6 +120,26 @@ test("active Fountain cues preview before dialogue in the middle of a script", (
     assert.equal(parseFountain(text, line).lines[line].kind, expected);
 });
 
+test("automatic speaker formatting requires two leading capitals, including while drafting", () => {
+  for (const name of ["S", "É", "Sa", "sA", "S A", "S1"])
+    for (const source of [name, `${name}\n`, `${name}\nSpeech.`])
+      for (const editingLine of [undefined, 0, 1])
+        assert.equal(
+          parseFountain(source, editingLine).lines[0].kind,
+          "action",
+          `No automatic cue for ${name}`,
+        );
+  for (const name of ["SA", "ÉV", "@S", "@李"])
+    assert.equal(parseFountain(`${name}\nSpeech.`).lines[0].kind, "character");
+  for (const name of ["S", "SA"])
+    for (const editingLine of [2, 3])
+      assert.equal(
+        parseFountain(`Action.\n\n${name}\n\n# Next`, editingLine).lines[2]
+          .kind,
+        name === "SA" ? "character" : "action",
+      );
+});
+
 test("Fountain cue drafting follows focus and permissions without reparsing within a line", () => {
   const source = "An action.\n\nSARA\n\n\n# Next section";
   const cue = source.indexOf("SARA");
