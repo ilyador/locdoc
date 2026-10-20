@@ -1209,6 +1209,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     value={doc}
                     name={name}
                     onChange={updateShare}
+                    mcpTarget={
+                      doc.owner ? { kind: "document", id: doc.id } : undefined
+                    }
                   />
                   {doc.owner && doc.path.includes("/") && (
                     <button

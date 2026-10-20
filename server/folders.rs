@@ -36,7 +36,7 @@ impl Grant {
     }
 }
 
-fn directory_identity(s: &Store, path: &str) -> Result<String> {
+pub(super) fn directory_identity(s: &Store, path: &str) -> Result<String> {
     let metadata = fs::metadata(s.safe(path, false)?)?;
     if !metadata.is_dir() {
         return Err(bad("Choose an existing folder."));
@@ -163,12 +163,15 @@ pub(super) async fn read(
                 row,
             )
             .optional()?;
-    Ok(Json(
-        value
-            .filter(|value| value.identity == identity)
-            .map(|value| value.value(&s))
-            .unwrap_or_else(|| json!({"permission":"private","shareUrl":null})),
-    ))
+    let mut value = value
+        .filter(|value| value.identity == identity)
+        .map(|value| value.value(&s))
+        .unwrap_or_else(|| json!({"permission":"private","shareUrl":null}));
+    let access = mcp_access::folder_access(&s, &path)?;
+    value["mcpAllowed"] = json!(access.mcp_allowed);
+    value["mcpDirect"] = json!(access.mcp_direct);
+    value["mcpInherited"] = json!(access.mcp_inherited);
+    Ok(Json(value))
 }
 #[derive(Deserialize)]
 pub(super) struct Change {
@@ -182,61 +185,61 @@ pub(super) async fn share(
     _owner: security::Owner,
     Json(b): Json<Change>,
 ) -> Result<Json<Value>> {
-    job(s, move |s| {
-        if !["private", "view", "edit"].contains(&b.permission.as_str()) {
-            return Err(bad("Choose private, view, or edit."));
-        }
-        let path = documents::relative_path(&b.path, false)?;
-        let identity = directory_identity(s, &path)?;
-        let previous =
-            s.db.lock()
-                .unwrap()
-                .query_row(
-                    "SELECT path,identity,permission,token FROM folder_shares WHERE path=?",
-                    [&path],
-                    row,
-                )
-                .optional()?;
-        let token = previous
-            .filter(|value| {
-                !b.rotate
-                    && b.permission != "private"
-                    && value.permission != "private"
-                    && value.identity == identity
-            })
-            .map(|value| value.token)
-            .unwrap_or_else(token);
-        let value = Grant {
-            path,
-            identity,
-            permission: b.permission,
-            token,
-        };
-        const UPSERT: &str = "INSERT INTO folder_shares(path,identity,permission,token)
+    job(s, move |s| share_folder(s, b)).await.map(Json)
+}
+pub(super) fn share_folder(s: &Store, b: Change) -> Result<Value> {
+    if !["private", "view", "edit"].contains(&b.permission.as_str()) {
+        return Err(bad("Choose private, view, or edit."));
+    }
+    let path = documents::relative_path(&b.path, false)?;
+    let identity = directory_identity(s, &path)?;
+    let previous =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT path,identity,permission,token FROM folder_shares WHERE path=?",
+                [&path],
+                row,
+            )
+            .optional()?;
+    let token = previous
+        .filter(|value| {
+            !b.rotate
+                && b.permission != "private"
+                && value.permission != "private"
+                && value.identity == identity
+        })
+        .map(|value| value.token)
+        .unwrap_or_else(token);
+    let value = Grant {
+        path,
+        identity,
+        permission: b.permission,
+        token,
+    };
+    const UPSERT: &str = "INSERT INTO folder_shares(path,identity,permission,token)
             VALUES(?,?,?,?) ON CONFLICT(path) DO UPDATE SET
             identity=excluded.identity,permission=excluded.permission,token=excluded.token";
-        s.db.lock().unwrap().execute(
-            UPSERT,
-            params![value.path, value.identity, value.permission, value.token],
-        )?;
-        s.permissions.invalidate();
-        // Reconnect descendants immediately. Cached passive checks also see
-        // this mutation even if a busy room cannot be notified immediately.
-        let rooms: Vec<_> = s
-            .rooms
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, room)| (id.clone(), room.clone()))
-            .collect();
-        for (id, room) in rooms {
-            if s.doc(&id).is_ok_and(|doc| value.contains(&doc.path))
-                && let Ok(room) = room.try_lock()
-            {
-                let _ = room.tx.send(vec![126]);
-            }
+    s.db.lock().unwrap().execute(
+        UPSERT,
+        params![value.path, value.identity, value.permission, value.token],
+    )?;
+    s.permissions.invalidate();
+    // Reconnect descendants immediately. Cached passive checks also see
+    // this mutation even if a busy room cannot be notified immediately.
+    let rooms: Vec<_> = s
+        .rooms
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, room)| (id.clone(), room.clone()))
+        .collect();
+    for (id, room) in rooms {
+        if s.doc(&id).is_ok_and(|doc| value.contains(&doc.path))
+            && let Ok(room) = room.try_lock()
+        {
+            let _ = room.tx.send(vec![126]);
         }
-        Ok(Json(value.value(s)))
-    })
-    .await
+    }
+    Ok(value.value(s))
 }

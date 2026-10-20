@@ -874,14 +874,23 @@ pub(super) async fn list(
         let guest = guest_id(&h).ok();
         let room = s.room(&d)?;
         let mut r = room.lock().unwrap();
-        let (_, _, rows) = load(s, &d, &mut r)?;
-        let rows = rows
-            .into_iter()
-            .map(|row| browser_auth::comment_value(row, owner || editor, guest.as_deref()))
-            .collect::<Vec<_>>();
-        Ok(Json(json!({"comments":rows})))
+        list_payload(s, &d, &mut r, owner || editor, guest.as_deref()).map(Json)
     })
     .await
+}
+pub(super) fn list_payload(
+    s: &Store,
+    d: &Document,
+    room: &mut Room,
+    may_edit: bool,
+    guest: Option<&str>,
+) -> Result<Value> {
+    let (_, _, rows) = load(s, d, room)?;
+    let rows = rows
+        .into_iter()
+        .map(|row| browser_auth::comment_value(row, may_edit, guest))
+        .collect::<Vec<_>>();
+    Ok(json!({"comments": rows}))
 }
 #[derive(Deserialize)]
 pub(super) struct NewComment {
@@ -1109,94 +1118,106 @@ pub(super) async fn edit_as(
         let (owner, editor) = s.access(&h, &d, &a)?;
         let room = s.room(&d)?;
         let mut r = room.lock().unwrap();
-        let (source, threads, rows) = load(s, &d, &mut r)?;
-        let index = rows
-            .iter()
-            .position(|v| v["id"] == cid)
-            .ok_or_else(|| bad("Comment not found."))?;
-        let mut c = rows[index].clone();
-        let mut insertion = None;
-        if let Some(resolved) = b.resolved {
-            if !owner && !editor && c["guest"] != guest {
-                return Err(denied());
-            }
-            c["resolved"] = json!(resolved);
+        edit_payload(s, &d, &mut r, cid, b, &guest, (owner, editor)).map(Json)
+    })
+    .await
+}
+pub(super) fn edit_payload(
+    s: &Store,
+    d: &Document,
+    r: &mut Room,
+    cid: String,
+    b: Edit,
+    guest: &str,
+    (owner, editor): (bool, bool),
+) -> Result<Value> {
+    let (source, threads, rows) = load(s, d, r)?;
+    let index = rows
+        .iter()
+        .position(|v| v["id"] == cid)
+        .ok_or_else(|| bad("Comment not found."))?;
+    let mut c = rows[index].clone();
+    let mut insertion = None;
+    if let Some(resolved) = b.resolved {
+        if !owner && !editor && c["guest"] != guest {
+            return Err(denied());
         }
-        if let Some(body) = b.body {
-            let name = b.name.unwrap_or_default();
-            if !valid(&body, &name) {
-                return Err(bad(
-                    "Enter a name (1–60 characters) and reply (1–4,000 characters).",
-                ));
-            }
-            if b.request_id
-                .as_ref()
-                .is_some_and(|v| uuid::Uuid::parse_str(v).is_err())
-            {
-                return Err(bad("Invalid reply request."));
-            }
-            let mut requests = c["replyRequests"].as_array().cloned().unwrap_or_default();
-            if let Some(request) = &b.request_id
-                && requests
-                    .iter()
-                    .any(|v| v["id"] == *request && v["guest"] == guest)
-            {
-                return Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))));
-            }
-            if c["replies"].as_array().unwrap().len() >= 200 {
-                return Err(bad("This thread has reached its reply limit."));
-            }
-            let encoded = format!("\n{}", record(&name, &body));
-            if source.len() + encoded.len() > 5 * MB {
-                return Err(bad("Document exceeds 5 MB."));
-            }
-            let at = threads[index].to;
-            let mut candidate = source.clone();
-            candidate.insert_str(at, &encoded);
-            let mut messages = threads[index].messages.clone();
-            messages.push(MessageText {
-                name: name.trim().into(),
-                body: body.trim().into(),
-            });
-            let expected = threads
+        c["resolved"] = json!(resolved);
+    }
+    if let Some(body) = b.body {
+        let name = b.name.unwrap_or_default();
+        if !valid(&body, &name) {
+            return Err(bad(
+                "Enter a name (1–60 characters) and reply (1–4,000 characters).",
+            ));
+        }
+        if b.request_id
+            .as_ref()
+            .is_some_and(|v| uuid::Uuid::parse_str(v).is_err())
+        {
+            return Err(bad("Invalid reply request."));
+        }
+        let mut requests = c["replyRequests"].as_array().cloned().unwrap_or_default();
+        if let Some(request) = &b.request_id
+            && requests
                 .iter()
-                .enumerate()
-                .map(|(i, thread)| {
-                    let shifted = thread.from + if thread.from >= at { encoded.len() } else { 0 };
-                    (
-                        shifted,
-                        if i == index {
-                            messages.as_slice()
-                        } else {
-                            thread.messages.as_slice()
-                        },
-                    )
-                })
-                .collect::<Vec<_>>();
-            if !valid_candidate(&source, &candidate, &expected) {
-                return Err(bad(
-                    "This conversation moved into a Markdown block. Move it outside that block before replying.",
-                ));
-            }
-            insertion = Some((utf16(&source, threads[index].to), encoded));
-            c["replies"]
-                .as_array_mut()
-                .unwrap()
-                .push(json!({"body":body.trim(),"name":name.trim(),"created":now()}));
-            if let Some(request) = b.request_id {
-                requests.push(json!({"id":request,"guest":guest}));
-            }
-            c["replyRequests"] = json!(requests);
+                .any(|v| v["id"] == *request && v["guest"] == guest)
+        {
+            return Ok(browser_auth::comment_value(c, owner || editor, Some(guest)));
         }
-        let values = r.edit(s, &d, |room| {
-            if let Some((at, encoded)) = insertion {
-                insert(room, at, &encoded);
-            }
-            vec![c]
-        })?;
-        let c = values.into_iter().next().unwrap();
-        Ok(Json(browser_auth::comment_value(c, owner || editor, Some(&guest))))
-    }).await
+        if c["replies"].as_array().unwrap().len() >= 200 {
+            return Err(bad("This thread has reached its reply limit."));
+        }
+        let encoded = format!("\n{}", record(&name, &body));
+        if source.len() + encoded.len() > 5 * MB {
+            return Err(bad("Document exceeds 5 MB."));
+        }
+        let at = threads[index].to;
+        let mut candidate = source.clone();
+        candidate.insert_str(at, &encoded);
+        let mut messages = threads[index].messages.clone();
+        messages.push(MessageText {
+            name: name.trim().into(),
+            body: body.trim().into(),
+        });
+        let expected = threads
+            .iter()
+            .enumerate()
+            .map(|(i, thread)| {
+                let shifted = thread.from + if thread.from >= at { encoded.len() } else { 0 };
+                (
+                    shifted,
+                    if i == index {
+                        messages.as_slice()
+                    } else {
+                        thread.messages.as_slice()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if !valid_candidate(&source, &candidate, &expected) {
+            return Err(bad(
+                "This conversation moved into a Markdown block. Move it outside that block before replying.",
+            ));
+        }
+        insertion = Some((utf16(&source, threads[index].to), encoded));
+        c["replies"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"body":body.trim(),"name":name.trim(),"created":now()}));
+        if let Some(request) = b.request_id {
+            requests.push(json!({"id":request,"guest":guest}));
+        }
+        c["replyRequests"] = json!(requests);
+    }
+    let values = r.edit(s, d, |room| {
+        if let Some((at, encoded)) = insertion {
+            insert(room, at, &encoded);
+        }
+        vec![c]
+    })?;
+    let c = values.into_iter().next().unwrap();
+    Ok(browser_auth::comment_value(c, owner || editor, Some(guest)))
 }
 
 #[cfg(test)]

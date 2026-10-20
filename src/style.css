@@ -1944,6 +1944,55 @@ button:hover {
   height: 40px;
   outline-offset: 4px;
 }
+.mcp-access {
+  border-top: 1px solid var(--line);
+  margin-top: 20px;
+  padding-top: 12px;
+}
+.mcp-access-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.mcp-access-label input {
+  appearance: none;
+  flex-shrink: 0;
+  width: 32px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--subtle);
+  cursor: pointer;
+}
+.mcp-access-label input::before {
+  content: "";
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.mcp-access-label input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.mcp-access-label input:checked::before {
+  transform: translateX(12px);
+  background: var(--surface);
+}
+.mcp-access-label input:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.mcp-access .field-help {
+  margin: 2px 0 0;
+}
 .copy-field {
   display: flex;
   align-items: center;

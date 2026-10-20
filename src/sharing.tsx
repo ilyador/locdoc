@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import {
   ArrowCounterClockwise,
   CaretDown,
@@ -12,14 +12,89 @@ import { Avatar, IconButton } from "./ui";
 import { useRemote } from "./use-remote";
 
 export type ShareAccess = { permission: string; shareUrl: string | null };
+type McpAccess = {
+  mcpAllowed: boolean;
+  mcpDirect: boolean;
+  mcpInherited: boolean;
+};
+type McpTarget =
+  { kind: "document"; id: string } | { kind: "folder"; path: string };
+
+export function McpAccessControl({ target }: { target: McpTarget }) {
+  const url =
+    target.kind === "document"
+      ? `/api/docs/${encodeURIComponent(target.id)}/mcp`
+      : `/api/folders/mcp?path=${encodeURIComponent(target.path)}`;
+  return <McpAccessSetting key={url} target={target} url={url} />;
+}
+
+function McpAccessSetting({ target, url }: { target: McpTarget; url: string }) {
+  const result = useRemote<McpAccess>(url);
+  const [changed, setChanged] = useState<McpAccess>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const helpId = useId();
+  const value = changed || result.data;
+  const change = async (allowed: boolean) => {
+    if (!value || value.mcpInherited || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await api<McpAccess>(
+        target.kind === "document" ? url : "/api/folders/mcp",
+        send(
+          "POST",
+          target.kind === "document"
+            ? { allowed }
+            : { path: target.path, allowed },
+        ),
+      );
+      setChanged(next);
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mcp-access" aria-busy={busy || result.loading}>
+      <label className="mcp-access-label">
+        <span>Allow MCP</span>
+        <input
+          type="checkbox"
+          role="switch"
+          aria-describedby={helpId}
+          checked={value?.mcpAllowed || false}
+          disabled={!value || busy || value.mcpInherited}
+          onChange={(event) => void change(event.target.checked)}
+        />
+      </label>
+      <p id={helpId} className="field-help">
+        {value?.mcpInherited
+          ? value.mcpDirect
+            ? "Allowed here and by a folder. Turn off folder access first."
+            : "Allowed by folder. Change access in the folder that allows MCP."
+          : `Let connected AI apps access this ${target.kind}.`}
+      </p>
+      {(error || result.error) && (
+        <p role="alert" className="field-help">
+          {error || result.error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function ShareControls({
   value,
   name,
   onChange,
+  mcpTarget,
 }: {
   value: ShareAccess;
   name: string;
   onChange: (permission: string, rotate: boolean) => Promise<void>;
+  mcpTarget?: McpTarget;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -125,6 +200,7 @@ export function ShareControls({
           </p>
         </>
       )}
+      {mcpTarget && <McpAccessControl target={mcpTarget} />}
     </>
   );
 }
@@ -153,6 +229,7 @@ export function FolderShare({
         <ShareControls
           value={value}
           name={name}
+          mcpTarget={{ kind: "folder", path }}
           onChange={async (permission, rotate) => {
             const next = await api<ShareAccess>(
               "/api/folders/share",

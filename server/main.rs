@@ -9,6 +9,7 @@ mod folders;
 mod links;
 mod maintenance;
 mod mcp;
+mod mcp_access;
 mod mcp_auth;
 mod peers;
 #[cfg(test)]
@@ -285,6 +286,7 @@ impl Store {
         browser_auth::migrate(&db)?;
         documents::migrate(&db)?;
         folders::migrate(&db)?;
+        mcp_access::migrate(&db)?;
         mcp_auth::migrate(&db)?;
         let sessions = browser_auth::Sessions::load(&db)?;
         let mcp_credentials = mcp_auth::Credentials::load(&db)?;
@@ -823,7 +825,7 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         .and_then(|metadata| metadata.modified().ok())
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs());
-    Ok(json!({
+    let mut payload = json!({
         "id": d.id,
         "path": path,
         "owner": owner,
@@ -840,7 +842,14 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         "lineEndingMigrated": room.engine.migrated(),
         "collaborationEpoch": s.epoch(&d.id)?,
         "mediaToken": if owner { browser_auth::media_token(s, h, &d.id) } else { None }
-    }))
+    });
+    if owner {
+        let access = mcp_access::document_access(s, d)?;
+        payload["mcpAllowed"] = json!(access.mcp_allowed);
+        payload["mcpDirect"] = json!(access.mcp_direct);
+        payload["mcpInherited"] = json!(access.mcp_inherited);
+    }
+    Ok(payload)
 }
 async fn document(
     State(s): State<App>,
@@ -942,37 +951,39 @@ async fn share(
     _owner: security::Owner,
     Json(b): Json<Share>,
 ) -> Result<Json<Value>> {
-    doc_job(s, id.clone(), move |s| {
-        if !["private", "view", "edit"].contains(&b.permission.as_str()) {
-            return Err(bad("Choose private, view, or edit."));
-        }
-        let d = s.doc(&id)?;
-        let t = if b.permission == "private" {
-            None
-        } else {
-            Some(match (b.rotate, d.permission.as_str(), d.token) {
-                (false, permission, Some(existing)) if permission != "private" => existing,
-                _ => token(),
-            })
-        };
-        s.db.lock().unwrap().execute(
-            "UPDATE docs SET permission=?,token=? WHERE id=?",
-            params![b.permission, t, id],
-        )?;
-        s.permissions.invalidate();
-        // Existing visitors reconnect with the new mode. Cached passive checks
-        // are invalidated even if a busy room cannot be notified immediately.
-        let room = s.rooms.lock().unwrap().get(&id).cloned();
-        if let Some(room) = room {
-            let _ = room.lock().unwrap().tx.send(vec![126]);
-        }
-        let share_url = t.map(|token| format!("{}/s/{token}", s.public_url));
-        Ok(Json(json!({
-            "permission": b.permission,
-            "shareUrl": share_url,
-        })))
-    })
-    .await
+    doc_job(s, id.clone(), move |s| share_document(s, id, b))
+        .await
+        .map(Json)
+}
+fn share_document(s: &Store, id: String, b: Share) -> Result<Value> {
+    if !["private", "view", "edit"].contains(&b.permission.as_str()) {
+        return Err(bad("Choose private, view, or edit."));
+    }
+    let d = s.doc(&id)?;
+    let t = if b.permission == "private" {
+        None
+    } else {
+        Some(match (b.rotate, d.permission.as_str(), d.token) {
+            (false, permission, Some(existing)) if permission != "private" => existing,
+            _ => token(),
+        })
+    };
+    s.db.lock().unwrap().execute(
+        "UPDATE docs SET permission=?,token=? WHERE id=?",
+        params![b.permission, t, id],
+    )?;
+    s.permissions.invalidate();
+    // Existing visitors reconnect with the new mode. Cached passive checks
+    // are invalidated even if a busy room cannot be notified immediately.
+    let room = s.rooms.lock().unwrap().get(&id).cloned();
+    if let Some(room) = room {
+        let _ = room.lock().unwrap().tx.send(vec![126]);
+    }
+    let share_url = t.map(|token| format!("{}/s/{token}", s.public_url));
+    Ok(json!({
+        "permission": b.permission,
+        "shareUrl": share_url,
+    }))
 }
 #[derive(Deserialize)]
 struct Rename {
@@ -1608,30 +1619,44 @@ async fn versions(
     AxPath(id): AxPath<String>,
     _owner: security::Owner,
 ) -> Result<Json<Value>> {
-    s.doc(&id)?;
+    versions_payload(&s, &id).map(Json)
+}
+fn versions_payload(s: &Store, id: &str) -> Result<Value> {
+    s.doc(id)?;
     let db = s.db.lock().unwrap();
-    let mut q =
-        db.prepare("SELECT id,substr(content,1,120),length(content),created FROM revisions WHERE doc=? ORDER BY rowid DESC")?;
-    let rows=q.query_map([id],|r|Ok(json!({"id":r.get::<_,String>(0)?,"preview":r.get::<_,String>(1)?,"bytes":r.get::<_,i64>(2)?,"created":r.get::<_,i64>(3)?})))?.filter_map(|v|v.ok()).collect::<Vec<_>>();
-    Ok(Json(json!({"versions":rows})))
+    let mut query = db.prepare(
+        "SELECT id,substr(content,1,120),length(content),created FROM revisions WHERE doc=? ORDER BY rowid DESC",
+    )?;
+    let rows = query
+        .query_map([id], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "preview": row.get::<_, String>(1)?,
+                "bytes": row.get::<_, i64>(2)?,
+                "created": row.get::<_, i64>(3)?,
+            }))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(json!({"versions": rows}))
 }
 async fn version(
     State(s): State<App>,
     AxPath((id, revision)): AxPath<(String, String)>,
     _owner: security::Owner,
 ) -> Result<Json<Value>> {
-    let content: Option<String> =
-        s.db.lock()
-            .unwrap()
-            .query_row(
-                "SELECT content FROM revisions WHERE id=? AND doc=?",
-                params![revision, id],
-                |r| r.get(0),
-            )
-            .optional()?;
-    Ok(Json(
-        json!({"content":content.ok_or_else(||bad("Version not found."))?}),
-    ))
+    version_content(&s, &id, &revision).map(|content| Json(json!({"content": content})))
+}
+fn version_content(s: &Store, id: &str, revision: &str) -> Result<String> {
+    s.doc(id)?;
+    s.db.lock()
+        .unwrap()
+        .query_row(
+            "SELECT content FROM revisions WHERE id=? AND doc=?",
+            params![revision, id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| bad("Version not found."))
 }
 async fn restore(
     State(s): State<App>,
@@ -1923,11 +1948,19 @@ fn router(s: App) -> Router {
             "/api/folders/share",
             get(folders::read).post(folders::share),
         )
+        .route(
+            "/api/folders/mcp",
+            get(mcp_access::read_folder).post(mcp_access::change_folder),
+        )
         .route("/api/tree", get(tree))
         .route("/api/files", post(create))
         .route("/api/shared/{token}", get(shared))
         .route("/api/docs/{id}", get(document).patch(rename))
         .route("/api/docs/{id}/share", post(share))
+        .route(
+            "/api/docs/{id}/mcp",
+            get(mcp_access::read_document).post(mcp_access::change_document),
+        )
         .route("/api/docs/{id}/link-preview", get(links::preview))
         .route(
             "/api/docs/{id}/comments",

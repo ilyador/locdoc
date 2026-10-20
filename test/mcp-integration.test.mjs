@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -16,7 +16,7 @@ const ownerKey = randomBytes(32).toString('hex');
 let directory, server, ownerSession, startupError;
 let logs = '';
 let sequence = 0;
-let ownerConnection, readConnection, document;
+let ownerConnection, readConnection, document, seedDocument;
 
 async function waitFor(check, milliseconds = 6000) {
   const deadline = Date.now() + milliseconds;
@@ -56,6 +56,28 @@ function form(body) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(body),
   };
+}
+function ownerHeaders() {
+  return { Authorization: `Bearer ${ownerSession}` };
+}
+async function ownerCreate(path, kind = 'file') {
+  const created = await request('/api/files', json({ path, kind }, ownerSession));
+  assert.equal(created.status, 200, 'Owner fixture creation succeeds');
+  return created.body;
+}
+async function allowDocument(id, allowed) {
+  const changed = await request(`/api/docs/${id}/mcp`, json({ allowed }, ownerSession));
+  assert.equal(changed.status, 200, 'Owner can change document MCP access');
+  return changed.body;
+}
+async function allowFolder(path, allowed) {
+  const changed = await request('/api/folders/mcp', json({ path, allowed }, ownerSession));
+  assert.equal(changed.status, 200, 'Owner can change folder MCP access');
+  return changed.body;
+}
+function denied(result, label = 'Unapproved content stays inaccessible') {
+  assert.equal(result.isError, true, label);
+  assert.equal(result.structuredContent.status, 403, label);
 }
 async function rpc(connection, method, params, headers = {}) {
   return request('/mcp', {
@@ -215,10 +237,24 @@ test('owner-approved OAuth connects a real MCP client; reads and optimistic edit
     assert.ok(names.includes(name), `Available tool: ${name}`);
   }
   const documents = value(await call(ownerConnection, 'list_documents'));
-  const seed = documents.entries.find(entry => entry.path === 'Seed.md');
-  assert.ok(seed?.id);
-  const seedSource = value(await call(ownerConnection, 'read_document', { doc_id: seed.id }));
+  assert.deepEqual(documents.entries, [], 'OAuth approval alone exposes no documents');
+  assert.equal(documents.total, 0);
+  assert.equal(documents.next_offset, null);
+  const ownerTree = await request('/api/tree', { headers: ownerHeaders() });
+  seedDocument = ownerTree.body.entries.find(entry => entry.path === 'Seed.md');
+  assert.ok(seedDocument?.id);
+  denied(await call(ownerConnection, 'read_document', { doc_id: seedDocument.id }));
+  assert.deepEqual(await allowDocument(seedDocument.id, true), {
+    mcpAllowed: true, mcpDirect: true, mcpInherited: false,
+  });
+  const seedSource = value(await call(ownerConnection, 'read_document', { doc_id: seedDocument.id }));
   assert.equal(seedSource.content, '# Seed\n\nA private fixture note.\n');
+  denied(await call(ownerConnection, 'create_document', { path: 'Root.md', kind: 'file' }));
+  await ownerCreate('Ideas', 'folder');
+  denied(await call(ownerConnection, 'create_document', { path: 'Ideas/Created.md', kind: 'file' }));
+  assert.deepEqual(await allowFolder('Ideas', true), {
+    mcpAllowed: true, mcpDirect: true, mcpInherited: false,
+  });
   document = value(await call(ownerConnection, 'create_document', { path: 'Ideas/Created.md', kind: 'file' }));
   assert.ok(document.id);
   assert.equal((await call(ownerConnection, 'create_document', { path: document.path, kind: 'file' })).isError, true);
@@ -402,6 +438,164 @@ test('MCP reads history and restores only against the current revision without l
   const preserved = value(await call(ownerConnection, 'list_versions', { doc_id: document.id }));
   const recovery = value(await call(ownerConnection, 'read_version', { doc_id: document.id, version_id: preserved.versions[0].id }));
   assert.equal(recovery.content, current.content, 'Restore keeps the replaced accepted source in history');
+});
+
+test('MCP discovery and search filter before pagination and never expose unrelated private folders', { timeout: 20_000 }, async () => {
+  const visible = await ownerCreate('Discoverable/Deep/Visible.md');
+  const hidden = await ownerCreate('Unrelated private folder/Secret.md');
+  await writeFile(join(directory, 'docs', hidden.path), '# Hidden-only title\n\nUnpublished private phrase.\n');
+  await allowDocument(visible.id, true);
+  const listed = value(await call(ownerConnection, 'list_documents'));
+  const paths = listed.entries.map(entry => entry.path);
+  assert.ok(paths.includes('Discoverable'));
+  assert.ok(paths.includes('Discoverable/Deep'));
+  assert.ok(paths.includes(visible.path));
+  assert.ok(!paths.some(path => path.startsWith('Unrelated private folder')));
+  assert.ok(!JSON.stringify(listed).includes('Hidden-only title'));
+  const paginated = [];
+  let offset = 0;
+  for (let page = 0; page < 20; page++) {
+    const result = value(await call(ownerConnection, 'list_documents', { offset, limit: 1 }));
+    assert.equal(result.total, listed.total, 'Filtered total does not include private entries');
+    paginated.push(...result.entries.map(entry => entry.path));
+    if (result.next_offset === null) break;
+    assert.ok(result.next_offset > offset, 'Pagination must advance');
+    offset = result.next_offset;
+  }
+  assert.deepEqual(paginated, paths, 'Pagination applies to the already-filtered list');
+  const hiddenTitles = value(await call(ownerConnection, 'list_documents', { query: 'Secret' }));
+  assert.equal(hiddenTitles.total, 0);
+  assert.deepEqual(hiddenTitles.entries, []);
+  const hiddenFolder = value(await call(ownerConnection, 'list_documents', { folder: 'Unrelated private folder' }));
+  assert.deepEqual(hiddenFolder.entries, []);
+  const hiddenSearch = value(await call(ownerConnection, 'search_documents', { query: 'Unpublished private phrase' }));
+  assert.deepEqual(hiddenSearch.matches, []);
+  assert.equal(hiddenSearch.next_offset, null);
+  const emptySearch = await call(ownerConnection, 'search_documents', { query: '' });
+  assert.equal(emptySearch.isError, true);
+  assert.equal(emptySearch.structuredContent.status, 400);
+  denied(await call(ownerConnection, 'share_folder', { path: 'Discoverable', permission: 'view' }),
+    'Permission for one child cannot share its private siblings');
+  denied(await call(ownerConnection, 'create_document', { path: 'Discoverable/New.md', kind: 'file' }),
+    'A visible ancestor is not an allowed creation destination');
+  await allowDocument(visible.id, false);
+  const revoked = value(await call(ownerConnection, 'list_documents'));
+  assert.ok(!revoked.entries.some(entry => entry.path.startsWith('Discoverable')),
+    'Revoking the last child removes now-unneeded ancestor names');
+});
+
+test('public links and MCP credentials cannot opt documents or folders into MCP', { timeout: 20_000 }, async () => {
+  const privateDoc = await ownerCreate('Public only/Private.md');
+  const documentSetting = await request(`/api/docs/${privateDoc.id}/mcp`, { headers: ownerHeaders() });
+  assert.equal(documentSetting.status, 200);
+  assert.deepEqual(documentSetting.body, { mcpAllowed: false, mcpDirect: false, mcpInherited: false });
+  const shared = await request(`/api/docs/${privateDoc.id}/share`, json({ permission: 'edit' }, ownerSession));
+  assert.equal(shared.status, 200);
+  const token = new URL(shared.body.shareUrl).pathname.split('/').pop();
+  assert.equal((await request(`/api/open/${token}`)).status, 200);
+  const folderShared = await request('/api/folders/share', json({ path: 'Public only', permission: 'view' }, ownerSession));
+  assert.equal(folderShared.status, 200);
+  for (const bearer of [undefined, token, ownerConnection.access_token, readConnection.access_token]) {
+    const attemptedDoc = await request(`/api/docs/${privateDoc.id}/mcp?token=${token}`, json({ allowed: true }, bearer));
+    assert.equal(attemptedDoc.status, 403, 'Only the local owner session may opt a document in');
+    const attemptedFolder = await request('/api/folders/mcp', json({ path: 'Public only', allowed: true }, bearer));
+    assert.equal(attemptedFolder.status, 403, 'Only the local owner session may opt a folder in');
+    assert.equal((await request(`/api/docs/${privateDoc.id}/mcp`, {
+      headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
+    })).status, 403);
+  }
+  denied(await call(ownerConnection, 'read_document', { doc_id: privateDoc.id }));
+  denied(await call(ownerConnection, 'share_document', { doc_id: privateDoc.id, permission: 'edit' }));
+  const setting = await request('/api/folders/mcp?path=Public%20only', { headers: ownerHeaders() });
+  assert.equal(setting.status, 200);
+  assert.equal(setting.body.mcpAllowed, false, 'Public folder sharing does not grant MCP access');
+  const listed = value(await call(ownerConnection, 'list_documents'));
+  assert.ok(!listed.entries.some(entry => entry.path.startsWith('Public only')));
+});
+
+test('folder access includes future descendants, revokes immediately, and preserves explicit document opt-ins', { timeout: 25_000 }, async () => {
+  const inherited = await ownerCreate('Scoped/Nested/Inherited.md');
+  const direct = await ownerCreate('Scoped/Nested/Direct.md');
+  const sibling = await ownerCreate('Scoped sibling/Private.md');
+  await allowDocument(direct.id, true);
+  await allowFolder('Scoped', true);
+  const inheritedSetting = await request(`/api/docs/${inherited.id}/mcp`, { headers: ownerHeaders() });
+  assert.deepEqual(inheritedSetting.body, { mcpAllowed: true, mcpDirect: false, mcpInherited: true });
+  assert.equal(value(await call(ownerConnection, 'read_document', { doc_id: inherited.id })).id, inherited.id);
+  denied(await call(ownerConnection, 'read_document', { doc_id: sibling.id }),
+    'Folder matching must use a path boundary, not a raw prefix');
+  value(await call(ownerConnection, 'create_document', { path: 'Scoped/Future', kind: 'folder' }));
+  const created = value(await call(ownerConnection, 'create_document', { path: 'Scoped/Future/New.md', kind: 'file' }));
+  const newSetting = await request(`/api/docs/${created.id}/mcp`, { headers: ownerHeaders() });
+  assert.deepEqual(newSetting.body, { mcpAllowed: true, mcpDirect: false, mcpInherited: true },
+    'MCP-created documents inherit access without granting themselves permanent opt-in');
+  await allowFolder('Scoped', false);
+  denied(await call(ownerConnection, 'read_document', { doc_id: inherited.id }));
+  denied(await call(ownerConnection, 'read_document', { doc_id: created.id }));
+  denied(await call(ownerConnection, 'create_document', { path: 'Scoped/Future/Denied.md', kind: 'file' }));
+  assert.equal(value(await call(ownerConnection, 'read_document', { doc_id: direct.id })).id, direct.id);
+  value(await call(ownerConnection, 'rename_document', { doc_id: direct.id, path: 'Scoped/Nested/Renamed.md' }));
+  assert.equal(value(await call(ownerConnection, 'read_document', { doc_id: direct.id })).path, 'Scoped/Nested/Renamed.md');
+  const renamedSetting = await request(`/api/docs/${direct.id}/mcp`, { headers: ownerHeaders() });
+  assert.deepEqual(renamedSetting.body, { mcpAllowed: true, mcpDirect: true, mcpInherited: false },
+    'The explicit grant follows document identity through a rename');
+});
+
+test('revoking MCP access blocks every document operation, including comments, history and public sharing', { timeout: 25_000 }, async () => {
+  const initial = value(await call(ownerConnection, 'read_document', { doc_id: document.id }));
+  const comment = value(await call(ownerConnection, 'add_comment', {
+    doc_id: document.id, expected_revision: initial.revision, body: 'Revocation fixture.', request_id: randomUUID(),
+  }));
+  const current = value(await call(ownerConnection, 'read_document', { doc_id: document.id }));
+  const history = value(await call(ownerConnection, 'list_versions', { doc_id: document.id }));
+  assert.ok(history.versions.length > 0);
+  const version = history.versions[0].id;
+  await allowFolder('Ideas', false);
+  const attempts = [
+    ['read_document', { doc_id: document.id }],
+    ['edit_document', { doc_id: document.id, expected_revision: current.revision, source: '# Unapproved overwrite\n' }],
+    ['replace_text', { doc_id: document.id, expected_revision: current.revision, old_text: 'Revocation fixture.', new_text: 'Wrong' }],
+    ['rename_document', { doc_id: document.id, path: 'Ideas/Forbidden.md' }],
+    ['share_document', { doc_id: document.id, permission: 'edit' }],
+    ['share_folder', { path: 'Ideas', permission: 'edit' }],
+    ['list_comments', { doc_id: document.id }],
+    ['add_comment', { doc_id: document.id, expected_revision: current.revision, body: 'Wrong', request_id: randomUUID() }],
+    ['reply_comment', { doc_id: document.id, comment_id: comment.id, body: 'Wrong', request_id: randomUUID() }],
+    ['resolve_comment', { doc_id: document.id, comment_id: comment.id, resolved: true }],
+    ['list_versions', { doc_id: document.id }],
+    ['read_version', { doc_id: document.id, version_id: version }],
+    ['restore_version', { doc_id: document.id, version_id: version, expected_revision: current.revision }],
+    ['create_document', { path: 'Ideas/Forbidden.md', kind: 'file' }],
+  ];
+  for (const [name, args] of attempts) denied(await call(ownerConnection, name, args), `Revocation blocks ${name}`);
+  denied(await call(readConnection, 'read_document', { doc_id: document.id }),
+    'Existing read-only OAuth grants must also honor revocation');
+  const listed = value(await call(ownerConnection, 'list_documents', { query: 'Ideas' }));
+  assert.deepEqual(listed.entries, []);
+  const searched = value(await call(ownerConnection, 'search_documents', { query: 'Revocation fixture.' }));
+  assert.deepEqual(searched.matches, []);
+  const ownerRead = await request(`/api/docs/${document.id}`, { headers: ownerHeaders() });
+  assert.equal(ownerRead.body.content, current.content, 'Denied commands never mutate the source');
+  assert.equal(ownerRead.body.path, document.path);
+  await assert.rejects(access(join(directory, 'docs', 'Ideas', 'Forbidden.md')), { code: 'ENOENT' });
+  await allowFolder('Ideas', true);
+});
+
+test('MCP creation and owner folder opt-in reject traversal, absolute paths and symlink escapes', { timeout: 20_000 }, async () => {
+  const outside = join(directory, 'outside');
+  await mkdir(outside);
+  await symlink(outside, join(directory, 'docs', 'Ideas', 'Escape'));
+  for (const path of ['', '../outside', outside, 'Ideas/../outside', 'Ideas/Escape', 'Ideas/Escape/Nested']) {
+    const setting = await request('/api/folders/mcp', json({ path, allowed: true }, ownerSession));
+    assert.ok([400, 403, 404].includes(setting.status), 'Unsafe folders cannot be opted in');
+  }
+  for (const path of ['../outside/Escaped.md', join(outside, 'Escaped.md'), 'Ideas/../Escaped.md', 'Ideas/Escape/Escaped.md']) {
+    const result = await call(ownerConnection, 'create_document', { path, kind: 'file' });
+    assert.equal(result.isError, true, 'Unsafe creation is rejected');
+    assert.ok([400, 403, 404].includes(result.structuredContent.status));
+  }
+  await assert.rejects(access(join(outside, 'Escaped.md')), { code: 'ENOENT' });
+  await assert.rejects(access(join(directory, 'docs', 'Escaped.md')), { code: 'ENOENT' });
 });
 
 test('MCP rejects hostile origins while allowing ChatGPT and its CORS preflight', { timeout: 15_000 }, async () => {

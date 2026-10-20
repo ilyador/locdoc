@@ -3,9 +3,9 @@ import { api, send } from "./api";
 import { useRemote } from "./use-remote";
 
 const permissions: Record<string, string> = {
-  "locdoc:read": "Read documents, comments and version history",
-  "locdoc:write": "Create and edit documents, and join comment conversations",
-  "locdoc:share": "Manage public document and folder links",
+  "locdoc:read": "Read enabled documents, comments and version history",
+  "locdoc:write": "Edit enabled documents, create files in enabled folders and comment",
+  "locdoc:share": "Manage public links for enabled documents and folders",
 };
 
 export function authorizationRedirect(value: string) {
@@ -74,7 +74,8 @@ export function McpAuthorization({ request }: { request: string }) {
               ))}
             </ul>
             <p className="field-help">
-              You can disconnect it at any time in workspace settings.
+              Only documents and folders with “Allow MCP” enabled in Share are
+              accessible. You can disconnect this app in workspace settings.
             </p>
             <div className="connection-actions">
               <button
