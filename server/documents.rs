@@ -49,8 +49,7 @@ pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIde
     }
     let root = fs::canonicalize(root)?;
     let identity = RootIdentity::read(&root)?;
-    let identity_path = data.join("root.identity");
-    match fs::read(&identity_path) {
+    match fs::read(data.join("root.identity")) {
         Ok(bytes) => {
             let previous: RootIdentity =
                 serde_json::from_slice(&bytes).map_err(|_| root_unavailable())?;
@@ -59,29 +58,47 @@ pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIde
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let temporary = data.join(format!(".root-identity-{}.tmp", uuid::Uuid::new_v4()));
-            let result: Result<()> = (|| {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&temporary)?;
-                file.write_all(&serde_json::to_vec(&identity).map_err(|_| root_unavailable())?)?;
-                file.sync_all()?;
-                fs::rename(&temporary, &identity_path)?;
-                fs::File::open(data)?.sync_all()?;
-                Ok(())
-            })();
-            if result.is_err() {
-                let _ = fs::remove_file(temporary);
-            }
-            result?;
+            record_root(data, &identity)?;
         }
         Err(error) => return Err(error.into()),
     }
     Ok((root, identity))
+}
+
+/// A documents folder copied back from a backup is a new folder. Only the
+/// owner's restore pass opens it, and records it once every document is
+/// placed; until then normal startup keeps refusing it.
+pub(super) fn restored_root(root: &Path) -> Result<(PathBuf, RootIdentity)> {
+    let missing = |_| {
+        bad(
+            "The restored documents folder is missing. Copy it into place before running locdoc --restored.",
+        )
+    };
+    let root = fs::canonicalize(root).map_err(missing)?;
+    let identity = RootIdentity::read(&root).map_err(missing)?;
+    Ok((root, identity))
+}
+
+pub(super) fn record_root(data: &Path, identity: &RootIdentity) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let temporary = data.join(format!(".root-identity-{}.tmp", uuid::Uuid::new_v4()));
+    let result: Result<()> = (|| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(&serde_json::to_vec(identity).map_err(|_| root_unavailable())?)?;
+        file.sync_all()?;
+        fs::rename(&temporary, data.join("root.identity"))?;
+        fs::File::open(data)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result
 }
 
 #[derive(PartialEq)]

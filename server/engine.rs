@@ -510,6 +510,53 @@ impl Store {
         rooms.insert(d.id.clone(), r.clone());
         Ok(r)
     }
+    /// What durable state says this document's file last held, is being
+    /// written or will hold once accepted edits are projected, each canonical
+    /// as an import reads a file. Only the owner's restore pass compares files
+    /// by content. State that cannot be decoded tells nothing.
+    pub(super) fn known_contents(&self, id: &str) -> Result<Vec<String>> {
+        const STORED: &str = "SELECT state,disk_state,write_target FROM docs WHERE id=?";
+        let [state, baseline, target]: [Option<Vec<u8>>; 3] =
+            self.db.lock().unwrap().query_row(STORED, [id], |row| {
+                Ok([row.get(0)?, row.get(1)?, row.get(2)?])
+            })?;
+        let updates: Vec<Vec<u8>> = {
+            let db = self.db.lock().unwrap();
+            let mut q = db.prepare("SELECT content FROM doc_updates WHERE doc=? ORDER BY seq")?;
+            q.query_map([id], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let decoded = |parts: &[&[u8]]| {
+            let doc = Doc::with_options(Options {
+                offset_kind: OffsetKind::Utf16,
+                ..Options::default()
+            });
+            for part in parts {
+                let update = security::decode_update(part).ok()?;
+                doc.transact_mut().apply_update(update).ok()?;
+            }
+            security::validate_document(&doc)
+                .ok()
+                .map(|source| text::canonical(&source))
+        };
+        let mut contents = Vec::new();
+        // A room's disk baseline falls back to its saved state the same way.
+        if let Some(disk) = baseline.as_deref().or(state.as_deref()) {
+            contents.extend(decoded(&[disk]));
+        }
+        if let Some(target) = target.and_then(|bytes| String::from_utf8(bytes).ok()) {
+            contents.push(text::canonical(&target));
+        }
+        if let Some(state) = state.as_deref() {
+            let parts: Vec<&[u8]> = std::iter::once(state)
+                .chain(updates.iter().map(Vec::as_slice))
+                .collect();
+            contents.extend(decoded(&parts));
+        }
+        contents.sort();
+        contents.dedup();
+        Ok(contents)
+    }
     fn archive_observed(&self, d: &Document, bytes: &[u8]) -> Result<()> {
         use std::io::Write;
         let folder = self.data.join("recovery");

@@ -18,6 +18,7 @@ mod persistence_adversarial_tests;
 #[cfg(test)]
 mod persistence_tests;
 mod projection;
+mod restored;
 mod save;
 #[cfg(test)]
 mod save_adversarial_tests;
@@ -227,6 +228,29 @@ struct Access {
 }
 impl Store {
     fn open(root: PathBuf, data: PathBuf, public_url: String) -> Result<App> {
+        let store = Self::open_state(root, data, public_url, false)?;
+        // Serve documents even when files cannot be matched yet; the
+        // maintenance loop keeps reconciling them.
+        if let Err(error) = store.recover_file_operations() {
+            tracing::error!("file operation recovery failed: {error}");
+        }
+        if let Err(error) = store.discover_file_moves() {
+            tracing::error!("file discovery failed: {error}");
+        }
+        Ok(store)
+    }
+    /// State files and a documents folder just copied back from a backup, for
+    /// the owner's restore pass only. The folder may be new; nothing is
+    /// reconciled until that pass runs.
+    fn open_restored(root: PathBuf, data: PathBuf, public_url: String) -> Result<App> {
+        if !data.join("locdoc.sqlite").is_file() {
+            return Err(bad(
+                "The state folder has no locdoc.sqlite. Copy the backup's state files into place before running locdoc --restored.",
+            ));
+        }
+        Self::open_state(root, data, public_url, true)
+    }
+    fn open_state(root: PathBuf, data: PathBuf, public_url: String, restored: bool) -> Result<App> {
         let new_data = !data.exists();
         fs::create_dir_all(&data)?;
         let data = fs::canonicalize(data)?;
@@ -234,7 +258,11 @@ impl Store {
             disk::sync_directories(&data, Path::new("/"))?;
         }
         let state_lock = disk::StateLock::acquire(&data)?;
-        let (root, root_identity) = documents::prepare_root(&root, &data)?;
+        let (root, root_identity) = if restored {
+            documents::restored_root(&root)?
+        } else {
+            documents::prepare_root(&root, &data)?
+        };
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -330,14 +358,6 @@ impl Store {
                 .build()
                 .unwrap(),
         });
-        // Serve documents even when files cannot be matched yet; the
-        // maintenance loop keeps reconciling them.
-        if let Err(error) = store.recover_file_operations() {
-            tracing::error!("file operation recovery failed: {error}");
-        }
-        if let Err(error) = store.discover_file_moves() {
-            tracing::error!("file discovery failed: {error}");
-        }
         Ok(store)
     }
     fn owner(&self, h: &HeaderMap) -> bool {
@@ -2102,8 +2122,7 @@ fn router(s: App) -> Router {
         .layer(axum::middleware::from_fn(web::observe_crawlers))
         .with_state(s)
 }
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -2114,8 +2133,34 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let data = std::env::var("LOCDOC_STATE").unwrap_or_else(|_| ".locdoc".into());
     let public =
         std::env::var("LOCDOC_PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3477".into());
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    match arguments.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        [] => {}
+        ["--restored"] => return restored::run(root.into(), data.into(), public),
+        _ => {
+            eprintln!(
+                "Usage: locdoc [--restored]\n\nWithout arguments, serve LOCDOC_DOCS with the state in LOCDOC_STATE.\n--restored  After copying a backup's state files and documents folder\n            into place, match its files to documents once and exit."
+            );
+            return std::process::ExitCode::from(2);
+        }
+    }
+    match serve(root.into(), data.into(), public) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("locdoc: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+#[tokio::main]
+async fn serve(
+    root: PathBuf,
+    data: PathBuf,
+    public: String,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::var("LOCDOC_BIND").unwrap_or_else(|_| "127.0.0.1:3477".into());
-    let s = Store::open(root.into(), data.into(), public)?;
+    let s = Store::open(root, data, public)?;
     job(s.clone(), |s| s.recover_pending()).await?;
     let _watcher = projection::watch(s.clone())?;
     tracing::info!(

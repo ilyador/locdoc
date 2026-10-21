@@ -45,8 +45,9 @@ pub(super) fn rename_new(source: &Path, destination: &Path) -> std::io::Result<(
     }
 }
 
-/// Held for the Store lifetime. SQLite transactions alone cannot serialize two
-/// independent CRDT/file projection coordinators over the same state folder.
+/// Held for the Store lifetime, by the server and by the restore pass alike.
+/// SQLite transactions alone cannot serialize two independent CRDT/file
+/// projection coordinators over the same state folder.
 pub(super) struct StateLock(fs::File);
 impl StateLock {
     pub(super) fn acquire(data: &Path) -> Result<Self> {
@@ -61,7 +62,10 @@ impl StateLock {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == -1 {
             return Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Another Locdoc process is using this state folder.".into(),
+                format!(
+                    "Another Locdoc process is using the state folder {}. Stop it first.",
+                    data.display()
+                ),
             ));
         }
         Ok(Self(file))

@@ -105,6 +105,24 @@ pub(super) fn active(s: &Store) -> Result<Vec<Grant>> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(values.into_iter().filter(|value| value.valid(s)).collect())
 }
+/// Folders whose link no longer opens them, as after a restore copied every
+/// folder. A pathname alone never revives a link; the owner shares again.
+pub(super) fn unmatched(s: &Store) -> Result<Vec<String>> {
+    let values =
+        s.db.lock()
+            .unwrap()
+            .prepare(
+                "SELECT path,identity,permission,token FROM folder_shares
+             WHERE permission!='private' ORDER BY path",
+            )?
+            .query_map([], row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(values
+        .into_iter()
+        .filter(|value| !value.valid(s))
+        .map(|value| value.path)
+        .collect())
+}
 pub(super) fn entries(s: &Store, folder: &Grant) -> Result<Vec<Entry>> {
     let mut values = vec![];
     scan(s, &s.safe(&folder.path, false)?, &mut values)?;

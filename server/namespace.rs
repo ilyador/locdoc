@@ -362,6 +362,26 @@ fn classify<E: Clone + Eq + Hash>(
     plan
 }
 
+/// How the owner's restore pass placed a document that was active before it.
+pub(super) struct Placement {
+    pub(super) id: String,
+    /// The path the restored database recorded.
+    pub(super) recorded: String,
+    /// Its path now, or None once retired.
+    pub(super) restored: Option<String>,
+    /// identity, content, path, retired, or undecided when it is not placed.
+    pub(super) evidence: &'static str,
+}
+
+pub(super) struct Restoration {
+    pub(super) documents: Vec<Placement>,
+    /// Restored files no document claims. Discovery indexes each one as a
+    /// new private document.
+    pub(super) unclaimed: Vec<String>,
+    /// Why the pass could not complete, if it could not.
+    pub(super) problem: Option<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pass {
     /// Follow moves and record new evidence. Editors briefly remove or swap
@@ -570,6 +590,134 @@ impl Store {
         Ok(())
     }
 
+    /// The owner's restore pass, after a backup's database and documents
+    /// folder were copied back. Every file is new, so recorded identity
+    /// rarely finds one, but it still comes first. A document whose recorded
+    /// file is found nowhere then follows its content: a text its durable
+    /// state last projected, was writing or still has to project, held by
+    /// exactly one file no identity claims, and no other document known to
+    /// have that file's text. The file's identity becomes the document's, so
+    /// the match outranks path continuity as identity does. Duplicate
+    /// contents fall back to paths, and the pass then follows, records and
+    /// retires like a settled one. It changes nothing unless it saw and read
+    /// every file. Normal passes never compare content.
+    pub(super) fn restore_documents(&self) -> Result<Restoration> {
+        let _files = self.document_files.lock().unwrap();
+        const ACTIVE: &str = "SELECT d.id,d.path,f.identity FROM docs d
+            LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active=1 ORDER BY d.path";
+        let before = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(ACTIVE)?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut content = HashMap::new();
+        let mut problem = self.restore_pass(&mut content)?;
+        let mut documents = Vec::new();
+        for (id, recorded, previous) in before {
+            const CURRENT: &str = "SELECT d.active,d.path,f.identity FROM docs d
+                LEFT JOIN document_identities f ON f.doc=d.id WHERE d.id=?";
+            let (active, path, identity) =
+                self.db.lock().unwrap().query_row(CURRENT, [&id], |r| {
+                    Ok((
+                        r.get::<_, bool>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+            let evidence = if !active {
+                "retired"
+            } else if self.inspect(&path) != Seen::File(identity.clone().map(Identity)) {
+                "undecided"
+            } else if content.contains_key(&id) {
+                "content"
+            } else if identity.is_some() && identity == previous {
+                "identity"
+            } else {
+                "path"
+            };
+            documents.push(Placement {
+                id,
+                recorded,
+                restored: active.then_some(path),
+                evidence,
+            });
+        }
+        if problem.is_none() && documents.iter().any(|d| d.evidence == "undecided") {
+            problem =
+                Some("Some documents could not be placed yet. Run locdoc --restored again.".into());
+        }
+        Ok(Restoration {
+            documents,
+            unclaimed: self.unclaimed_files()?,
+            problem,
+        })
+    }
+
+    /// The restore pass under document_files. Returns why it could not
+    /// complete; `content` collects the documents placed by content.
+    fn restore_pass(&self, content: &mut HashMap<String, String>) -> Result<Option<String>> {
+        if !self.root_identity.matches(&self.root) {
+            return Ok(Some(
+                "The documents folder is unavailable or changed during the restore.".into(),
+            ));
+        }
+        // Restored files are new, so an interrupted rename settles under
+        // neither name and its document is placed below.
+        self.settle_intents(false)?;
+        let started = clock();
+        let Namespace {
+            mut tracked,
+            pending,
+            reserved,
+        } = self.namespace()?;
+        if !pending.is_empty() {
+            return Ok(Some("An interrupted rename could not be settled. Check that every folder can be read, then run locdoc --restored again.".into()));
+        }
+        for document in &mut tracked {
+            document.seen = self.inspect(&document.path);
+        }
+        let (files, complete) = self.survey(&mut tracked);
+        if !complete
+            || tracked
+                .iter()
+                .any(|document| document.seen == Seen::Unknown)
+        {
+            return Ok(Some("Some folders or files in the documents folder could not be read. Fix their permissions, then run locdoc --restored again.".into()));
+        }
+        *content = match self.match_contents(&tracked, &files) {
+            Ok(matches) => matches,
+            Err(error) => return Ok(Some(error.1)),
+        };
+        for document in &mut tracked {
+            if let Some(path) = content.get(&document.id) {
+                document.recorded = files[path].clone();
+            }
+        }
+        // Every restored file is new, so an earlier gap is no evidence here.
+        let mut plan = classify(&tracked, &[], &files, &HashSet::new());
+        self.confirm_missing(&mut plan);
+        if !plan.undecided.is_empty() {
+            return Ok(Some(
+                "Some files changed while the restore pass looked at them. Run locdoc --restored again.".into(),
+            ));
+        }
+        // A matched document records its file now, even if its move waits.
+        for (id, path) in content.iter() {
+            plan.records.retain(|(record, _)| record != id);
+            plan.records.push((id.clone(), files[path].clone()));
+        }
+        self.apply(Pass::Settled, plan, &tracked, &reserved, complete, started)?;
+        Ok(None)
+    }
+
     /// One pass under document_files. A busy room or an undecidable file
     /// defers only that document and asks the maintenance loop to retry.
     /// Returns the documents left unplaced, as `discover_file_moves_locked`.
@@ -610,8 +758,37 @@ impl Store {
             self.observed_in_place(&observed)?;
             return Ok(HashSet::new());
         }
+        let (files, complete) = self.survey(&mut tracked);
+        let held: Vec<(&str, &Identity)> = pending
+            .iter()
+            .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
+            .collect();
+        let lapsed: HashSet<&str> = tracked
+            .iter()
+            .filter(|document| match (&document.seen, document.gap) {
+                (Seen::File(evidence), Some(since)) => {
+                    *evidence != document.recorded && !continues(since, started, evidence.as_ref())
+                }
+                _ => false,
+            })
+            .map(|document| document.id.as_str())
+            .collect();
+        let mut plan = classify(&tracked, &held, &files, &lapsed);
+        if pass == Pass::Settled && complete {
+            self.confirm_missing(&mut plan);
+        }
+        self.apply(pass, plan, &tracked, &reserved, complete, started)
+    }
+
+    /// Walk the tree and settle what each tracked path shows, given what
+    /// `inspect` saw there first. Returns the files no other name links to,
+    /// and whether every folder was listed.
+    fn survey(
+        &self,
+        tracked: &mut [Tracked<Identity>],
+    ) -> (HashMap<String, Option<Identity>>, bool) {
         let (mut files, mut linked, complete) = self.walk();
-        for document in &mut tracked {
+        for document in tracked.iter_mut() {
             let walked = files.get(&document.path).cloned();
             document.seen = match (&document.seen, walked) {
                 (Seen::Unknown, _) => Seen::Unknown,
@@ -638,48 +815,35 @@ impl Store {
         // A linked file still tells each document whose file is at its path,
         // but not which of its names a moved document now has.
         files.retain(|path, _| !linked.contains(path));
-        let held: Vec<(&str, &Identity)> = pending
+        (files, complete)
+    }
+
+    /// A file moved between folders during the walk is in neither listing.
+    /// Retire only what a second complete walk cannot find either.
+    fn confirm_missing(&self, plan: &mut Plan<Identity>) {
+        if !plan
+            .missing
             .iter()
-            .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
-            .collect();
-        let lapsed: HashSet<&str> = tracked
-            .iter()
-            .filter(|document| match (&document.seen, document.gap) {
-                (Seen::File(evidence), Some(since)) => {
-                    *evidence != document.recorded && !continues(since, started, evidence.as_ref())
-                }
-                _ => false,
-            })
-            .map(|document| document.id.as_str())
-            .collect();
-        let mut plan = classify(&tracked, &held, &files, &lapsed);
-        if pass == Pass::Settled
-            && complete
-            && plan
-                .missing
-                .iter()
-                .any(|missing| missing.evidence.is_some())
+            .any(|missing| missing.evidence.is_some())
         {
-            // A file moved between folders during the walk is in neither
-            // listing. Retire only what a second complete walk cannot find.
-            let (again, again_linked, still_complete) = self.walk();
-            let present: HashSet<&Identity> = again
-                .iter()
-                .filter(|(path, _)| !again_linked.contains(*path))
-                .filter_map(|(_, evidence)| evidence.as_ref())
-                .collect();
-            plan.missing.retain(|missing| {
-                let gone = missing
-                    .evidence
-                    .as_ref()
-                    .is_none_or(|evidence| still_complete && !present.contains(evidence));
-                if !gone {
-                    plan.undecided.push(missing.id.clone());
-                }
-                gone
-            });
+            return;
         }
-        self.apply(pass, plan, &tracked, &reserved, complete, started)
+        let (again, again_linked, still_complete) = self.walk();
+        let present: HashSet<&Identity> = again
+            .iter()
+            .filter(|(path, _)| !again_linked.contains(*path))
+            .filter_map(|(_, evidence)| evidence.as_ref())
+            .collect();
+        plan.missing.retain(|missing| {
+            let gone = missing
+                .evidence
+                .as_ref()
+                .is_none_or(|evidence| still_complete && !present.contains(evidence));
+            if !gone {
+                plan.undecided.push(missing.id.clone());
+            }
+            gone
+        });
     }
 
     /// Documents a pass saw at their own name, with their own file or one it
@@ -821,6 +985,152 @@ impl Store {
             }
         }
         (files, linked, complete)
+    }
+
+    /// For a restore only: pair each document whose recorded file is found
+    /// nowhere with the one unclaimed file holding a text it is known to have
+    /// had, when no other document is known to have that file's text. A file
+    /// that cannot be read could hold a duplicate, so it fails the pass.
+    fn match_contents(
+        &self,
+        tracked: &[Tracked<Identity>],
+        files: &HashMap<String, Option<Identity>>,
+    ) -> Result<HashMap<String, String>> {
+        let found: HashSet<&Identity> = files.values().flatten().collect();
+        let lost = |document: &Tracked<Identity>| {
+            document
+                .recorded
+                .as_ref()
+                .is_none_or(|evidence| !found.contains(evidence))
+        };
+        if !tracked.iter().any(lost) {
+            return Ok(HashMap::new());
+        }
+        let mut owners: HashMap<String, HashSet<&str>> = HashMap::new();
+        let mut wanted = Vec::new();
+        for document in tracked {
+            let digests: HashSet<String> = self
+                .known_contents(&document.id)?
+                .iter()
+                .map(|text| hash(text))
+                .collect();
+            for digest in &digests {
+                owners
+                    .entry(digest.clone())
+                    .or_default()
+                    .insert(&document.id);
+            }
+            if lost(document) {
+                wanted.push((document.id.as_str(), digests));
+            }
+        }
+        let claimed: HashSet<&Identity> = tracked
+            .iter()
+            .filter_map(|document| document.recorded.as_ref())
+            .collect();
+        let mut holders: HashMap<String, Vec<&str>> = HashMap::new();
+        let mut held = HashMap::new();
+        for (path, evidence) in files {
+            if evidence
+                .as_ref()
+                .is_some_and(|evidence| claimed.contains(evidence))
+            {
+                continue;
+            }
+            if let Some(text) = self.restored_text(path, evidence.as_ref())? {
+                let digest = hash(&text);
+                holders.entry(digest.clone()).or_default().push(path);
+                held.insert(path.as_str(), digest);
+            }
+        }
+        let mut matches = HashMap::new();
+        for (id, digests) in wanted {
+            let candidates: HashSet<&str> = digests
+                .iter()
+                .filter_map(|digest| holders.get(digest))
+                .flatten()
+                .copied()
+                .collect();
+            let [path] = candidates.into_iter().collect::<Vec<_>>()[..] else {
+                continue;
+            };
+            // Only a file with an identity can become the document's.
+            if files[path].is_some() && owners[&held[path]].len() == 1 {
+                matches.insert(id.to_owned(), path.to_owned());
+            }
+        }
+        Ok(matches)
+    }
+
+    /// A restored file's text as an import reads it, or None when it cannot
+    /// be a document's: over the size limit or not UTF-8.
+    fn restored_text(&self, path: &str, evidence: Option<&Identity>) -> Result<Option<String>> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let unreadable = |reason: String| {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "Could not read {path}: {reason}. Fix it, then run locdoc --restored again."
+                ),
+            )
+        };
+        let full = self
+            .safe(path, false)
+            .map_err(|error| unreadable(error.1))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(full)
+            .map_err(|error| unreadable(error.to_string()))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| unreadable(error.to_string()))?;
+        if !metadata.is_file()
+            || evidence.is_some_and(|evidence| Identity::of(&metadata).as_ref() != Some(evidence))
+        {
+            return Err(unreadable("it changed during the restore".into()));
+        }
+        let mut bytes = Vec::new();
+        file.take((5 * MB + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| unreadable(error.to_string()))?;
+        if bytes.len() > 5 * MB {
+            return Ok(None);
+        }
+        Ok(String::from_utf8(bytes)
+            .ok()
+            .map(|raw| text::canonical(&raw)))
+    }
+
+    /// Document files a walk finds that no active document records, by path
+    /// or by identity.
+    fn unclaimed_files(&self) -> Result<Vec<String>> {
+        let (files, _, _) = self.walk();
+        let db = self.db.lock().unwrap();
+        let paths: HashSet<String> = db
+            .prepare("SELECT path FROM docs WHERE active=1")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let identities: HashSet<String> = db
+            .prepare(
+                "SELECT f.identity FROM document_identities f
+                 JOIN docs d ON d.id=f.doc WHERE d.active=1",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut unclaimed: Vec<String> = files
+            .into_iter()
+            .filter(|(path, evidence)| {
+                !paths.contains(path)
+                    && evidence
+                        .as_ref()
+                        .is_none_or(|Identity(identity)| !identities.contains(identity))
+            })
+            .map(|(path, _)| path)
+            .collect();
+        unclaimed.sort();
+        Ok(unclaimed)
     }
 
     /// Apply a plan in one transaction. A busy room, a failed preparation or

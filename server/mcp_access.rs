@@ -136,6 +136,26 @@ fn set_document(s: &Store, id: &str, allowed: bool) -> Result<Access> {
     document_access(s, &document)
 }
 
+/// Folders whose MCP grant no longer matches them, as after a restore copied
+/// every folder. The owner allows them again.
+pub(super) fn unmatched_folders(s: &Store) -> Result<Vec<String>> {
+    let grants =
+        s.db.lock()
+            .unwrap()
+            .prepare("SELECT path,identity FROM mcp_folders ORDER BY path")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(grants
+        .into_iter()
+        .filter(|(path, identity)| {
+            folders::directory_identity(s, path).ok().as_ref() != Some(identity)
+        })
+        .map(|(path, _)| path)
+        .collect())
+}
+
 fn set_folder(s: &Store, input: &str, allowed: bool) -> Result<Access> {
     let path = documents::relative_path(input, false)?;
     let identity = folders::directory_identity(s, &path)?;
