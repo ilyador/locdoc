@@ -435,3 +435,37 @@ fn a_restore_never_revives_folder_links_or_grants_and_names_them() {
             .mcp_allowed
     );
 }
+
+#[test]
+fn a_blank_text_never_matches_a_restored_file() {
+    let (directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let empty = written(&s, "empty.md", "");
+    let blank = written(&s, "blank.md", "\n\n");
+    for (document, token) in [(&empty, "empty-link"), (&blank, "blank-link")] {
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='edit',token=? WHERE id=?",
+                params![token, document.id],
+            )
+            .unwrap();
+    }
+    let backup = directory.path().join("backup");
+    // Both files go, and unrelated empty and blank files appear.
+    back_up(&s, &backup, |root| {
+        fs::remove_file(root.join("empty.md")).unwrap();
+        fs::remove_file(root.join("blank.md")).unwrap();
+        fs::write(root.join("new.md"), "").unwrap();
+        fs::write(root.join("other.md"), "\r\n\r\n").unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &kept)["evidence"], "content");
+    assert_eq!(placement(&report, &empty)["evidence"], "retired");
+    assert_eq!(placement(&report, &blank)["evidence"], "retired");
+    assert!(shared_text(&s, "empty-link").is_none());
+    assert!(shared_text(&s, "blank-link").is_none());
+    assert_eq!(report["unclaimedFiles"], json!(["new.md", "other.md"]));
+    assert_eq!(s.index_document("new.md").unwrap().permission, "private");
+}

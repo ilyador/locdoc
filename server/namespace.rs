@@ -1009,9 +1009,12 @@ impl Store {
         let mut owners: HashMap<String, HashSet<&str>> = HashMap::new();
         let mut wanted = Vec::new();
         for document in tracked {
+            // Empty files are common and unrelated; a blank text identifies
+            // no file.
             let digests: HashSet<String> = self
                 .known_contents(&document.id)?
                 .iter()
+                .filter(|text| !text.trim().is_empty())
                 .map(|text| hash(text))
                 .collect();
             for digest in &digests {
