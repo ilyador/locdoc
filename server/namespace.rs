@@ -53,15 +53,34 @@ pub(super) fn record_identity(
 /// When the maintenance loop should run the next settled pass. Engine paths
 /// hold a room and so cannot wait for `document_files`; they ask instead.
 #[derive(Default)]
-pub(super) struct Requests(Mutex<Option<Instant>>);
+pub(super) struct Requests(Mutex<Requested>);
+
+#[derive(Default)]
+struct Requested {
+    next: Option<Instant>,
+    /// Missing documents the last incomplete listing keeps until its own
+    /// retry. Asking again for them cannot complete the listing sooner.
+    held: HashSet<String>,
+}
+
 impl Requests {
     pub(super) fn after(&self, delay: Duration) {
         let at = Instant::now() + delay;
-        let mut next = self.0.lock().unwrap();
-        *next = Some(next.map_or(at, |next| next.min(at)));
+        let mut requested = self.0.lock().unwrap();
+        requested.next = Some(requested.next.map_or(at, |next| next.min(at)));
+    }
+    /// An engine path cannot use this document's file yet.
+    fn unmatched(&self, document: &str) {
+        let held = self.0.lock().unwrap().held.contains(document);
+        if !held {
+            self.after(RETRY);
+        }
+    }
+    fn hold(&self, documents: HashSet<String>) {
+        self.0.lock().unwrap().held = documents;
     }
     pub(super) fn take(&self) -> Option<Instant> {
-        self.0.lock().unwrap().take()
+        self.0.lock().unwrap().next.take()
     }
 }
 
@@ -404,7 +423,7 @@ impl Store {
             .optional()?;
         let unmatched = recorded.map(Identity) != Identity::of(file);
         if unmatched {
-            self.reconciliation.after(RETRY);
+            self.reconciliation.unmatched(document);
         }
         Ok(unmatched)
     }
@@ -629,15 +648,18 @@ impl Store {
             .chain(moves.iter().map(|change| change.id.clone()))
             .collect();
         let mut retiring = Vec::new();
+        let mut held = HashSet::new();
         if !missing.is_empty() {
             if !complete {
                 sooner(&mut retry, INCOMPLETE_RETRY);
+                held = missing.iter().map(|missing| missing.id.clone()).collect();
             } else if pass == Pass::Settled {
                 retiring = missing;
             } else {
                 sooner(&mut retry, RETRY);
             }
         }
+        self.reconciliation.hold(held);
         // Map before room, and never wait for a room: a busy one defers.
         let rooms: Vec<(String, Arc<Mutex<Room>>)> = {
             let cached = self.rooms.lock().unwrap();

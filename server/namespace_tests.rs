@@ -1257,3 +1257,42 @@ fn the_document_holding_evidence_recorded_twice_keeps_saving() {
     assert!(saved);
     assert!(text.contains("Edit of the holder"));
 }
+
+#[test]
+fn a_waiting_room_cannot_make_an_unreadable_tree_rescan_every_second() {
+    let (directory, s, a, b) = swap_fixture();
+    let room = s.room(&a).unwrap();
+    let frame = append_frame(&room, "Pending edit of A\n");
+    process_frame(&s, &a, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    s.create_folder("Locked").unwrap();
+    fs::rename(s.root.join("p.md"), directory.path().join("outside.md")).unwrap();
+    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    let locked = s.root.join("Locked");
+    s.reconciliation.take();
+    walking(
+        move |path| {
+            if path == locked {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(())
+        },
+        || s.retire_missing_documents(),
+    )
+    .unwrap();
+    // A's file may be in the unlisted folder, so A waits for a full listing.
+    assert!(s.doc(&a.id).is_ok());
+    let held = s.reconciliation.take().unwrap();
+    assert!(held > Instant::now() + Duration::from_secs(10));
+    // A's room polls while B's file sits at A's name; asking again cannot
+    // complete the listing sooner.
+    assert!(!s.persist(&a, &mut room.lock().unwrap()).unwrap());
+    let next = s.reconciliation.take();
+    assert!(
+        next.is_none_or(|next| next >= held),
+        "A waiting room must not bring the next full walk forward"
+    );
+    // Once the folder can be listed, A retires and B takes its name.
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
+}
