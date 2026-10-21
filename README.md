@@ -69,7 +69,7 @@ npm run install:service
 npm run owner
 ```
 
-This installs and starts a **user** systemd service using your actual checkout path and `.env`. No administrator access is required. An existing service is preserved unless you pass `-- --replace`; restart it after rebuilding.
+This installs and starts a **user** systemd service using your actual checkout path and `.env`. No administrator access is required. An existing service is preserved unless you pass `-- --replace`. Update it with the deploy script below.
 
 ```sh
 systemctl --user status locdoc
@@ -78,6 +78,31 @@ journalctl --user -u locdoc -n 50
 ```
 
 To start before login, your administrator can optionally enable user lingering. For development use `npm run dev` (export environment variables first).
+
+### Deploy updates
+
+Releases live outside the checkout and the state folder, in `~/.local/share/locdoc/releases/<UTC time>-<commit>/` with the binary, the web build and a `manifest.json`. A `current` symlink names the running release. Once, install the release drop-in:
+
+```sh
+scripts/deploy.sh install-unit
+```
+
+This copies the build the service runs now into a first release, installs `deployment/locdoc-release.conf` as `~/.config/systemd/user/locdoc.service.d/release.conf` and reloads systemd. Locdoc keeps running until the next deploy restarts it. Then deploy a committed checkout:
+
+```sh
+git pull && npm ci && npm run verify
+scripts/deploy.sh             # add --rehearse to start it against copies of your data first
+```
+
+The script refuses uncommitted changes, a commit that is already current (unless `--force`) and a unit that does not run `current/locdoc` with `LOCDOC_WEB` set to `current/web`. It builds the backend and frontend into `target/stage` and `target/stage-web` while the service keeps running, then smoke tests them on a free loopback port with temporary folders. `--rehearse` also starts the build against copies of the state database and documents folder. Before switching, it backs up the database (through SQLite's backup API), `owner.key`, `root.identity` and fonts into the release's `backup/` folder. After switching `current` and restarting, it checks the unit, `/api/config`, the served bundle, error-level journal lines, `PRAGMA integrity_check` and document, revision and comment counts. Any failure points `current` back at the previous release and restarts it. The newest five releases and the previous one are kept.
+
+```sh
+scripts/deploy.sh status
+scripts/deploy.sh rollback                                 # the previous release
+scripts/deploy.sh rollback 20261021T180516Z-0123456789ab   # a named release
+```
+
+Rollback runs the same checks but leaves the state folder as it is. Restore steps for a `backup/` folder will be documented by a later change. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE` and `LOCDOC_DOCS` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
 
 ## Fountain screenplays
 
@@ -213,7 +238,7 @@ Compare parser, editor and DOM object identities with `assert.ok(actual === expe
 
 The GitHub Actions workflow repeats verification in a clean environment on each push. It is optional; running Locdoc does not require GitHub or a runner.
 
-Before updating, back up state and stop the service. Pull changes, run `npm ci`, `npm run verify`, `npm run build`, then start the service again. Deploy matching backend and frontend builds. Do not run a build into a live `dist` directory.
+Update a running service with `scripts/deploy.sh` (see [Deploy updates](#deploy-updates)); it deploys matching backend and frontend builds together. Do not run a build into a directory that a running service serves.
 
 Architecture stays small: one Axum process, one SQLite database, ordinary Markdown files. `server/engine.rs` owns document commands and their transaction, publication, projection and receipt boundaries; `server/save.rs` defines its private projection phases. `server/namespace.rs` decides which file is which document and owns journaled moves; `server/documents.rs` owns document records, path normalization and creation; `server/folders.rs` owns folder capabilities; `server/disk.rs` owns file leases; `server/comments.rs` plans source comments; `server/links.rs` owns safe previews; `server/security.rs` validates wire data and media authorization; `server/maintenance.rs` owns explicit archival recovery. The browser keeps document state below a keyed React boundary, so late async results cannot overwrite a different open document.
 
