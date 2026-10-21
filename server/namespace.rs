@@ -380,6 +380,26 @@ impl Store {
         })
     }
 
+    /// Only a pass assigns files to documents. Engine paths call this with
+    /// the file they opened, before importing from or projecting into it: a
+    /// file recorded for another active document stays untouched, and the
+    /// maintenance loop is asked for a pass. It never waits for document_files.
+    pub(super) fn foreign_file(&self, document: &str, file: &fs::Metadata) -> Result<bool> {
+        let Some(Identity(identity)) = Identity::of(file) else {
+            return Ok(false);
+        };
+        let foreign = self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM document_identities f JOIN docs d ON d.id=f.doc
+             WHERE f.identity=? AND d.active=1 AND d.id!=?)",
+            params![identity, document],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if foreign {
+            self.reconciliation.after(RETRY);
+        }
+        Ok(foreign)
+    }
+
     /// Find moves missed while offline or during watcher overflow, and record
     /// atomic saves. Missing documents wait for the maintenance loop.
     pub(super) fn discover_file_moves(&self) -> Result<()> {

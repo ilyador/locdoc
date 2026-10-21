@@ -103,6 +103,9 @@ impl DiskFile {
     pub(super) fn stamp(&self) -> Option<Stamp> {
         self.0.metadata().ok().map(Stamp::metadata)
     }
+    pub(super) fn metadata(&self) -> std::io::Result<fs::Metadata> {
+        self.0.metadata()
+    }
 
     pub(super) fn open(path: &Path) -> Result<Option<Self>> {
         Self::leased(path, libc::F_WRLCK)

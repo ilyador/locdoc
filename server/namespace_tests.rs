@@ -770,6 +770,15 @@ fn a_document_moved_out_of_the_root_retires_while_another_takes_its_path() {
     // Startup only discovers. A waits for a settled pass, B for A's path.
     assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
     assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+    // Meanwhile A's link keeps serving A's accepted text, never B's file.
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
     s.retire_missing_documents().unwrap();
     assert!(s.doc(&a.id).is_err());
     assert!(shared_text(&s, "old-link").is_none());
@@ -1012,4 +1021,64 @@ fn a_file_still_being_matched_does_not_hide_the_workspace_listing() {
         .collect();
     assert!(listed.contains(&b.id) && listed.contains(&other.id));
     assert!(!listed.contains(&a.id));
+}
+
+#[test]
+fn a_live_room_neither_imports_nor_overwrites_another_documents_file() {
+    let (_directory, s, a, _b) = swap_fixture();
+    let room = s.room(&a).unwrap();
+    let frame = append_frame(&room, "Pending browser edit of A\n");
+    process_frame(&s, &a, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    let accepted = room_text(&room.lock().unwrap());
+    // The engine sees the swap before any pass has matched the files.
+    swap(&s.root);
+    s.reconciliation.take();
+    assert!(!s.persist(&a, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(room_text(&room.lock().unwrap()), accepted);
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
+    assert!(
+        s.reconciliation.take().is_some(),
+        "The engine asks for a pass instead of waiting for document_files"
+    );
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some(accepted.as_str())
+    );
+    s.discover_file_moves().unwrap();
+    let moved = s.doc(&a.id).unwrap();
+    assert!(s.persist(&moved, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(fs::read_to_string(s.root.join("q.md")).unwrap(), accepted);
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
+}
+
+#[test]
+fn a_cold_document_never_loads_another_documents_file() {
+    let (_directory, s) = store();
+    let a = s.create_document("p.md").unwrap();
+    let b = s.create_document("r.md").unwrap();
+    share(&s, &a.id);
+    fs::write(s.root.join("r.md"), "Private text of B\n").unwrap();
+    swap(&s.root);
+    assert!(matches!(
+        s.room(&a),
+        Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, _))
+    ));
+    assert!(shared_text(&s, "old-link").is_none());
+    let state: Option<Vec<u8>> =
+        s.db.lock()
+            .unwrap()
+            .query_row("SELECT state FROM docs WHERE id=?", [&a.id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+    assert!(state.is_none(), "B's bytes must not seed A's first state");
+    s.discover_file_moves().unwrap();
+    assert_eq!(shared_text(&s, "old-link").as_deref(), Some("# p\n\n"));
+    assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
 }

@@ -262,6 +262,11 @@ fn read_guarded_file(
     let mut file = opened.ok_or_else(|| conflict(
         "The desktop file is unavailable or still being saved. Finish that save before rebuilding.",
     ))?;
+    if store.foreign_file(&document.id, &file.metadata()?)? {
+        return Err(conflict(
+            "This file still belongs to another document. Retry once its move is discovered.",
+        ));
+    }
     let source = file.read_bytes()?;
     if !file.excludes_writers() || !file.is_current(&path) {
         return Err(conflict(

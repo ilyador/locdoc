@@ -444,6 +444,10 @@ impl super::Store {
         let Some(mut file) = super::DiskFile::open_read(&self.safe(&doc.path, false)?)? else {
             return Ok(());
         };
+        // Another document's references are not this document's approvals.
+        if self.foreign_file(&doc.id, &file.metadata()?)? {
+            return Ok(());
+        }
         let Ok(source) = file.read() else {
             return Ok(());
         };

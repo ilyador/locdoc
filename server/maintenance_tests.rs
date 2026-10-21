@@ -913,3 +913,27 @@ async fn removed_document_recovery_keeps_pending_edits_private_without_reading_a
     assert!(revoked.is_none());
     server.abort();
 }
+
+#[test]
+fn rebuilding_from_disk_refuses_a_file_recorded_for_another_document() {
+    let (_directory, store, document) = fixture("Own accepted text\n");
+    fs::write(store.root.join("other.md"), "Another document's text\n").unwrap();
+    store.index_document("other.md").unwrap();
+    // A swap that no pass has matched yet: test.md holds the other file.
+    fs::rename(store.root.join("test.md"), store.root.join("moved.md")).unwrap();
+    fs::rename(store.root.join("other.md"), store.root.join("test.md")).unwrap();
+    assert!(rebuild_document(&store, &document.id, RebuildSource::Disk).is_err());
+    let state: Option<Vec<u8>> = store
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT state FROM docs WHERE id=?", [&document.id], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(state.is_none());
+    assert_eq!(
+        fs::read_to_string(store.root.join("test.md")).unwrap(),
+        "Another document's text\n"
+    );
+}
