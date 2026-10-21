@@ -1650,3 +1650,67 @@ fn a_folder_link_stops_covering_a_document_moved_out_before_its_row_can_follow()
     assert_eq!(moved.path, "Private/removed.md");
     assert!(s.access(&HeaderMap::new(), &moved, &visitor).is_err());
 }
+
+#[test]
+fn a_symlink_at_a_shared_name_never_reaches_the_file_it_points_to() {
+    let (_directory, s, a, _b) = swap_fixture();
+    fs::remove_file(s.root.join("p.md")).unwrap();
+    std::os::unix::fs::symlink(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    s.retire_missing_documents().unwrap();
+    let room = s.room(&s.doc(&a.id).unwrap()).unwrap();
+    assert!(!s.persist(&a, &mut room.lock().unwrap()).unwrap_or(false));
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("r.md")).unwrap(),
+        "Private text of B\n"
+    );
+}
+
+#[test]
+fn a_followed_move_to_another_folder_never_approves_its_private_image() {
+    let (_directory, s) = store();
+    let page = s.create_document("Drafts/page.md").unwrap();
+    s.create_folder("Private").unwrap();
+    share(&s, &page.id);
+    let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+    fs::write(s.root.join("Drafts/image.png"), &png).unwrap();
+    fs::write(s.root.join("Private/image.png"), &png).unwrap();
+    fs::write(s.root.join("Drafts/page.md"), "![image](image.png)\n").unwrap();
+    s.room(&page).unwrap();
+    let guest = Media {
+        path: "image.png".into(),
+        token: Some("old-link".into()),
+    };
+    assert!(media_file(&s, &page.id, &guest, &HeaderMap::new()).is_ok());
+    // A desktop move, followed from file evidence rather than renamed here.
+    fs::rename(
+        s.root.join("Drafts/page.md"),
+        s.root.join("Private/page.md"),
+    )
+    .unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Private/page.md");
+    assert!(media_file(&s, &page.id, &guest, &HeaderMap::new()).is_err());
+}
+
+#[test]
+fn a_file_moved_into_a_hidden_folder_leaves_with_its_link() {
+    let (_directory, s) = store();
+    let page = s.create_document("Shared/page.md").unwrap();
+    share(&s, &page.id);
+    fs::create_dir(s.root.join("Shared/.archive")).unwrap();
+    fs::rename(
+        s.root.join("Shared/page.md"),
+        s.root.join("Shared/.archive/page.md"),
+    )
+    .unwrap();
+    s.discover_file_moves().unwrap();
+    assert!(s.index_document("Shared/.archive/page.md").is_err());
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&page.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+}
