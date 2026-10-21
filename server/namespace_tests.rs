@@ -1082,3 +1082,44 @@ fn a_cold_document_never_loads_another_documents_file() {
     assert_eq!(shared_text(&s, "old-link").as_deref(), Some("# p\n\n"));
     assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
 }
+
+/// P's file now sits at C's old name and C's own file is gone. Until a settled
+/// pass retires C, P keeps its row path, where nothing is.
+fn moved_onto_a_removed_document() -> (tempfile::TempDir, App, Document, Document) {
+    let (directory, s) = store();
+    let moved = s.create_document("p.md").unwrap();
+    let removed = s.create_document("q.md").unwrap();
+    share(&s, &moved.id);
+    fs::remove_file(s.root.join("q.md")).unwrap();
+    fs::rename(s.root.join("p.md"), s.root.join("q.md")).unwrap();
+    (directory, s, moved, removed)
+}
+
+#[test]
+fn reusing_a_name_never_retires_a_document_whose_file_was_found_elsewhere() {
+    let (_directory, s, moved, removed) = moved_onto_a_removed_document();
+    let error = s.create_document("p.md").unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert_eq!(s.doc(&moved.id).unwrap().token.as_deref(), Some("old-link"));
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    assert_eq!(s.doc(&moved.id).unwrap().path, "q.md");
+    let created = s.create_document("p.md").unwrap();
+    assert_ne!(created.id, moved.id);
+    assert_eq!(s.doc(&moved.id).unwrap().token.as_deref(), Some("old-link"));
+}
+
+#[test]
+fn renaming_onto_a_name_never_retires_a_document_whose_file_was_found_elsewhere() {
+    let (_directory, s, moved, _removed) = moved_onto_a_removed_document();
+    let other = s.create_document("other.md").unwrap();
+    let error = s.rename_document(&other.id, "p.md").unwrap_err();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert_eq!(s.doc(&other.id).unwrap().path, "other.md");
+    assert_eq!(s.doc(&moved.id).unwrap().token.as_deref(), Some("old-link"));
+    s.retire_missing_documents().unwrap();
+    s.rename_document(&other.id, "p.md").unwrap();
+    let kept = s.doc(&moved.id).unwrap();
+    assert_eq!(kept.path, "q.md");
+    assert_eq!(kept.token.as_deref(), Some("old-link"));
+}

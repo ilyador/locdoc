@@ -303,9 +303,12 @@ impl Store {
             )
             .optional()?;
         if let Some(previous) = previous {
-            self.discover_file_moves_locked()?;
+            // A previous document whose file was found elsewhere follows it
+            // once a pass can place it; its name is not free yet.
+            let unplaced = self.discover_file_moves_locked()?;
             if self.doc(&previous)?.path == path
-                && !self.retire_missing_identity(&previous, &full)?
+                && (unplaced.contains(&previous)
+                    || !self.retire_missing_identity(&previous, &full)?)
             {
                 return Err(ApiError(
                     StatusCode::CONFLICT,

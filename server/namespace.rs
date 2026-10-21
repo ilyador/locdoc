@@ -157,8 +157,8 @@ struct Plan<E> {
     /// New evidence for documents that keep their path.
     records: Vec<(String, Option<E>)>,
     missing: Vec<Missing<E>>,
-    /// Some document could not be decided from this observation.
-    undecided: bool,
+    /// Documents this observation could not decide.
+    undecided: Vec<String>,
 }
 
 /// Decide where every tracked document is from evidence alone, never from
@@ -198,7 +198,7 @@ fn classify<E: Clone + Eq + Hash>(
         moves: Vec::new(),
         records: Vec::new(),
         missing: Vec::new(),
-        undecided: false,
+        undecided: Vec::new(),
     };
     for document in tracked {
         let own = document
@@ -222,7 +222,7 @@ fn classify<E: Clone + Eq + Hash>(
                 }
                 // Seen at two paths: it moved while the tree was walked.
                 Some(_) => {
-                    plan.undecided = true;
+                    plan.undecided.push(document.id.clone());
                     continue;
                 }
                 None => {}
@@ -248,7 +248,7 @@ fn classify<E: Clone + Eq + Hash>(
                 path: document.path.clone(),
                 seen: Seen::Absent,
             }),
-            Seen::Unknown => plan.undecided = true,
+            Seen::Unknown => plan.undecided.push(document.id.clone()),
         }
     }
     plan
@@ -404,25 +404,31 @@ impl Store {
     /// atomic saves. Missing documents wait for the maintenance loop.
     pub(super) fn discover_file_moves(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
-        self.reconcile(Pass::Discover)
+        self.reconcile(Pass::Discover)?;
+        Ok(())
     }
 
-    pub(super) fn discover_file_moves_locked(&self) -> Result<()> {
+    /// Discovery under a held document_files. Returns the documents whose
+    /// file was seen away from their row path but which keep that path for
+    /// now; explicit path reuse must not retire them.
+    pub(super) fn discover_file_moves_locked(&self) -> Result<HashSet<String>> {
         self.reconcile(Pass::Discover)
     }
 
     /// The maintenance loop's settled pass, which also retires missing files.
     pub(super) fn retire_missing_documents(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
-        self.reconcile(Pass::Settled)
+        self.reconcile(Pass::Settled)?;
+        Ok(())
     }
 
     /// One pass under document_files. A busy room or an undecidable file
     /// defers only that document and asks the maintenance loop to retry.
-    fn reconcile(&self, pass: Pass) -> Result<()> {
+    /// Returns the documents left unplaced, as `discover_file_moves_locked`.
+    fn reconcile(&self, pass: Pass) -> Result<HashSet<String>> {
         if !self.root_identity.matches(&self.root) {
             // A missing mount is never evidence about its documents.
-            return Ok(());
+            return Ok(HashSet::new());
         }
         self.settle_intents(false)?;
         let Namespace {
@@ -438,7 +444,7 @@ impl Store {
                 && document.seen != Seen::File(document.recorded.clone());
         }
         if !changed {
-            return Ok(());
+            return Ok(HashSet::new());
         }
         let (mut files, complete) = self.walk();
         for document in &mut tracked {
@@ -570,7 +576,8 @@ impl Store {
 
     /// Apply a plan in one transaction. A busy room, a failed preparation or
     /// a file that changed since it was observed defers that document, and
-    /// with it any move onto the path it keeps.
+    /// with it any move onto the path it keeps. Returns the documents that
+    /// were found elsewhere or undecided and keep their row path for now.
     fn apply(
         &self,
         pass: Pass,
@@ -578,14 +585,18 @@ impl Store {
         tracked: &[Tracked<Identity>],
         reserved: &HashSet<String>,
         complete: bool,
-    ) -> Result<()> {
+    ) -> Result<HashSet<String>> {
         let Plan {
             mut moves,
             records,
             missing,
             undecided,
         } = plan;
-        let mut retry = undecided.then_some(RETRY);
+        let mut retry = (!undecided.is_empty()).then_some(RETRY);
+        let mut unplaced: HashSet<String> = undecided
+            .into_iter()
+            .chain(moves.iter().map(|change| change.id.clone()))
+            .collect();
         let mut retiring = Vec::new();
         if !missing.is_empty() {
             if !complete {
@@ -672,7 +683,7 @@ impl Store {
         }
         if !self.root_identity.matches(&self.root) {
             self.reconciliation.after(RETRY);
-            return Ok(());
+            return Ok(unplaced);
         }
         // A deferred document keeps its path, which blocks any move onto it.
         loop {
@@ -760,6 +771,9 @@ impl Store {
             if !moves.is_empty() || !retiring.is_empty() {
                 self.permissions.invalidate();
             }
+            for change in &moves {
+                unplaced.remove(&change.id);
+            }
         }
         // Cache operations acquire map -> room. Release every room before
         // closing retired ones; stale commands reject the inactive identity.
@@ -770,7 +784,7 @@ impl Store {
         if let Some(delay) = retry {
             self.reconciliation.after(delay);
         }
-        failure.map_or(Ok(()), Err)
+        failure.map_or(Ok(unplaced), Err)
     }
 
     /// Keep a retiring room's final accepted text restorable, including edits
@@ -815,7 +829,7 @@ impl Store {
     ) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         self.finish_pending_path(&self.doc(id)?.path)?;
-        self.reconcile(Pass::Discover)?;
+        let unplaced = self.reconcile(Pass::Discover)?;
         let d = self.doc(id)?;
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
@@ -857,8 +871,10 @@ impl Store {
             tx.rollback()?;
             previous
         };
+        // A previous document whose file was found elsewhere follows it once
+        // a pass can place it; its name is not free yet.
         if let Some(previous) = previous
-            && !self.retire_missing_identity(&previous, &dest)?
+            && (unplaced.contains(&previous) || !self.retire_missing_identity(&previous, &dest)?)
         {
             return Err(ApiError(
                 StatusCode::CONFLICT,
