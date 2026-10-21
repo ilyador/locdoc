@@ -1470,3 +1470,50 @@ fn two_names_linked_to_one_new_file_belong_to_neither_document() {
         "Notes in a new file\n"
     );
 }
+
+#[test]
+fn a_link_never_opens_a_document_as_it_was_when_the_request_resolved_it() {
+    let (_directory, s) = store();
+    let document = s.create_document("Shared/page.md").unwrap();
+    s.create_folder("Private").unwrap();
+    let shared = folders::share_folder(
+        &s,
+        serde_json::from_value(json!({"path": "Shared", "permission": "view"})).unwrap(),
+    )
+    .unwrap();
+    let token = shared["shareUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap();
+    let folder = Access {
+        token: Some(token.into()),
+        ..Access::default()
+    };
+    // open_shared resolves a document, then waits for that document's queue.
+    // Meanwhile the owner moves it out of the shared folder.
+    let grant = folders::grant(&s, token).unwrap();
+    let resolved = folders::document(&s, &grant, Some(&document.id))
+        .unwrap()
+        .unwrap();
+    s.rename_document(&document.id, "Private/page.md").unwrap();
+    assert!(document_payload(&s, &HeaderMap::new(), &resolved, &folder).is_err());
+    // Or turns its own link off.
+    share(&s, &document.id);
+    let resolved = shared_document(&s, "old-link").unwrap();
+    share_document(
+        &s,
+        document.id.clone(),
+        Share {
+            permission: "private".into(),
+            rotate: false,
+        },
+    )
+    .unwrap();
+    let link = Access {
+        token: Some("old-link".into()),
+        ..Access::default()
+    };
+    assert!(document_payload(&s, &HeaderMap::new(), &resolved, &link).is_err());
+}

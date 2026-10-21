@@ -806,6 +806,9 @@ async fn create(
     }
 }
 fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> Result<Value> {
+    // A caller may resolve the document before waiting for its queue, while
+    // it moves or its link is turned off. Authorize it as it is now.
+    let d = &s.doc(&d.id)?;
     let (owner, mut edit) = s.access(h, d, access)?;
     let room = s.room(d)?;
     let mut room = room.lock().unwrap();
