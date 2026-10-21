@@ -1326,6 +1326,64 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn tools_never_read_or_write_a_private_file_swapped_into_an_enabled_name() {
+        let (_dir, s, d) = fixture();
+        let private = s.create_document("private.md").unwrap();
+        fs::write(s.root.join("test.md"), "Enabled text\n").unwrap();
+        fs::write(s.root.join("private.md"), "Private text\n").unwrap();
+        for document in [&d, &private] {
+            let room = s.room(document).unwrap();
+            s.persist(document, &mut room.lock().unwrap()).unwrap();
+        }
+        // The desktop swaps the files; no pass has matched them yet.
+        fs::rename(s.root.join("test.md"), s.root.join("swap.tmp")).unwrap();
+        fs::rename(s.root.join("private.md"), s.root.join("test.md")).unwrap();
+        fs::rename(s.root.join("swap.tmp"), s.root.join("private.md")).unwrap();
+        let tools = access(&["locdoc:read", "locdoc:write"]);
+        let read = execute(
+            s.clone(),
+            tools.clone(),
+            "read_document",
+            json!({"doc_id": d.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["content"], "Enabled text\n");
+        let edited = execute(
+            s.clone(),
+            tools.clone(),
+            "edit_document",
+            input(&d, "Enabled text\n", "Enabled text\nConnector edit\n"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(edited["accepted"], true);
+        assert_eq!(
+            fs::read_to_string(s.root.join("test.md")).unwrap(),
+            "Private text\n"
+        );
+        let found = execute(
+            s.clone(),
+            tools.clone(),
+            "search_documents",
+            json!({"query": "Private text", "limit": 10}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(found["matches"], json!([]));
+        // Listing ran a pass: the enabled document followed its own file.
+        assert_eq!(s.doc(&d.id).unwrap().path, "private.md");
+        let read = execute(s.clone(), tools, "read_document", json!({"doc_id": d.id}))
+            .await
+            .unwrap();
+        assert_eq!(read["content"], "Enabled text\nConnector edit\n");
+        assert_eq!(
+            fs::read_to_string(s.root.join("test.md")).unwrap(),
+            "Private text\n"
+        );
+    }
+
     #[test]
     fn chunk_offsets_are_unicode_characters_and_all_tools_have_scopes() {
         let one = chunk("A😀B", 1, 1).unwrap();
