@@ -6,14 +6,22 @@ import {
   writeFile,
   readFile,
   readlink,
+  readdir,
+  rename,
+  copyFile,
+  symlink,
   rm,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createServer } from "node:net";
+import { once } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 const script = resolve("scripts/deploy.sh");
+const binary = resolve("target/debug/locdoc");
 
 // Fake releases need no build: --no-restart checks release files and the
 // state database only, so rollbacks and their failure paths stay cheap.
@@ -82,7 +90,13 @@ test("deploy script parses and documents its commands", () => {
   assert.equal(syntax.status, 0, syntax.stderr);
   const help = spawnSync("bash", [script, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0, help.stderr);
-  for (const word of ["rollback", "install-unit", "--rehearse", "--no-restart"])
+  for (const word of [
+    "rollback",
+    "restore",
+    "install-unit",
+    "--rehearse",
+    "--no-restart",
+  ])
     assert.ok(help.stdout.includes(word), `usage mentions ${word}`);
   const unknown = spawnSync("bash", [script, "--bogus"], { encoding: "utf8" });
   assert.equal(unknown.status, 1);
@@ -190,6 +204,324 @@ test("--no-restart refuses the default release and systemd folders", async () =>
     assert.equal(install.status, 1);
     assert.match(install.stderr, /needs XDG_CONFIG_HOME/);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function freePort() {
+  const server = createServer().listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const { port } = server.address();
+  server.close();
+  await once(server, "close");
+  return port;
+}
+
+// The real server on a free loopback port, over the given folders.
+async function serve(state, docs) {
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const server = spawn(binary, [], {
+    env: {
+      ...process.env,
+      LOCDOC_BIND: `127.0.0.1:${port}`,
+      LOCDOC_PUBLIC_URL: base,
+      LOCDOC_STATE: state,
+      LOCDOC_DOCS: docs,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let logs = "";
+  for (const stream of [server.stdout, server.stderr])
+    stream.on("data", (chunk) => (logs += chunk));
+  const stop = async () => {
+    if (server.exitCode !== null || server.signalCode !== null) return;
+    server.kill("SIGINT");
+    await once(server, "exit");
+  };
+  try {
+    for (const deadline = Date.now() + 20000; ; await delay(50)) {
+      if (server.exitCode !== null) throw Error(`The server exited: ${logs}`);
+      if (Date.now() > deadline) throw Error(`The server did not start: ${logs}`);
+      try {
+        if ((await fetch(`${base}/api/config`)).ok) break;
+      } catch {}
+    }
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+  return { base, stop };
+}
+
+// Every entry with its size, modification time and content hash.
+function fingerprint(folder) {
+  const listed = spawnSync(
+    "bash",
+    [
+      "-c",
+      'cd "$1" && find . -type d | sort && find . -type f -printf "%p %s %T@\\n" | sort && find . -type f -exec sha256sum {} + | sort',
+      "fingerprint",
+      folder,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(listed.status, 0, listed.stderr);
+  return listed.stdout;
+}
+
+const names = async (folder) => (await readdir(folder)).sort();
+
+// A live workspace with a shared document at p.md that the server has opened,
+// backed up as the hourly service does: the database through SQLite's backup
+// API first, then the documents folder, with p.md moved to q.md between the
+// two steps. The live folder changes again after the snapshot. `current` is a
+// release of the binary under test.
+async function restoreFixture(root) {
+  const live = join(root, "live");
+  const state = join(live, "state");
+  const docs = join(live, "docs");
+  await mkdir(state, { recursive: true });
+  await mkdir(docs);
+  await writeFile(join(state, "owner.key"), "restore-owner");
+  await writeFile(join(docs, "p.md"), "Shared text of A\n");
+  const owner = {
+    Authorization: "Bearer restore-owner",
+    "Content-Type": "application/json",
+  };
+  const server = await serve(state, docs);
+  let id, token;
+  try {
+    const tree = await (
+      await fetch(`${server.base}/api/tree`, { headers: owner })
+    ).json();
+    id = tree.entries.find((entry) => entry.path === "p.md").id;
+    const shared = await (
+      await fetch(`${server.base}/api/docs/${id}/share`, {
+        method: "POST",
+        headers: owner,
+        body: JSON.stringify({ permission: "view" }),
+      })
+    ).json();
+    token = shared.shareUrl.split("/").pop();
+    const opened = await fetch(`${server.base}/api/docs/${id}`, {
+      headers: owner,
+    });
+    assert.equal(opened.status, 200);
+  } finally {
+    await server.stop();
+  }
+  const snapshot = join(root, "hourly.0");
+  await mkdir(join(snapshot, "state"), { recursive: true });
+  const backup = spawnSync(
+    "python3",
+    [
+      "-I",
+      "-c",
+      "import pathlib,sqlite3,sys; s=sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+'?mode=ro',uri=True); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()",
+      join(state, "locdoc.sqlite"),
+      join(snapshot, "state/locdoc.sqlite"),
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(backup.status, 0, backup.stderr);
+  for (const name of ["owner.key", "root.identity"])
+    await copyFile(join(state, name), join(snapshot, "state", name));
+  await rename(join(docs, "p.md"), join(docs, "q.md"));
+  const copied = spawnSync("cp", ["-a", docs, join(snapshot, "docs")], {
+    encoding: "utf8",
+  });
+  assert.equal(copied.status, 0, copied.stderr);
+  await writeFile(join(docs, "after.md"), "Written after the snapshot\n");
+
+  const releases = join(root, "releases");
+  const name = "20260101T000000Z-aaaaaaaaaaaa";
+  await mkdir(join(releases, name, "web"), { recursive: true });
+  await symlink(binary, join(releases, name, "locdoc"));
+  await writeFile(
+    join(releases, name, "web/index.html"),
+    `<script type="module" src="/assets/index-${name}.js"></script>`,
+  );
+  const sum = spawnSync("sha256sum", [binary], { encoding: "utf8" });
+  assert.equal(sum.status, 0, sum.stderr);
+  await writeFile(
+    join(releases, name, "manifest.json"),
+    JSON.stringify({ release: name, binary_sha256: sum.stdout.split(" ")[0] }),
+  );
+  await symlink(name, join(releases, "current"));
+  const env = {
+    ...process.env,
+    LOCDOC_RELEASES: releases,
+    LOCDOC_STATE: state,
+    LOCDOC_DOCS: docs,
+    LOCDOC_SERVICE: "locdoc-deploy-script-test",
+    XDG_CONFIG_HOME: join(root, "config"),
+    HOME: root,
+  };
+  delete env.LOCDOC_DEPLOY_TEST_FAIL;
+  const restore = (folder, extra = {}) =>
+    spawnSync("bash", [script, "restore", folder, "--no-restart"], {
+      env: { ...env, ...extra },
+      encoding: "utf8",
+    });
+  return { live, state, docs, snapshot, id, token, restore };
+}
+
+test("restore puts a snapshot in place, keeps the live data aside and follows a moved document", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    const snapshot = fingerprint(fixture.snapshot);
+    const restored = fixture.restore(fixture.snapshot);
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(fingerprint(fixture.snapshot), snapshot, "snapshot unchanged");
+    const aside = (await names(fixture.live)).find((name) =>
+      name.startsWith("docs.before-restore-"),
+    );
+    assert.ok(aside, "the live documents folder is kept aside");
+    assert.deepEqual(await names(join(fixture.live, aside)), [
+      "after.md",
+      "q.md",
+    ]);
+    assert.deepEqual(await names(fixture.docs), ["q.md"]);
+    const asideState = (await names(fixture.state)).find((name) =>
+      name.startsWith("before-restore-"),
+    );
+    assert.ok(
+      (await names(join(fixture.state, asideState))).includes("locdoc.sqlite"),
+    );
+    for (const path of [
+      join(fixture.live, aside),
+      join(fixture.state, asideState),
+      join(fixture.state, "restore-report.json"),
+    ])
+      assert.ok(restored.stderr.includes(path), `prints ${path}`);
+    const report = JSON.parse(
+      await readFile(join(fixture.state, "restore-report.json"), "utf8"),
+    );
+    assert.equal(report.completed, true);
+    assert.deepEqual(report.documents, [
+      {
+        id: fixture.id,
+        recordedPath: "p.md",
+        restoredPath: "q.md",
+        evidence: "content",
+      },
+    ]);
+    // The service starts on the restored copy and the link serves A again.
+    const server = await serve(fixture.state, fixture.docs);
+    try {
+      const opened = await (
+        await fetch(`${server.base}/api/open/${fixture.token}`)
+      ).json();
+      assert.equal(opened.document.id, fixture.id);
+      assert.equal(opened.document.content, "Shared text of A\n");
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a restore that fails before the service starts puts the live data back", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    const live = fingerprint(fixture.live);
+    const snapshot = fingerprint(fixture.snapshot);
+    const failed = fixture.restore(fixture.snapshot, {
+      LOCDOC_DEPLOY_TEST_FAIL: "restore",
+    });
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /failure injected/);
+    assert.match(failed.stderr, /put the previous data back/);
+    assert.equal(fingerprint(fixture.snapshot), snapshot, "snapshot unchanged");
+    // The restored copies are kept instead of deleted; apart from them the
+    // live folders are exactly as before.
+    const keptDocs = (await names(fixture.live)).filter((name) =>
+      name.startsWith("docs.failed-restore-"),
+    );
+    const keptState = (await names(fixture.state)).filter((name) =>
+      name.startsWith("failed-restore-"),
+    );
+    assert.equal(keptDocs.length, 1);
+    assert.equal(keptState.length, 1);
+    assert.ok(
+      (await names(join(fixture.state, keptState[0]))).includes(
+        "restore-report.json",
+      ),
+    );
+    await rm(join(fixture.live, keptDocs[0]), { recursive: true });
+    await rm(join(fixture.state, keptState[0]), { recursive: true });
+    assert.equal(fingerprint(fixture.live), live);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restore refuses a snapshot that fails its checks and a state folder in use", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  let holder;
+  try {
+    const fixture = await restoreFixture(root);
+    const live = fingerprint(fixture.live);
+    const damaged = join(root, "damaged");
+    assert.equal(
+      spawnSync("cp", ["-a", fixture.snapshot, damaged]).status,
+      0,
+    );
+    const database = join(damaged, "state/locdoc.sqlite");
+    const bytes = await readFile(database);
+    bytes.fill(0xff, 100, 4096);
+    await writeFile(database, bytes);
+    const corrupt = fixture.restore(damaged);
+    assert.equal(corrupt.status, 1);
+    assert.match(corrupt.stderr, /locdoc\.sqlite (cannot be read|fails its check)/);
+    await rm(join(damaged, "state/owner.key"));
+    const keyless = fixture.restore(damaged);
+    assert.equal(keyless.status, 1);
+    assert.match(keyless.stderr, /has no state\/owner\.key/);
+    assert.equal(fingerprint(fixture.live), live, "nothing moved");
+
+    // Another process holds the state folder: the script moves nothing, and
+    // the binary fails fast in either mode.
+    holder = spawn(
+      "python3",
+      [
+        "-I",
+        "-c",
+        "import fcntl,sys,time; f=open(sys.argv[1],'a'); fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(60)",
+        join(fixture.state, ".instance.lock"),
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    await once(holder.stdout, "data");
+    const busy = fixture.restore(fixture.snapshot);
+    assert.equal(busy.status, 1);
+    assert.match(busy.stderr, /another Locdoc process is using/);
+    for (const args of [["--restored"], []]) {
+      const second = spawnSync(binary, args, {
+        env: {
+          ...process.env,
+          LOCDOC_STATE: fixture.state,
+          LOCDOC_DOCS: fixture.docs,
+          LOCDOC_BIND: `127.0.0.1:${await freePort()}`,
+        },
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      assert.equal(second.status, 1, `${args} exits instead of waiting`);
+      assert.match(
+        second.stderr,
+        /Another Locdoc process is using the state folder/,
+      );
+    }
+    assert.equal(fingerprint(fixture.live), live, "nothing moved");
+  } finally {
+    holder?.kill();
+    if (holder && holder.exitCode === null && holder.signalCode === null)
+      await once(holder, "exit");
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -8,6 +8,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/deploy.sh [deploy] [--rehearse] [--force] [--no-restart]
        scripts/deploy.sh rollback [RELEASE] [--no-restart]
+       scripts/deploy.sh restore SNAPSHOT [--no-restart]
        scripts/deploy.sh install-unit [--no-restart]
        scripts/deploy.sh status
 
@@ -21,14 +22,23 @@ deploy        Build the committed checkout into target/stage and target/stage-we
   --force     Deploy even if the commit is already current.
 rollback      Point `current` at RELEASE (default: the previous release recorded
               in the current manifest), restart and run the same checks.
+restore       Restore SNAPSHOT, a folder holding state/ (locdoc.sqlite from
+              SQLite's backup API, owner.key, root.identity, fonts) and docs/,
+              such as an rsnapshot hourly.N folder. Checks the snapshot, stops
+              the service, moves the documents folder to DOCS.before-restore-TIME
+              and the state files into STATE/before-restore-TIME, copies the
+              snapshot in, runs current/locdoc --restored, starts the service and
+              runs the same checks. A failure before the start puts the moved
+              data back and keeps the restored copies as *failed-restore-TIME.
+              Nothing is deleted and the snapshot is never changed.
 install-unit  Install deployment/locdoc-release.conf as the unit's release.conf
               drop-in. Without a current release, the running build is adopted
               as the first release. The running process is not restarted.
 status        Show the current release and the retained releases.
---no-restart  Never reload or restart units. Deploy and rollback skip systemctl,
-              require LOCDOC_STATE and LOCDOC_DOCS and check only the release
-              files and the database; install-unit skips daemon-reload. For
-              temporary folders only: LOCDOC_RELEASES must be set to another
+--no-restart  Never reload or restart units. Deploy, rollback and restore skip
+              systemctl, require LOCDOC_STATE and LOCDOC_DOCS and check only the
+              release files and the database; install-unit skips daemon-reload.
+              For temporary folders only: LOCDOC_RELEASES must be set to another
               folder than the default, and for install-unit XDG_CONFIG_HOME
               to another folder than ~/.config.
 
@@ -39,8 +49,9 @@ Environment:
   LOCDOC_STATE, LOCDOC_DOCS
                      state and documents folders (default: those of the running
                      service; when set they must match it)
-  LOCDOC_DEPLOY_TEST_FAIL=smoke|activate
-                     test only: fail the smoke test or the post-switch checks
+  LOCDOC_DEPLOY_TEST_FAIL=smoke|activate|restore
+                     test only: fail the smoke test, the post-switch checks or a
+                     restore after its pass, before the service starts
 EOF
 }
 
@@ -54,9 +65,15 @@ fail_at=${LOCDOC_DEPLOY_TEST_FAIL:-}
 settle_seconds=3
 restart=1 force=0 rehearse=0
 command= target=
-state= docs= health=
+state= docs= health= running_pid=
 work= incoming= activating= revert_to= failure=
 pids=()
+# Restore progress, so a failure or interrupt can put the live data back.
+snapshot= snapshot_fd= snapshot_sha= restoring= restore_stamp= state_lock=
+aside_docs= aside_state= state_aside=0 docs_placed=0
+# State files a snapshot replaces. The database always moves with its journals.
+state_files=(locdoc.sqlite locdoc.sqlite-wal locdoc.sqlite-shm locdoc.sqlite-journal
+  owner.key root.identity fonts restore-report.json)
 
 # Small JSON, SQLite and /proc helpers. SQLite copies use the online backup
 # API, never a file copy of a database that may have active WAL writes.
@@ -110,6 +127,36 @@ elif command == "get":
     except FileNotFoundError:
         value = None
     print("" if value is None else value)
+elif command == "rows":
+    count = json.load(open(args[0]))["counts"].get(args[1])
+    print("" if count is None else count)
+elif command == "space":
+    # destination=source pairs. Copies onto one filesystem must fit together,
+    # with 64 MiB to spare.
+    need, free = {}, {}
+    for pair in args:
+        dest, _, source = pair.partition("=")
+        while not os.path.isdir(dest):
+            dest = os.path.dirname(dest)
+        device = os.stat(dest).st_dev
+        stats = os.statvfs(dest)
+        free[device] = (dest, stats.f_bavail * stats.f_frsize)
+        size = 0
+        for root, dirs, files in os.walk(source):
+            size += sum(os.lstat(os.path.join(root, name)).st_blocks * 512 for name in dirs + files)
+        need[device] = need.get(device, 0) + size
+    short = [f"{dest} needs {((need[d] + (64 << 20) - avail) >> 20) + 1} MiB more"
+             for d, (dest, avail) in free.items() if need[d] + (64 << 20) > avail]
+    if short:
+        print("; ".join(short))
+        sys.exit(1)
+elif command == "exec-env":
+    # environ-file folder program args...: run a program in that folder with
+    # a NUL-separated environment saved from /proc.
+    raw = Path(args[0]).read_bytes().split(b"\0")
+    env = dict(item.partition(b"=")[::2] for item in raw if item)
+    os.chdir(args[1])
+    os.execve(args[2], args[2:], env)
 elif command == "write":
     # key=value pairs; @path embeds a JSON file and an empty value is null.
     data = {}
@@ -192,6 +239,8 @@ cleanup() {
       say "interrupted while switching to $activating; no previous release to restore"
     fi
   fi
+  # A restore failed or was interrupted before its service started.
+  [[ -z $restoring ]] || put_back
   rm -f -- "$releases/.current.$$"
   [[ -n $incoming ]] && rm -rf -- "$incoming"
   [[ -n $work ]] && rm -rf -- "$work"
@@ -383,12 +432,13 @@ absolute() { # base path
 
 # The running process is the authority for the folders a deploy backs up and
 # checks; explicit LOCDOC_STATE/LOCDOC_DOCS must agree with it.
-resolve_paths() {
+resolve_paths() { # [restore]
   local pid cwd pair bind=127.0.0.1:3477 running_state running_docs
   if ((restart)); then
     require_unit
     pid=$(service_show MainPID)
     if [[ $pid =~ ^[1-9][0-9]*$ ]]; then
+      running_pid=$pid
       cwd=$(readlink -- "/proc/$pid/cwd")
       running_state=$(absolute "$cwd" "$(py proc-env "$pid" LOCDOC_STATE .locdoc)")
       running_docs=$(absolute "$cwd" "$(py proc-env "$pid" LOCDOC_DOCS docs)")
@@ -414,6 +464,12 @@ resolve_paths() {
   else
     [[ -n ${LOCDOC_STATE:-} && -n ${LOCDOC_DOCS:-} ]] || die "--no-restart needs LOCDOC_STATE and LOCDOC_DOCS"
     state=$(absolute "$caller" "$LOCDOC_STATE") docs=$(absolute "$caller" "$LOCDOC_DOCS")
+  fi
+  if [[ ${1:-} == restore ]]; then
+    # A restore may replace a lost database or documents folder.
+    state=$(realpath -m -- "$state") docs=$(realpath -m -- "$docs")
+    [[ -d $(dirname -- "$docs") ]] || die "$(dirname -- "$docs") is not a folder"
+    return 0
   fi
   [[ -f $state/locdoc.sqlite ]] || die "$state/locdoc.sqlite does not exist"
   [[ -d $docs ]] || die "$docs is not a folder"
@@ -583,6 +639,231 @@ cmd_rollback() {
   say "rolled back to $name (from $current)"
 }
 
+# The documents folder moves aside as a whole, so it must not hold anything
+# else, and the snapshot must be neither live folder.
+check_restore_paths() {
+  local other
+  for other in "$state" "$snapshot" "$(realpath -m -- "$releases")" "$(realpath -m -- "$project")" \
+    "$(realpath -m -- "$HOME")"; do
+    [[ $other != "$docs" && $other != "$docs"/* ]] || die "the documents folder $docs contains $other"
+  done
+  for other in "$docs" "$state"; do
+    [[ $other != "$snapshot" && $other != "$snapshot"/* && $snapshot != "$other"/* ]] ||
+      die "the snapshot $snapshot overlaps $other"
+  done
+}
+
+# The snapshot needs a database, an owner key and a documents folder, and room
+# to copy them. Its database is checked on a copy: even a read-only open of a
+# WAL database creates files next to it.
+preflight() { # snapshot
+  local snap=$1 name output
+  for name in state/locdoc.sqlite state/owner.key; do
+    [[ -f $snap/$name ]] || die "$snapshot has no $name"
+  done
+  [[ -s $snap/state/owner.key ]] || die "$snapshot/state/owner.key is empty"
+  [[ -d $snap/docs && ! -L $snap/docs ]] || die "$snapshot has no docs folder"
+  mkdir -- "$work/snapshot"
+  for name in locdoc.sqlite locdoc.sqlite-wal; do
+    [[ ! -f $snap/state/$name ]] || cp -- "$snap/state/$name" "$work/snapshot/$name"
+  done
+  snapshot_sha=$(sha256 "$work/snapshot/locdoc.sqlite")
+  py inspect "$work/snapshot/locdoc.sqlite" >"$work/snapshot.json" 2>"$work/snapshot.err" ||
+    die "$snapshot/state/locdoc.sqlite cannot be read: $(tail -n 1 -- "$work/snapshot.err")"
+  output=$(py compare "$work/snapshot.json" "$work/snapshot.json" exact) ||
+    die "$snapshot/state/locdoc.sqlite fails its check: $output"
+  [[ -n $(py rows "$work/snapshot.json" docs) ]] || die "$snapshot/state/locdoc.sqlite is not a Locdoc database"
+  output=$(py space "$(dirname -- "$docs")=$snap/docs" "$state=$snap/state") ||
+    die "not enough free space to restore $snapshot: $output"
+}
+
+# Locdoc holds this lock while it uses a state folder. Holding it while data
+# moves keeps a server from starting on half of it.
+take_state_lock() {
+  [[ -z $state_lock ]] || return 0
+  exec {state_lock}>>"$state/.instance.lock" || return 1
+  flock -n "$state_lock" && return 0
+  exec {state_lock}>&-
+  state_lock=
+  return 1
+}
+
+release_state_lock() {
+  [[ -z $state_lock ]] || exec {state_lock}>&-
+  state_lock=
+}
+
+aside_paths() {
+  printf '%s\n' "${aside_docs:+$aside_docs and }$aside_state"
+}
+
+# Move the live documents folder and state files aside and copy the snapshot
+# in. Each step is recorded, so put_back undoes exactly what happened.
+replace_data() { # snapshot
+  local snap=$1 name staging
+  mkdir -p -- "$state"
+  take_state_lock || die "another Locdoc process is using $state; stop it first"
+  restore_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+  aside_state=$state/before-restore-$restore_stamp
+  [[ ! -e $docs.before-restore-$restore_stamp && ! -e $aside_state ]] ||
+    die "data from a restore at $restore_stamp is already aside"
+  if [[ -e $docs || -L $docs ]]; then
+    mv -T -- "$docs" "$docs.before-restore-$restore_stamp" || die "could not move $docs aside"
+    aside_docs=$docs.before-restore-$restore_stamp
+  fi
+  mkdir -- "$aside_state" || die "could not create $aside_state"
+  for name in "${state_files[@]}"; do
+    [[ -e $state/$name || -L $state/$name ]] || continue
+    mv -T -- "$state/$name" "$aside_state/$name" || die "could not move $state/$name aside"
+  done
+  state_aside=1
+  fsync_dir "$state"
+  fsync_dir "$(dirname -- "$docs")"
+  say "moved the live data aside; copying the snapshot in"
+  staging=$docs.restoring-$restore_stamp
+  cp -a -- "$snap/docs" "$staging" || die "could not copy $snapshot/docs"
+  py fsync "$staging"
+  mv -T -- "$staging" "$docs" || die "could not move the copied documents to $docs"
+  docs_placed=1
+  fsync_dir "$(dirname -- "$docs")"
+  staging=$state/.restoring-$restore_stamp
+  mkdir -- "$staging" || die "could not create $staging"
+  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
+    [[ ! -e $snap/state/$name ]] || cp -a -- "$snap/state/$name" "$staging/$name" ||
+      die "could not copy $snapshot/state/$name"
+  done
+  [[ $(sha256 "$staging/locdoc.sqlite") == "$snapshot_sha" ]] ||
+    die "$snapshot/state/locdoc.sqlite changed after its check"
+  py fsync "$staging"
+  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
+    [[ ! -e $staging/$name ]] || mv -T -- "$staging/$name" "$state/$name" ||
+      die "could not move the copied $name into $state"
+  done
+  rmdir -- "$staging"
+  fsync_dir "$state"
+}
+
+# The current release's restore pass, with the service's own environment and
+# working folder when it was running. It takes the state lock itself.
+restore_pass() {
+  local binary=$releases/current/locdoc status=0
+  release_state_lock
+  say "running $binary --restored"
+  if [[ -f $work/unit.environ ]]; then
+    py exec-env "$work/unit.environ" "$(<"$work/unit.cwd")" "$binary" --restored {snapshot_fd}<&- >&2 ||
+      status=$?
+  else
+    LOCDOC_STATE=$state LOCDOC_DOCS=$docs "$binary" --restored {snapshot_fd}<&- >&2 || status=$?
+  fi
+  take_state_lock || die "another Locdoc process started on $state during the restore"
+  ((status == 0)) || die "the restore pass failed with status $status"
+  [[ $(py get "$state/restore-report.json" completed) == True ]] ||
+    die "the restore pass did not complete; see $state/restore-report.json"
+}
+
+# Undo replace_data after a failure before the restored service started, then
+# start the service again. The restored copies stay next to the live data.
+put_back() {
+  local name failed=failed-restore-$restore_stamp kept_docs= kept_state=
+  restoring=
+  if [[ -z $restore_stamp ]]; then
+    : # Nothing was moved yet.
+  elif ! take_state_lock; then
+    say "another Locdoc process is using $state; the previous data stays in $(aside_paths)"
+  else
+    say "putting the previous data back"
+    if ((docs_placed)); then
+      mv -T -- "$docs" "$docs.$failed" && kept_docs=$docs.$failed
+    elif [[ -e $docs.restoring-$restore_stamp ]]; then
+      mv -T -- "$docs.restoring-$restore_stamp" "$docs.$failed" && kept_docs=$docs.$failed
+    fi
+    if [[ -n $aside_docs ]] && [[ ! -e $docs && ! -L $docs ]] && mv -T -- "$aside_docs" "$docs"; then
+      aside_docs=
+    fi
+    if ((state_aside)); then
+      # Every state file left in place came from the snapshot or the pass.
+      mkdir -p -- "$state/$failed"
+      for name in "${state_files[@]}"; do
+        [[ ! -e $state/$name && ! -L $state/$name ]] || mv -T -- "$state/$name" "$state/$failed/$name"
+      done
+      [[ ! -e $state/.restoring-$restore_stamp ]] ||
+        mv -T -- "$state/.restoring-$restore_stamp" "$state/$failed/copying"
+      rmdir -- "$state/$failed" 2>/dev/null || kept_state=$state/$failed
+    fi
+    if [[ -d $aside_state ]]; then
+      for name in "${state_files[@]}"; do
+        [[ -e $aside_state/$name || -L $aside_state/$name ]] || continue
+        [[ ! -e $state/$name && ! -L $state/$name ]] && mv -T -- "$aside_state/$name" "$state/$name"
+      done
+      rmdir -- "$aside_state" 2>/dev/null && aside_state=
+    fi
+    fsync_dir "$state"
+    fsync_dir "$(dirname -- "$docs")"
+    if [[ -n $aside_docs || -n $aside_state ]]; then
+      say "could not put everything back; the previous data is still in $(aside_paths)"
+    else
+      say "put the previous data back"
+    fi
+    [[ -z $kept_docs$kept_state ]] ||
+      say "the restored copies are kept in ${kept_docs:+$kept_docs${kept_state:+ and }}$kept_state"
+  fi
+  release_state_lock
+  if ((restart)); then
+    say "starting $service again"
+    systemctl --user start -- "$service" || say "systemctl --user start $service failed"
+  fi
+}
+
+cmd_restore() {
+  local snap current invocation= output
+  [[ -n $target ]] || die "name the snapshot folder to restore (see --help)"
+  snapshot=$(realpath -e -- "$(absolute "$caller" "$target")" 2>/dev/null) || die "$target does not exist"
+  [[ -d $snapshot ]] || die "$snapshot is not a folder"
+  # rsnapshot renames hourly.N every hour; keep copying from the folder named.
+  exec {snapshot_fd}<"$snapshot"
+  snap=/proc/$$/fd/$snapshot_fd
+  resolve_paths restore
+  check_restore_paths
+  lock_releases
+  current=$(current_release)
+  [[ -n $current && -x $releases/$current/locdoc ]] || die "there is no current release to run the restore pass"
+  make_work
+  say "checking $snapshot"
+  preflight "$snap"
+  restoring=1
+  if ((restart)); then
+    if [[ -n $running_pid ]]; then
+      cp -- "/proc/$running_pid/environ" "$work/unit.environ" &&
+        readlink -- "/proc/$running_pid/cwd" >"$work/unit.cwd" ||
+        die "could not read the environment of the running $service service"
+    fi
+    invocation=$(service_show InvocationID)
+    say "stopping $service"
+    systemctl --user stop -- "$service" || die "systemctl --user stop $service failed"
+  fi
+  replace_data "$snap"
+  restore_pass
+  py inspect "$state/locdoc.sqlite" >"$work/restored.json" || die "could not read the restored database"
+  output=$(py compare "$work/restored.json" "$work/restored.json" exact) ||
+    die "the restored database fails its check: $output"
+  [[ $fail_at != restore ]] || die "restore: failure injected by LOCDOC_DEPLOY_TEST_FAIL"
+  release_state_lock
+  # From here the service may use the restored data, so it stays in place.
+  restoring=
+  if ((restart)); then
+    say "starting $service"
+    systemctl --user start -- "$service" ||
+      die "systemctl --user start $service failed; the restored data stays in place and the previous data is in $(aside_paths)"
+  fi
+  check_release "$current" "$work/restored.json" "$invocation" ||
+    die "$failure; the restored data stays in place and the previous data is in $(aside_paths)"
+  say "restored $snapshot"
+  [[ -z $aside_docs ]] || say "the previous documents folder is $aside_docs"
+  say "the previous state files are in $aside_state"
+  say "report: $state/restore-report.json"
+  say "delete the previous data once you have checked the restored workspace"
+}
+
 # Copy the build the service runs now into a first release, so installing the
 # drop-in never points the unit at a missing binary.
 adopt_running() {
@@ -675,7 +956,7 @@ while (($#)); do
     *)
       if [[ -z $command ]]; then
         command=$1
-      elif [[ $command == rollback && -z $target ]]; then
+      elif [[ ($command == rollback || $command == restore) && -z $target ]]; then
         target=$1
       else
         die "unexpected argument $1 (see --help)"
@@ -685,7 +966,7 @@ while (($#)); do
   shift
 done
 command=${command:-deploy}
-case $fail_at in '' | smoke | activate) ;; *) die "LOCDOC_DEPLOY_TEST_FAIL must be smoke or activate" ;; esac
+case $fail_at in '' | smoke | activate | restore) ;; *) die "LOCDOC_DEPLOY_TEST_FAIL must be smoke, activate or restore" ;; esac
 # The service reads the default release folder and the user's systemd
 # configuration on its next restart, so --no-restart runs must not change them.
 if ((!restart)) && [[ $command != status ]]; then
@@ -699,6 +980,7 @@ fi
 case $command in
   deploy) cmd_deploy ;;
   rollback) cmd_rollback ;;
+  restore) cmd_restore ;;
   install-unit) cmd_install_unit ;;
   status) cmd_status ;;
   *) die "unknown command $command (see --help)" ;;
