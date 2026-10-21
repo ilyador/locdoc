@@ -94,7 +94,7 @@ git pull && npm ci && npm run verify
 scripts/deploy.sh             # add --rehearse to start it against copies of your data first
 ```
 
-The script refuses uncommitted changes, a commit that is already current (unless `--force`) and a unit that does not run `current/locdoc` with `LOCDOC_WEB` set to `current/web`. It builds the backend and frontend into `target/stage` and `target/stage-web` while the service keeps running, then smoke tests them on a free loopback port with temporary folders. `--rehearse` also starts the build against copies of the state database and documents folder. Before switching, it backs up the database (through SQLite's backup API), `owner.key`, `root.identity` and fonts into the release's `backup/` folder. After switching `current` and restarting, it checks the unit, `/api/config`, the served bundle, error-level journal lines, `PRAGMA integrity_check` and document, revision and comment counts. Any failure points `current` back at the previous release and restarts it. The newest five releases and the previous one are kept.
+The script refuses uncommitted changes, a commit that is already current (unless `--force`) and a unit that does not run `current/locdoc` with `LOCDOC_WEB` set to `current/web`. It builds the backend and frontend into `target/stage` and `target/stage-web` while the service keeps running, then smoke tests them on a free loopback port with temporary folders. `--rehearse` also starts the build against copies of the state database and documents folder. Before switching, it backs up the database (through SQLite's backup API), `owner.key`, `root.identity` and fonts into the release's `backup/` folder. After switching `current` and restarting, it checks the unit, `/api/config`, the served bundle, error-level journal lines, `PRAGMA integrity_check` and document, revision and comment counts. Any failure points `current` back at the previous release and restarts it. The newest five releases, the current one and its previous release are kept.
 
 ```sh
 scripts/deploy.sh status
@@ -102,7 +102,7 @@ scripts/deploy.sh rollback                                 # the previous releas
 scripts/deploy.sh rollback 20261021T180516Z-0123456789ab   # a named release
 ```
 
-Rollback runs the same checks but leaves the state folder as it is. Restore steps for a `backup/` folder will be documented by a later change. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE` and `LOCDOC_DOCS` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
+Rollback runs the same checks but leaves the state folder as it is. Restore steps for a `backup/` folder will be documented by a later change. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE`, `LOCDOC_DOCS` and a non-default `LOCDOC_RELEASES` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
 
 ## Fountain screenplays
 

@@ -26,7 +26,10 @@ install-unit  Install deployment/locdoc-release.conf as the unit's release.conf
 status        Show the current release and the retained releases.
 --no-restart  Never reload or restart units. Deploy and rollback skip systemctl,
               require LOCDOC_STATE and LOCDOC_DOCS and check only the release
-              files and the database; install-unit skips daemon-reload.
+              files and the database; install-unit skips daemon-reload. For
+              temporary folders only: LOCDOC_RELEASES must be set to another
+              folder than the default, and for install-unit XDG_CONFIG_HOME
+              to another folder than ~/.config.
 
 Environment:
   LOCDOC_RELEASES    release folder (default ~/.local/share/locdoc/releases)
@@ -171,19 +174,23 @@ stop_server() {
 cleanup() {
   local status=$?
   set +e
-  trap - INT TERM
+  # A second Ctrl-C, a closed terminal or a closed stderr pipe must not stop
+  # the restore halfway.
+  trap '' INT TERM HUP PIPE
   for pid in "${pids[@]}"; do stop_server "$pid"; done
   if [[ -n $activating ]]; then
     # Interrupted between the switch and its checks: restore the old release.
     if [[ -n $revert_to ]]; then
-      say "interrupted while switching to $activating; restoring $revert_to"
-      [[ $command != deploy ]] || printf 'interrupted\n' >"$releases/$activating/FAILED"
+      [[ $command != deploy || -e $releases/$activating/FAILED ]] ||
+        printf 'interrupted\n' >"$releases/$activating/FAILED"
       swap_current "$revert_to"
+      say "interrupted while switching to $activating; restored $revert_to"
       ((restart)) && systemctl --user restart -- "$service"
     else
       say "interrupted while switching to $activating; no previous release to restore"
     fi
   fi
+  rm -f -- "$releases/.current.$$"
   [[ -n $incoming ]] && rm -rf -- "$incoming"
   [[ -n $work ]] && rm -rf -- "$work"
   exit "$status"
@@ -191,6 +198,7 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 make_work() {
   work=$(mktemp -d "${TMPDIR:-/tmp}/locdoc-deploy.XXXXXX")
@@ -276,13 +284,23 @@ start_server() { # binary web port state docs log
 # Start a staged build on a free loopback port and check health, the served
 # bundle and an owner request against its fresh state.
 probe_server() { # label binary web state docs expect-path
-  local label=$1 dir port key base log
+  local label=$1 dir port key base log attempt
   dir=$(dirname -- "$4")
   log=$dir/server.log
-  port=$(py port)
-  base=http://127.0.0.1:$port
-  start_server "$2" "$3" "$port" "$4" "$5" "$log"
-  if ! wait_health "$base" "$server_pid" 60 || ! check_index "$base" "$3"; then
+  # Another process can take the free port before the server binds it.
+  for attempt in 1 2 3; do
+    port=$(py port)
+    base=http://127.0.0.1:$port
+    start_server "$2" "$3" "$port" "$4" "$5" "$log"
+    wait_health "$base" "$server_pid" 60 && break
+    stop_server "$server_pid"
+    if ((attempt == 3)) || ! grep -qF AddrInUse -- "$log"; then
+      tail -n 20 -- "$log" >&2 || true
+      die "$label: $failure"
+    fi
+    say "$label: port $port was taken; trying another"
+  done
+  if ! check_index "$base" "$3"; then
     tail -n 20 -- "$log" >&2 || true
     die "$label: $failure"
   fi
@@ -291,6 +309,8 @@ probe_server() { # label binary web state docs expect-path
   curl -fsS --max-time 10 -H "Authorization: Bearer $key" "$base/api/tree" >"$dir/tree.json" ||
     die "$label: the owner tree request failed"
   [[ -z $6 ]] || grep -qF -- "\"$6\"" "$dir/tree.json" || die "$label: $6 is missing from the document tree"
+  # The answers above came from this server only if it still holds the port.
+  kill -0 "$server_pid" 2>/dev/null || die "$label: the server exited during the checks"
   stop_server "$server_pid"
   if sed 's/\x1b\[[0-9;]*m//g' -- "$log" | grep -E '(^|[[:space:]])ERROR[[:space:]]' >&2; then
     die "$label: the server logged errors"
@@ -450,13 +470,22 @@ activate() { # name previous database-before
     activating=
     return 0
   fi
-  activating= reason=$failure
-  say "$name failed: $reason"
+  # Keep $activating until the previous release is current and restarted, so
+  # an exit here (even a failed write to stderr) still restores it.
+  reason=$failure
   [[ $command != deploy ]] || printf '%s\n' "$reason" >"$releases/$name/FAILED"
-  [[ -n $previous ]] || die "$reason; there is no previous release to restore"
+  if [[ -z $previous ]]; then
+    activating=
+    die "$name failed: $reason; there is no previous release to restore"
+  fi
   swap_current "$previous"
+  if ((restart)) && ! systemctl --user restart -- "$service"; then
+    activating=
+    die "$name failed: $reason; $previous is current again but failed to restart"
+  fi
+  activating=
+  say "$name failed: $reason"
   if ((restart)); then
-    systemctl --user restart -- "$service" || die "$reason; $previous is current again but failed to restart"
     if ! wait_health "$health" service 90 || ! check_index "$health" "$releases/$previous/web"; then
       die "$reason; $previous is current again but failed its health check: $failure"
     fi
@@ -537,7 +566,8 @@ cmd_rollback() {
   [[ -n $current ]] || die "there is no current release"
   name=${target:-$(py get "$releases/$current/manifest.json" previous)}
   [[ -n $name ]] || die "$current records no previous release; name one (see scripts/deploy.sh status)"
-  [[ $name != */* && $name != .* && -d $releases/$name ]] || die "release $name does not exist"
+  # Only dated release folders; `current` itself would become a symlink loop.
+  [[ $name == [0-9]*T[0-9]*Z-* && $name != */* && -d $releases/$name ]] || die "release $name does not exist"
   [[ $name != "$current" ]] || die "$name is already current"
   [[ -x $releases/$name/locdoc && -f $releases/$name/web/index.html && -f $releases/$name/manifest.json ]] ||
     die "release $name is incomplete"
@@ -654,6 +684,16 @@ while (($#)); do
 done
 command=${command:-deploy}
 case $fail_at in '' | smoke | activate) ;; *) die "LOCDOC_DEPLOY_TEST_FAIL must be smoke or activate" ;; esac
+# The service reads the default release folder and the user's systemd
+# configuration on its next restart, so --no-restart runs must not change them.
+if ((!restart)) && [[ $command != status ]]; then
+  default_releases=$HOME/.local/share/locdoc/releases
+  [[ -n ${LOCDOC_RELEASES:-} && $(realpath -m -- "$releases") != "$(realpath -m -- "$default_releases")" ]] ||
+    die "--no-restart needs LOCDOC_RELEASES set to a folder other than $default_releases"
+  [[ $command != install-unit ||
+    (-n ${XDG_CONFIG_HOME:-} && $(realpath -m -- "$XDG_CONFIG_HOME") != "$(realpath -m -- "$HOME/.config")") ]] ||
+    die "install-unit --no-restart needs XDG_CONFIG_HOME set to a folder other than $HOME/.config"
+fi
 case $command in
   deploy) cmd_deploy ;;
   rollback) cmd_rollback ;;

@@ -64,6 +64,8 @@ async function fixture(root) {
     LOCDOC_DOCS: docs,
     LOCDOC_SERVICE: "locdoc-deploy-script-test",
     XDG_CONFIG_HOME: join(root, "config"),
+    // Defaults then resolve inside the fixture even if a guard regresses.
+    HOME: root,
   };
   delete env.LOCDOC_DEPLOY_TEST_FAIL;
   const run = (args, extra = {}) =>
@@ -72,7 +74,7 @@ async function fixture(root) {
       encoding: "utf8",
     });
   const current = () => readlink(join(releases, "current"));
-  return { releases, run, current };
+  return { root, releases, env, run, current };
 }
 
 test("deploy script parses and documents its commands", () => {
@@ -89,7 +91,7 @@ test("deploy script parses and documents its commands", () => {
 test("rollback repoints current, restores it after failed checks and refuses missing releases", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
   try {
-    const { releases, run, current } = await fixture(root);
+    const { releases, env, run, current } = await fixture(root);
     const older = "20260101T000000Z-aaaaaaaaaaaa";
     const newer = "20260102T000000Z-bbbbbbbbbbbb";
     assert.equal(run(["rollback"]).status, 1, "no current release yet");
@@ -124,6 +126,31 @@ test("rollback repoints current, restores it after failed checks and refuses mis
       "failed checks restore the previous release",
     );
 
+    const loop = run(["rollback", "current"]);
+    assert.equal(loop.status, 1, "current is not a release name");
+    assert.match(loop.stderr, /release current does not exist/);
+    assert.equal(await current(), older);
+
+    // A failure report that cannot be written (stderr closed after the first
+    // line) must still restore the previous release.
+    const first = `deploy: rolling back from ${older} to ${newer}\n`;
+    const piped = spawnSync(
+      "bash",
+      [
+        "-c",
+        `bash "$1" rollback "$2" --no-restart 2>&1 >/dev/null | head -c ${first.length}`,
+        "deploy",
+        script,
+        newer,
+      ],
+      {
+        env: { ...env, LOCDOC_DEPLOY_TEST_FAIL: "activate" },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(piped.stdout, first);
+    assert.equal(await current(), older, "closed stderr still restores");
+
     const install = run(["install-unit"]);
     assert.equal(install.status, 0, install.stderr);
     const dropIn = await readFile(
@@ -136,6 +163,32 @@ test("rollback repoints current, restores it after failed checks and refuses mis
     const escaped = releases.replaceAll("%", "%%");
     assert.ok(dropIn.includes(`ExecStart=${escaped}/current/locdoc\n`), dropIn);
     assert.ok(dropIn.includes(`LOCDOC_WEB=${escaped}/current/web\n`), dropIn);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("--no-restart refuses the default release and systemd folders", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
+  try {
+    const { env } = await fixture(root);
+    const run = (args, unset) => {
+      const scoped = { ...env };
+      delete scoped[unset];
+      return spawnSync("bash", [script, ...args, "--no-restart"], {
+        env: scoped,
+        encoding: "utf8",
+      });
+    };
+    const rollback = run(["rollback"], "LOCDOC_RELEASES");
+    assert.equal(rollback.status, 1);
+    assert.match(rollback.stderr, /needs LOCDOC_RELEASES/);
+    const deploy = run([], "LOCDOC_RELEASES");
+    assert.equal(deploy.status, 1);
+    assert.match(deploy.stderr, /needs LOCDOC_RELEASES/);
+    const install = run(["install-unit"], "XDG_CONFIG_HOME");
+    assert.equal(install.status, 1);
+    assert.match(install.stderr, /needs XDG_CONFIG_HOME/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
