@@ -1133,28 +1133,36 @@ test("MCP consent identifies the callback origin and never approves access autom
     await import("../src/mcp-authorization");
   const original = globalThis.fetch;
   const mutations: { request: string; allow: boolean }[] = [];
-  globalThis.fetch = async (_url, init = {}) => {
+  const previews: string[] = [];
+  // Signed handles are opaque base64url text with a "." before their MAC.
+  const handle = "mcp_q_eyJ2IjoxfQ-_09.Zm9v-_bar";
+  globalThis.fetch = async (url, init = {}) => {
     if (init.method === "POST") {
       mutations.push(JSON.parse(String(init.body)));
       return new Response(JSON.stringify({ error: "Connection failed" }), {
         status: 503,
       });
     }
+    previews.push(String(url));
     return response({
       clientName: "ChatGPT <script>bad()</script>",
       redirectUri: "https://callback.example.test/oauth/complete",
       scopes: ["locdoc:read", "locdoc:write"],
     });
   };
-  const page = render(<McpAuthorization request="pending" />);
+  const page = render(<McpAuthorization request={handle} />);
   try {
     await page.findByText("https://callback.example.test");
     assert.ok(page.getByText("ChatGPT <script>bad()</script>"));
     assert.equal(page.container.querySelectorAll("script").length, 0);
     assert.equal(mutations.length, 0);
+    assert.equal(
+      new URL(previews[0], "http://localhost").searchParams.get("request"),
+      handle,
+    );
     fireEvent.click(page.getByRole("button", { name: "Allow access" }));
     await page.findByRole("alert");
-    assert.deepEqual(mutations, [{ request: "pending", allow: true }]);
+    assert.deepEqual(mutations, [{ request: handle, allow: true }]);
     assert.equal(
       page.getByRole("button", { name: "Allow access" }).disabled,
       false,
