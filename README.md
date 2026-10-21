@@ -102,7 +102,44 @@ scripts/deploy.sh rollback                                 # the previous releas
 scripts/deploy.sh rollback 20261021T180516Z-0123456789ab   # a named release
 ```
 
-Rollback runs the same checks but leaves the state folder as it is. Restore steps for a `backup/` folder will be documented by a later change. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE`, `LOCDOC_DOCS` and a non-default `LOCDOC_RELEASES` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
+Rollback runs the same checks but leaves the state folder as it is. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE`, `LOCDOC_DOCS` and a non-default `LOCDOC_RELEASES` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
+
+### Restore from a backup
+
+A restore takes a snapshot folder holding `state/` (`locdoc.sqlite` taken through SQLite's backup API, `owner.key`, `root.identity` and `fonts`) and `docs/`, a copy of the documents folder made after the database, such as the `hourly.N` folders of an rsnapshot job. Back up in that order: files that changed after the database backup then win when restoring, and the accepted text they replace stays in **Version history**. Choose the newest snapshot from before the problem; the database time shows when each was taken:
+
+```sh
+ls -l --time-style=long-iso /backups/locdoc/hourly.*/state/locdoc.sqlite
+scripts/deploy.sh restore /backups/locdoc/hourly.3
+```
+
+The script checks that the snapshot has an owner key, a documents folder and a database that passes `PRAGMA integrity_check` on a copy, and that there is room to copy them. It never changes the snapshot. It stops the service, moves the documents folder to `DOCS.before-restore-TIME` and the state files (database and journals, `owner.key`, `root.identity`, `fonts`, an earlier `restore-report.json`) into `STATE/before-restore-TIME`, copies the snapshot in, runs `current/locdoc --restored` with the service's environment, starts the service and runs the deploy checks. A failure or interruption before the service starts moves the previous data back, keeps the restored copies as `DOCS.failed-restore-TIME` and `STATE/failed-restore-TIME` and starts the service again. Nothing is deleted. Pause backup jobs while restoring so they do not copy half-moved folders. The documents folder must be an ordinary folder that can be renamed, not a mount point.
+
+The manual equivalent, with the service stopped and the service's `LOCDOC_STATE` and `LOCDOC_DOCS`:
+
+```sh
+systemctl --user stop locdoc
+mv "$LOCDOC_DOCS" "$LOCDOC_DOCS.before-restore"
+mkdir "$LOCDOC_STATE/before-restore"
+mv "$LOCDOC_STATE"/{locdoc.sqlite*,owner.key,root.identity,fonts} "$LOCDOC_STATE/before-restore/"
+cp -a SNAPSHOT/docs "$LOCDOC_DOCS"
+cp -a SNAPSHOT/state/{locdoc.sqlite,owner.key,root.identity,fonts} "$LOCDOC_STATE/"
+~/.local/share/locdoc/releases/current/locdoc --restored
+systemctl --user start locdoc
+```
+
+Restored files all have new inodes and the copied documents folder is a new folder, so normal startup refuses it. `locdoc --restored` is a one-shot owner command for exactly this: it binds no port and refuses to run while another Locdoc process uses the state folder. It matches files to documents once. A recorded file identity comes first. A document whose file is found nowhere then follows its last known text from the database, when exactly one restored file holds that text and no other document had it; this follows files moved between the two backup steps. Otherwise a document keeps the file at its own path, and one whose file is absent retires, with its text in **Removed document recovery**. A rename the database backup caught half-done ends too, and its document is placed the same way. Only a pass that read every file accepts the restored folder; otherwise it exits non-zero, and normal startup keeps refusing the folder until a later pass completes. `find "$LOCDOC_DOCS" ! -readable` lists what it could not read. Normal operation never matches files by content.
+
+The pass prints a summary and writes `STATE/restore-report.json`. For each document it lists `recordedPath`, where the database had it; `restoredPath`, where it is now (`null` once retired); and `evidence`: `identity`, `content` (found by its text, usually because it moved between the two backup steps), `path` (kept its own path; newer text in that file is imported when the service opens it), `retired` (absent from the snapshot) or `undecided` (not placed; the pass did not complete). `unclaimedFiles` are restored files no document claims; they open as new private documents. Folder links and folder MCP grants belong to the original folders, so `folderLinks` and `mcpFolders` list the ones that no longer open their folder: share or allow those folders again.
+
+After checking the restored workspace, delete the previous data, and after a failed attempt the restored copies:
+
+```sh
+rm -rf -- "$LOCDOC_DOCS".before-restore-* "$LOCDOC_STATE"/before-restore-*
+rm -rf -- "$LOCDOC_DOCS".failed-restore-* "$LOCDOC_STATE"/failed-restore-*
+```
+
+A release's `backup/` folder holds only the state from before that deploy. To return to it, stop the service, move the state files aside as above, copy the backup's files into the state folder and start the service. The documents folder stays as it is, so no restore pass is needed.
 
 ## Fountain screenplays
 
@@ -199,9 +236,9 @@ The editor uses LF positions internally; file writes preserve LF, CRLF and CR se
 
 Unsynced browser changes are stored in IndexedDB and merged on reconnect. Read-only documents also open when that storage is blocked. Editable documents warn when offline recovery is unavailable and protect pending changes with an unload warning. Rejected or undecodable drafts are kept as downloadable recovery records instead of replaying on every reload; valid edits can continue from the accepted document. Older drafts affected by a line-ending migration are preserved for manual recovery. “Waiting for desktop file” means another program keeps the file open; long-lived read handles can also prevent the exclusive write lease. File opens return promptly when busy, so another program’s lease cannot stall saves on other documents. Whole-file desktop replacements do not identify a causal base, so Locdoc also retains the preceding accepted version in **Document options → Version history**. A desktop application replacing an old file wholesale can intentionally remove newer text; version history is the recovery path for that case.
 
-Back up **both your docs directory (including `.assets`) and the state directory**. The latter contains the owner key, SQLite database, share links, history and collaboration metadata. Browser storage is a recovery aid, not a backup. For an online database backup use SQLite's backup API, rather than copying only its main file while WAL writes are active.
+Back up **both your docs directory (including `.assets`) and the state directory**. The latter contains the owner key, SQLite database, share links, history and collaboration metadata. Browser storage is a recovery aid, not a backup. For an online database backup use SQLite's backup API, rather than copying only its main file while WAL writes are active. Back up the database first and the documents folder after it; [Restore from a backup](#restore-from-a-backup) describes restoring both.
 
-The state folder has an exclusive process lock. Its `root.identity` records the configured docs folder’s physical identity: a missing mount, unavailable root or unreadable subfolder cannot silently retire the workspace. Startup refuses a missing or replaced established root. When an established root is available but its files cannot be matched to documents yet, Locdoc starts anyway and keeps matching them in the background. To deliberately relocate a workspace, stop Locdoc, back up both folders, update the configuration, and remove only `root.identity` before restarting. Never remove the state database to reconnect a folder.
+The state folder has an exclusive process lock. Its `root.identity` records the configured docs folder’s physical identity: a missing mount, unavailable root or unreadable subfolder cannot silently retire the workspace. Startup refuses a missing or replaced established root, including a documents folder copied back from a backup until `locdoc --restored` has accepted it. When an established root is available but its files cannot be matched to documents yet, Locdoc starts anyway and keeps matching them in the background. To deliberately relocate a workspace, stop Locdoc, back up both folders, update the configuration, and remove only `root.identity` before restarting. Never remove the state database to reconnect a folder.
 
 The sidebar, folder links and MCP listings show everything they can read. An unreadable subfolder appears empty, and the server logs it once until it can be read again. Listings never search the tree for moved files themselves: a file that is still being matched to its document appears once the background pass has matched it, and that pass backs off while an unreadable folder keeps a missing document waiting.
 
