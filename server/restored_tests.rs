@@ -469,3 +469,34 @@ fn a_blank_text_never_matches_a_restored_file() {
     assert_eq!(report["unclaimedFiles"], json!(["new.md", "other.md"]));
     assert_eq!(s.index_document("new.md").unwrap().permission, "private");
 }
+
+#[test]
+fn a_document_whose_file_has_other_names_never_follows_a_copy() {
+    // A pass over a folder whose files kept their identities, as when the
+    // owner restores only the state files and runs the pass.
+    let (_directory, s) = store();
+    let a = written(&s, "a.md", "Text of A\n");
+    let b = written(&s, "b.md", "Text of B\n");
+    share(&s, &a.id);
+    // A's file gets a second name; B's file moves under two other names.
+    fs::hard_link(s.root.join("a.md"), s.root.join("alias.md")).unwrap();
+    fs::hard_link(s.root.join("b.md"), s.root.join("b2.md")).unwrap();
+    fs::rename(s.root.join("b.md"), s.root.join("b3.md")).unwrap();
+    fs::copy(s.root.join("a.md"), s.root.join("copy of a.md")).unwrap();
+    fs::copy(s.root.join("b3.md"), s.root.join("copy of b.md")).unwrap();
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open_restored(root, data, "http://localhost".into()).unwrap();
+    let report = restore(&s).unwrap();
+    assert_eq!(report["completed"], true);
+    // A keeps its own file; B's file is found, so B never takes a copy,
+    // and a link cannot show which name it moved to.
+    assert_eq!(placement(&report, &a)["evidence"], "identity");
+    assert_eq!(s.doc(&a.id).unwrap().path, "a.md");
+    assert_eq!(shared_text(&s, "old-link").as_deref(), Some("Text of A\n"));
+    assert_eq!(placement(&report, &b)["evidence"], "retired");
+    assert_eq!(
+        report["unclaimedFiles"],
+        json!(["b2.md", "b3.md", "copy of a.md", "copy of b.md"])
+    );
+}

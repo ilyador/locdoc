@@ -684,7 +684,7 @@ impl Store {
         for document in &mut tracked {
             document.seen = self.inspect(&document.path);
         }
-        let (files, complete) = self.survey(&mut tracked);
+        let (files, linked, complete) = self.survey(&mut tracked);
         if !complete
             || tracked
                 .iter()
@@ -692,7 +692,7 @@ impl Store {
         {
             return Ok(Some("Some folders or files in the documents folder could not be read. Fix their permissions, then run locdoc --restored again.".into()));
         }
-        *content = match self.match_contents(&tracked, &files) {
+        *content = match self.match_contents(&tracked, &files, &linked) {
             Ok(matches) => matches,
             Err(error) => return Ok(Some(error.1)),
         };
@@ -758,7 +758,7 @@ impl Store {
             self.observed_in_place(&observed)?;
             return Ok(HashSet::new());
         }
-        let (files, complete) = self.survey(&mut tracked);
+        let (files, _, complete) = self.survey(&mut tracked);
         let held: Vec<(&str, &Identity)> = pending
             .iter()
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
@@ -782,11 +782,12 @@ impl Store {
 
     /// Walk the tree and settle what each tracked path shows, given what
     /// `inspect` saw there first. Returns the files no other name links to,
-    /// and whether every folder was listed.
+    /// the evidence of files that have other names, and whether every folder
+    /// was listed.
     fn survey(
         &self,
         tracked: &mut [Tracked<Identity>],
-    ) -> (HashMap<String, Option<Identity>>, bool) {
+    ) -> (HashMap<String, Option<Identity>>, HashSet<Identity>, bool) {
         let (mut files, mut linked, complete) = self.walk();
         for document in tracked.iter_mut() {
             let walked = files.get(&document.path).cloned();
@@ -814,8 +815,11 @@ impl Store {
         }
         // A linked file still tells each document whose file is at its path,
         // but not which of its names a moved document now has.
-        files.retain(|path, _| !linked.contains(path));
-        (files, complete)
+        let aliased = linked
+            .iter()
+            .filter_map(|path| files.remove(path).flatten())
+            .collect();
+        (files, aliased, complete)
     }
 
     /// A file moved between folders during the walk is in neither listing.
@@ -990,13 +994,16 @@ impl Store {
     /// For a restore only: pair each document whose recorded file is found
     /// nowhere with the one unclaimed file holding a text it is known to have
     /// had, when no other document is known to have that file's text. A file
-    /// that cannot be read could hold a duplicate, so it fails the pass.
+    /// that cannot be read could hold a duplicate, so it fails the pass. A
+    /// file with other names is still found: its document never follows a
+    /// copy, though the link cannot show where it moved.
     fn match_contents(
         &self,
         tracked: &[Tracked<Identity>],
         files: &HashMap<String, Option<Identity>>,
+        linked: &HashSet<Identity>,
     ) -> Result<HashMap<String, String>> {
-        let found: HashSet<&Identity> = files.values().flatten().collect();
+        let found: HashSet<&Identity> = files.values().flatten().chain(linked).collect();
         let lost = |document: &Tracked<Identity>| {
             document
                 .recorded
