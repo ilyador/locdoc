@@ -18,6 +18,16 @@ struct FileMove {
     born: Option<String>,
 }
 impl FileMove {
+    fn new(document: &str, source: String, destination: String, metadata: &fs::Metadata) -> Self {
+        Self {
+            document: document.into(),
+            source,
+            destination,
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+            born: Self::birth(metadata),
+        }
+    }
     fn birth(metadata: &fs::Metadata) -> Option<String> {
         metadata
             .created()
@@ -39,6 +49,14 @@ impl FileMove {
             Err(error) => Err(error),
         }
     }
+}
+
+/// How a journaled rename settled.
+enum Outcome {
+    Moved,
+    /// The intent is gone and the document keeps its row path; discovery
+    /// places it from file evidence.
+    Dropped,
 }
 
 // An inode alone can be reused after deletion. Only a regular, unaliased file
@@ -190,14 +208,7 @@ impl Store {
         if let Some(room) = live.as_mut() {
             room.ensure_committed(self, &self.doc(id)?)?;
         }
-        let movement = FileMove {
-            document: id.clone(),
-            source: source.clone(),
-            destination: path.into(),
-            device: metadata.dev().to_string(),
-            inode: metadata.ino().to_string(),
-            born: FileMove::birth(metadata),
-        };
+        let movement = FileMove::new(id, source.clone(), path.into(), metadata);
         // Recheck after admission: an editor may have recreated the old name.
         if !fs::symlink_metadata(self.safe(source, false)?)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
@@ -208,7 +219,9 @@ impl Store {
             ));
         }
         self.journal_file_move(&movement)?;
-        self.finish_file_move(&movement)?;
+        // A destination replaced after journaling drops the intent; the next
+        // discovery decides from what the folder then holds.
+        self.settle_intent(&movement, false)?;
         Ok(())
     }
 
@@ -361,18 +374,11 @@ impl Store {
             ));
         }
         let metadata = fs::symlink_metadata(&source)?;
-        let movement = FileMove {
-            document: id.into(),
-            source: d.path,
-            destination: path,
-            device: metadata.dev().to_string(),
-            inode: metadata.ino().to_string(),
-            born: FileMove::birth(&metadata),
-        };
+        let movement = FileMove::new(id, d.path, path, &metadata);
         let previous = {
             let mut db = self.db.lock().unwrap();
             // Exercise path constraints before committing a filesystem intent.
-            // The transaction rolls back; only finish_file_move publishes it.
+            // The transaction rolls back; only commit_move publishes it.
             let tx = db.transaction()?;
             let previous = Self::move_identity(&tx, &movement)?;
             tx.rollback()?;
@@ -388,11 +394,33 @@ impl Store {
             ));
         }
         self.journal_file_move(&movement)?;
-        let completed = self.finish_file_move(&movement)?;
-        drop(r);
-        if !completed {
-            return Err(bad("That path already exists."));
+        match disk::rename_new(&source, &dest) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // The original remains in place. An external app's destination
+                // wins; abort our intent without touching it.
+                self.drop_intent(&movement)?;
+                return Err(bad("That path already exists."));
+            }
+            Err(error) => {
+                // A failed rename normally changes neither name. Settle from
+                // what is there rather than leave an intent blocking saves.
+                return match self.settle_intent(&movement, false)? {
+                    Outcome::Moved => Ok(()),
+                    Outcome::Dropped => Err(error.into()),
+                };
+            }
         }
+        if !movement.contains(&dest)? {
+            // A desktop save replaced the source after its inode was journaled.
+            self.restore_replaced(&movement, &source, &dest)?;
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "The file changed during the rename. Try again.".into(),
+            ));
+        }
+        self.commit_move(&movement)?;
+        drop(r);
         Ok(())
     }
 
@@ -438,33 +466,96 @@ impl Store {
         Ok(previous)
     }
 
-    fn finish_file_move(&self, movement: &FileMove) -> Result<bool> {
+    /// Settle a journaled rename from what its two names now hold. Every
+    /// outcome removes the intent except an I/O error, which retries later;
+    /// an intent must never keep its document from saving.
+    fn settle_intent(&self, movement: &FileMove, redo: bool) -> Result<Outcome> {
+        let current = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT path FROM docs WHERE id=? AND active=1",
+                [&movement.document],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if current.as_deref() != Some(movement.source.as_str()) {
+            // The intent no longer describes its document.
+            return self.drop_intent(movement);
+        }
+        let source = self.journaled(&movement.source)?;
+        let destination = self.journaled(&movement.destination)?;
+        let holds = |path: &Option<PathBuf>| {
+            path.as_deref()
+                .map_or(Ok(false), |path| movement.contains(path))
+        };
+        match (holds(&source)?, holds(&destination)?, source, destination) {
+            (false, true, _, _) => self.commit_move(movement),
+            (true, true, Some(source), _) => {
+                // An interrupted legacy hard-link move. Both names refer to
+                // exactly our inode, so removing the old alias is safe.
+                fs::remove_file(source)?;
+                self.commit_move(movement)
+            }
+            (true, false, Some(source), Some(destination)) if redo => {
+                match disk::rename_new(&source, &destination) {
+                    Ok(()) if movement.contains(&destination)? => self.commit_move(movement),
+                    Ok(()) => self.restore_replaced(movement, &source, &destination),
+                    // The original remains in place; an external destination wins.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        self.drop_intent(movement)
+                    }
+                    // A failed rename normally leaves both names unchanged.
+                    Err(_) => self.settle_intent(movement, false),
+                }
+            }
+            // Still only at its source, or under neither name.
+            _ => self.drop_intent(movement),
+        }
+    }
+
+    /// A journaled path, or None once it no longer resolves safely inside the
+    /// root. An unavailable root is an I/O error that retries.
+    fn journaled(&self, path: &str) -> Result<Option<PathBuf>> {
+        match self.safe(path, false) {
+            Ok(path) => Ok(Some(path)),
+            Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn drop_intent(&self, movement: &FileMove) -> Result<Outcome> {
+        self.db.lock().unwrap().execute(
+            "DELETE FROM document_moves WHERE doc=?",
+            [&movement.document],
+        )?;
+        Ok(Outcome::Dropped)
+    }
+
+    /// The source was replaced after its inode was journaled, so the rename
+    /// carried another file. Return that file while the source name is free;
+    /// the document stays at its path.
+    fn restore_replaced(
+        &self,
+        movement: &FileMove,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<Outcome> {
+        // A file created at the source meanwhile keeps that name.
+        let _ = disk::rename_new(destination, source);
+        for folder in [source.parent().unwrap(), destination.parent().unwrap()] {
+            if folder.is_dir() {
+                disk::sync_directories(folder, &self.root)?;
+            }
+        }
+        self.drop_intent(movement)
+    }
+
+    /// The journaled inode is at the destination: commit the document there.
+    fn commit_move(&self, movement: &FileMove) -> Result<Outcome> {
         let source = self.safe(&movement.source, false)?;
         let destination = self.safe(&movement.destination, false)?;
-        let original_source = movement.contains(&source)?;
-        if !movement.contains(&destination)? {
-            if !original_source {
-                return Err(ApiError(StatusCode::CONFLICT,
-                    "An interrupted rename cannot find its original file. Restore the original file before continuing; its saved edits remain in recovery.".into()));
-            }
-            match disk::rename_new(&source, &destination) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // The original remains safely in place. An external app's
-                    // destination wins; abort our intent without touching it.
-                    self.db.lock().unwrap().execute(
-                        "DELETE FROM document_moves WHERE doc=?",
-                        [&movement.document],
-                    )?;
-                    return Ok(false);
-                }
-                Err(error) => return Err(error.into()),
-            }
-        } else if original_source {
-            // Also tolerate an interrupted legacy hard-link move. Both names
-            // refer to exactly our inode, so removing the old alias is safe.
-            fs::remove_file(&source)?;
-        }
         disk::sync_directories(destination.parent().unwrap(), &self.root)?;
         if source.parent().unwrap().is_dir() {
             disk::sync_directories(source.parent().unwrap(), &self.root)?;
@@ -489,7 +580,7 @@ impl Store {
         if let Some(previous) = previous {
             self.close_document(&previous);
         }
-        Ok(true)
+        Ok(Outcome::Moved)
     }
 
     fn pending_file_moves(&self, path: Option<&str>) -> Result<Vec<FileMove>> {
@@ -517,7 +608,7 @@ impl Store {
 
     pub(super) fn finish_pending_path(&self, path: &str) -> Result<()> {
         for movement in self.pending_file_moves(Some(path))? {
-            self.finish_file_move(&movement)?;
+            self.settle_intent(&movement, true)?;
         }
         Ok(())
     }
@@ -525,12 +616,12 @@ impl Store {
     pub(super) fn recover_file_operations(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         for movement in self.pending_file_moves(None)? {
-            if let Err(error) = self.finish_file_move(&movement) {
-                // A missing external file cannot justify deleting saved state
-                // or stopping recovery of every other document in the folder.
+            if let Err(error) = self.settle_intent(&movement, true) {
+                // One unreadable folder must not stop recovery of every other
+                // document; the maintenance loop retries the I/O error.
                 tracing::error!(
                     document = movement.document,
-                    "Interrupted rename needs owner recovery: {error}"
+                    "Interrupted rename is still pending: {error}"
                 );
             }
         }
@@ -542,9 +633,9 @@ impl Store {
             return Ok(());
         };
         for movement in self.pending_file_moves(None)? {
-            if let Err(error) = self.finish_file_move(&movement) {
-                // Startup reports unresolved operations at error level. A
-                // persistent external conflict must not flood logs each pass.
+            if let Err(error) = self.settle_intent(&movement, true) {
+                // Startup reports pending operations at error level. A lasting
+                // I/O error must not flood logs each pass.
                 tracing::debug!(
                     document = movement.document,
                     "Rename still pending: {error}"

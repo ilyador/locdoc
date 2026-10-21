@@ -259,6 +259,121 @@ fn unfinished_rename_cannot_import_an_unrelated_recreation_of_its_old_path() {
     assert_eq!(replacement.permission, "private");
 }
 
+fn pending_moves(s: &Store) -> i64 {
+    s.db.lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM document_moves", [], |row| row.get(0))
+        .unwrap()
+}
+
+// Recovery covers every combination of where the journaled inode is: only at
+// the source (redo, or drop when the destination is taken), only at the
+// destination (complete), at both names, and at neither.
+#[test]
+fn an_interrupted_legacy_hard_link_rename_removes_the_old_alias() {
+    let (_directory, s) = store();
+    let document = s.create_document("original.md").unwrap();
+    share(&s, &document.id);
+    interrupted_move(&s, &document, "renamed.md");
+    fs::hard_link(s.root.join("original.md"), s.root.join("renamed.md")).unwrap();
+    let s = reopen(s);
+    let recovered = s.doc(&document.id).unwrap();
+    assert_eq!(recovered.path, "renamed.md");
+    assert_eq!(recovered.token.as_deref(), Some("old-link"));
+    assert!(!s.root.join("original.md").exists());
+    assert_eq!(
+        fs::read_to_string(s.root.join("renamed.md")).unwrap(),
+        "# original\n\n"
+    );
+    assert_eq!(pending_moves(&s), 0);
+}
+
+#[test]
+fn an_interrupted_rename_whose_file_moved_elsewhere_follows_the_file() {
+    let (_directory, s) = store();
+    let document = s.create_document("original.md").unwrap();
+    share(&s, &document.id);
+    interrupted_move(&s, &document, "renamed.md");
+    fs::create_dir(s.root.join("Elsewhere")).unwrap();
+    fs::rename(
+        s.root.join("original.md"),
+        s.root.join("Elsewhere/moved.md"),
+    )
+    .unwrap();
+    let s = reopen(s);
+    assert_eq!(pending_moves(&s), 0);
+    let found = s.doc(&document.id).unwrap();
+    assert_eq!(found.path, "Elsewhere/moved.md");
+    assert_eq!(found.token.as_deref(), Some("old-link"));
+    assert!(!s.root.join("renamed.md").exists());
+    // Without its intent the document saves again.
+    let room = s.room(&found).unwrap();
+    let frame = append_frame(&room, "Saved after recovery\n");
+    process_frame(&s, &found, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    assert!(s.persist(&found, &mut room.lock().unwrap()).unwrap());
+    assert!(
+        fs::read_to_string(s.root.join("Elsewhere/moved.md"))
+            .unwrap()
+            .contains("Saved after recovery")
+    );
+}
+
+#[test]
+fn a_source_replaced_during_a_rename_is_restored_and_keeps_saving() {
+    use rusqlite::functions::FunctionFlags;
+    let (_directory, s) = store();
+    let document = s.create_document("original.md").unwrap();
+    share(&s, &document.id);
+    let room = s.room(&document).unwrap();
+    let path = s.root.join("original.md");
+    let temporary = s.root.join("original.md.tmp");
+    {
+        // An editor's atomic save lands between journaling and the rename.
+        let db = s.db.lock().unwrap();
+        db.create_scalar_function("replace_source", 0, FunctionFlags::SQLITE_UTF8, move |_| {
+            fs::write(&temporary, "Desktop save during the rename\n")
+                .and_then(|()| fs::rename(&temporary, &path))
+                .map(|()| 1)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+        })
+        .unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER replace_during_rename AFTER INSERT ON document_moves
+             BEGIN SELECT replace_source(); END;",
+        )
+        .unwrap();
+    }
+    let error = s.rename_document(&document.id, "renamed.md").unwrap_err();
+    s.db.lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER replace_during_rename")
+        .unwrap();
+    assert_eq!(error.0, StatusCode::CONFLICT);
+    assert_eq!(error.1, "The file changed during the rename. Try again.");
+    assert_eq!(pending_moves(&s), 0);
+    let kept = s.doc(&document.id).unwrap();
+    assert_eq!(kept.path, "original.md");
+    assert_eq!(kept.token.as_deref(), Some("old-link"));
+    assert!(!s.root.join("renamed.md").exists());
+    assert_eq!(
+        fs::read_to_string(s.root.join("original.md")).unwrap(),
+        "Desktop save during the rename\n"
+    );
+    // No intent outlives the conflict: edits commit and project.
+    let frame = append_frame(&room, "Browser edit after the conflict\n");
+    process_frame(&s, &kept, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    assert!(s.persist(&kept, &mut room.lock().unwrap()).unwrap());
+    let saved = fs::read_to_string(s.root.join("original.md")).unwrap();
+    assert!(saved.contains("Desktop save during the rename"));
+    assert!(saved.contains("Browser edit after the conflict"));
+    s.rename_document(&document.id, "renamed.md").unwrap();
+    assert_eq!(s.doc(&document.id).unwrap().path, "renamed.md");
+    assert_eq!(
+        fs::read_to_string(s.root.join("renamed.md")).unwrap(),
+        saved
+    );
+}
+
 #[test]
 fn pending_renames_retry_without_restart_or_waiting_for_a_busy_file_operation() {
     let (_directory, s) = store();
@@ -278,9 +393,13 @@ fn pending_renames_retry_without_restart_or_waiting_for_a_busy_file_operation() 
 }
 
 #[test]
-fn an_unresolvable_rename_preserves_recovery_without_blocking_other_documents() {
+fn an_interrupted_rename_whose_file_left_the_root_retires_with_its_accepted_text() {
+    // Its inode is under neither journaled name. The intent used to remain
+    // forever and reject every save with 503; now it settles, and the
+    // document retires like any other file moved out of the root.
     let (directory, s) = store();
     let document = s.create_document("original.md").unwrap();
+    share(&s, &document.id);
     let room = s.room(&document).unwrap();
     let frame = append_frame(&room, "Accepted text remains recoverable");
     process_frame(
@@ -302,8 +421,10 @@ fn an_unresolvable_rename_preserves_recovery_without_blocking_other_documents() 
     )
     .unwrap();
     let s = reopen(s);
+    assert_eq!(s.pending_file_moves(None).unwrap().len(), 0);
     s.retire_missing_documents().unwrap();
-    assert!(s.doc(&document.id).is_ok());
+    assert!(s.doc(&document.id).is_err());
+    assert!(shared_document(&s, "old-link").is_err());
     assert!(s.room(&document).is_err());
     let state: Vec<u8> =
         s.db.lock()
