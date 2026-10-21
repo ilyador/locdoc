@@ -27,7 +27,7 @@ export function DocumentSidebar({
   query,
   view,
   setView,
-  collapsed,
+  expanded,
   toggleFolder,
   choose,
   shareFolder,
@@ -39,7 +39,7 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
-  collapsed: Set<string>;
+  expanded: Set<string>;
   toggleFolder: (path: string) => void;
   choose: (entry: Entry) => void;
   shareFolder?: (path: string) => void;
@@ -51,7 +51,8 @@ export function DocumentSidebar({
   const [search, setSearch] = useState({ query, collapsed: new Set<string>() });
   if (search.query !== query) setSearch({ query, collapsed: new Set() });
   const needle = query.trim().toLocaleLowerCase();
-  const closed = needle ? search.collapsed : collapsed;
+  const isOpen = (path: string) =>
+    needle ? !search.collapsed.has(path) : expanded.has(path);
   const toggle = (path: string) => {
     if (!needle) return toggleFolder(path);
     const next = new Set(search.collapsed);
@@ -98,7 +99,7 @@ export function DocumentSidebar({
     const row = (
       <button
         className={`tree-item ${e.id === id && e.kind === "file" ? "active" : ""} ${e.kind}`}
-        aria-expanded={e.kind === "folder" ? !closed.has(e.path) : undefined}
+        aria-expanded={e.kind === "folder" ? isOpen(e.path) : undefined}
         aria-current={e.id === id && e.kind === "file" ? "page" : undefined}
         title={e.path}
         style={
@@ -110,16 +111,12 @@ export function DocumentSidebar({
       >
         {e.kind === "folder" ? (
           <>
-            {closed.has(e.path) ? (
+            {!isOpen(e.path) ? (
               <CaretRight size={12} />
             ) : (
               <CaretDown size={12} />
             )}
-            {closed.has(e.path) ? (
-              <Folder size={17} />
-            ) : (
-              <FolderOpen size={17} />
-            )}
+            {!isOpen(e.path) ? <Folder size={17} /> : <FolderOpen size={17} />}
           </>
         ) : (
           <FileText size={16} />
@@ -171,7 +168,7 @@ export function DocumentSidebar({
         <li key={entry.path}>
           {item(entry, depth)}
           {entry.kind === "folder" &&
-            !closed.has(entry.path) &&
+            isOpen(entry.path) &&
             branch(entry.path, depth + 1)}
         </li>
       ))}

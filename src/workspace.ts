@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SIDEBAR_MIN, SIDEBAR_MAX } from "./sidebar-resize";
 import { hasUnstoredDrafts } from "./drafts";
 import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
@@ -66,8 +67,26 @@ export function useWorkspace() {
       // The sidebar still works when preferences cannot be saved.
     }
   }, [sidebar]);
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(() => {
+    try {
+      const value = localStorage.getItem("locdoc.sidebarWidth");
+      if (value && Number.isFinite(Number(value)))
+        return Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(value)));
+    } catch {
+      // An unavailable preference store must not block the workspace.
+    }
+    return null;
+  });
+  useEffect(() => {
+    try {
+      if (sidebarWidth === null) localStorage.removeItem("locdoc.sidebarWidth");
+      else localStorage.setItem("locdoc.sidebarWidth", String(sidebarWidth));
+    } catch {
+      // Resizing still works without preference storage.
+    }
+  }, [sidebarWidth]);
   const [query, setQuery] = useState("");
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [sidebarView, setSidebarView] = useState<SidebarView>(() => {
     try {
       const saved = localStorage.getItem("locdoc.sidebarView");
@@ -221,10 +240,12 @@ export function useWorkspace() {
     chooseName,
     sidebar,
     setSidebar,
+    sidebarWidth,
+    setSidebarWidth,
     query,
     setQuery,
-    collapsed,
-    setCollapsed,
+    expanded,
+    setExpanded,
     sidebarView,
     setSidebarView,
     loadTree,

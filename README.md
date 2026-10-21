@@ -141,6 +141,8 @@ Choose **Share** in a document, or switch to the **Folders** tab and use the sha
 
 ## Writing and comments
 
+Drag the sidebar's right edge to resize it on desktop; its width is remembered locally. Double-click the edge to restore the default width, or focus it and use the arrow keys. Folders start collapsed and open temporarily to reveal search matches.
+
 One live-preview editor styles Markdown and reveals syntax near the cursor. Markdown preview updates reuse unchanged parser blocks and mapped decorations, including offscreen media and tables. Structural changes refresh the affected blocks; partial background parsing retains offscreen layout until those blocks are parsed again. Use the toolbar for checkboxes, tables, links, media and comments. Font, size, line height, page width and light/dark appearance are browser preferences. Open aA for live controls in a bottom sheet on mobile or a column to the left of the document on desktop. The document stays visible and editable while you adjust Font, Layout and Theme. Google Fonts can be searched and installed locally by the owner.
 
 Select text to comment, then open the small inline marker to read or reply. Comments also live in the raw Markdown:

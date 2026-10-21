@@ -4,7 +4,7 @@ import { JSDOM } from "jsdom";
 import React from "react";
 
 let dom, render, renderHook, fireEvent, screen, waitFor, cleanup, act;
-let useWorkspace, DocumentSidebar, FolderShare;
+let useWorkspace, DocumentSidebar, SidebarResize, FolderShare;
 const response = (body) =>
   new Response(JSON.stringify(body), {
     headers: { "content-type": "application/json" },
@@ -52,16 +52,28 @@ before(async () => {
     addEventListener() {},
     removeEventListener() {},
   });
+  window.PointerEvent = window.MouseEvent;
+  globalThis.ResizeObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+    }
+    observe(target) {
+      this.callback([{ target }]);
+    }
+    disconnect() {}
+  };
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   ({ render, renderHook, fireEvent, screen, waitFor, cleanup, act } =
     await import("@testing-library/react"));
   ({ useWorkspace } = await import("../src/workspace.ts"));
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
+  ({ SidebarResize } = await import("../src/sidebar-resize.tsx"));
   ({ FolderShare } = await import("../src/sharing.tsx"));
 });
 afterEach(() => {
   cleanup();
   localStorage.removeItem("locdoc.sidebarView");
+  localStorage.removeItem("locdoc.sidebarWidth");
 });
 after(() => dom.window.close());
 
@@ -88,6 +100,7 @@ test("folder navigation preserves capability and selection in the URL and loads 
   assert.equal(paths[0], "/api/open/folder-token?doc=b");
   assert.equal(hook.result.current.sidebarView, "folders");
   assert.equal(hook.result.current.entries.length, 3);
+  assert.equal(hook.result.current.expanded.size, 0);
   await act(() => hook.result.current.navigate("b", "a", async () => {}));
   assert.equal(location.pathname, "/s/folder-token");
   assert.equal(location.search, "?doc=a");
@@ -135,6 +148,7 @@ test("the selected sidebar view survives navigation and a new workspace mount", 
   const first = renderHook(() => useWorkspace());
   await waitFor(() => assert.equal(first.result.current.id, "b"));
   act(() => first.result.current.setSidebarView("date"));
+  act(() => first.result.current.setSidebarWidth(390));
   await act(() => first.result.current.navigate("b", "a", async () => {}));
   assert.equal(first.result.current.sidebarView, "date");
   assert.equal(localStorage.getItem("locdoc.sidebarView"), "date");
@@ -144,6 +158,88 @@ test("the selected sidebar view survives navigation and a new workspace mount", 
     assert.equal(second.result.current.config?.folder.name, "Notes"),
   );
   assert.equal(second.result.current.sidebarView, "date");
+  assert.equal(second.result.current.sidebarWidth, 390);
+  act(() => second.result.current.setSidebarWidth(null));
+  assert.equal(localStorage.getItem("locdoc.sidebarWidth"), null);
+});
+
+test("folders and their descendants start closed", () => {
+  const props = {
+    id: "a",
+    query: "",
+    view: "folders",
+    setView() {},
+    expanded: new Set<string>(),
+    toggleFolder() {},
+    choose() {},
+  };
+  const tree = render(<DocumentSidebar {...props} entries={nestedEntries} />);
+  assert.deepEqual(visiblePaths(), ["Design", "Empty", "root.md"]);
+  assert.equal(
+    document.querySelector('[title="Design"]').getAttribute("aria-expanded"),
+    "false",
+  );
+  tree.rerender(
+    <DocumentSidebar
+      {...props}
+      entries={nestedEntries}
+      expanded={new Set(["Design"])}
+    />,
+  );
+  assert.deepEqual(visiblePaths(), [
+    "Design",
+    "Design/Nested",
+    "Design/z.md",
+    "Empty",
+    "root.md",
+  ]);
+  assert.equal(
+    document
+      .querySelector('[title="Design/Nested"]')
+      .getAttribute("aria-expanded"),
+    "false",
+  );
+});
+
+test("sidebar resizing previews without committing each move, clamps, cancels and resets", () => {
+  const app = document.createElement("div");
+  app.className = "app";
+  const sidebar = document.createElement("aside");
+  app.append(sidebar);
+  document.body.append(app);
+  sidebar.getBoundingClientRect = () => ({ width: 280 });
+  const widths = [];
+  render(<SidebarResize onResize={(value) => widths.push(value)} />, {
+    container: sidebar,
+  });
+  const handle = screen.getByRole("separator", { name: "Resize sidebar" });
+  handle.setPointerCapture = () => {};
+  handle.releasePointerCapture = () => {};
+  fireEvent.pointerDown(handle, { button: 0, clientX: 280 });
+  fireEvent.pointerMove(handle, { clientX: 390 });
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "390px");
+  assert.deepEqual(widths, []);
+  fireEvent.pointerUp(handle);
+  assert.deepEqual(widths, [390]);
+  assert.equal(app.classList.contains("sidebar-resizing"), false);
+  fireEvent.pointerDown(handle, { button: 0, clientX: 390 });
+  fireEvent.pointerMove(handle, { clientX: 2000 });
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "600px");
+  fireEvent.pointerCancel(handle);
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "390px");
+  assert.deepEqual(widths, [390]);
+  fireEvent.pointerDown(handle, { button: 0, clientX: 390 });
+  fireEvent.pointerMove(handle, { clientX: -1000 });
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "220px");
+  fireEvent.keyDown(handle, { key: "Escape" });
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "390px");
+  fireEvent.keyDown(handle, { key: "ArrowRight" });
+  fireEvent.keyDown(handle, { key: "Home" });
+  fireEvent.keyDown(handle, { key: "End" });
+  fireEvent.doubleClick(handle);
+  assert.deepEqual(widths, [390, 290, 220, 600, null]);
+  assert.equal(app.style.getPropertyValue("--sidebar-custom-width"), "");
+  app.remove();
 });
 
 const nestedEntries = [
@@ -163,7 +259,9 @@ const nestedEntries = [
 
 function SidebarFixture() {
   const [view, setView] = React.useState("date");
-  const [collapsed, setCollapsed] = React.useState(new Set<string>());
+  const [expanded, setExpanded] = React.useState(
+    new Set(["Design", "Design/Nested", "Empty"]),
+  );
   const [query, setQuery] = React.useState("");
   const [chosen, setChosen] = React.useState("");
   return (
@@ -180,12 +278,12 @@ function SidebarFixture() {
         query={query}
         view={view}
         setView={setView}
-        collapsed={collapsed}
+        expanded={expanded}
         toggleFolder={(path) => {
-          const next = new Set(collapsed);
+          const next = new Set(expanded);
           if (next.has(path)) next.delete(path);
           else next.add(path);
-          setCollapsed(next);
+          setExpanded(next);
         }}
         choose={(entry) => setChosen(entry.id)}
       />
@@ -279,7 +377,7 @@ test("folder sharing has a separate accessible target and does not toggle the fo
       query=""
       view="folders"
       setView={() => {}}
-      collapsed={new Set()}
+      expanded={new Set()}
       toggleFolder={() => toggled++}
       choose={() => {}}
       shareFolder={(path) => (shared = path)}

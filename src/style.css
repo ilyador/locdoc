@@ -152,7 +152,12 @@ button:hover {
   background: var(--hover);
 }
 .app {
-  --sidebar-width: 280px;
+  --sidebar-default-width: 280px;
+  --sidebar-width: clamp(
+    220px,
+    var(--sidebar-custom-width, var(--sidebar-default-width)),
+    min(600px, calc(100vw - 360px))
+  );
   position: relative;
   display: grid;
   grid-template-columns: 0 minmax(0, 1fr);
@@ -187,6 +192,35 @@ button:hover {
   pointer-events: auto;
   transition-duration: 120ms, 0s;
   transition-delay: 0s;
+}
+.sidebar-resize {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 8px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resize::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 2px;
+  background: transparent;
+}
+.sidebar-resize:hover::after,
+.sidebar-resize:focus-visible::after,
+.sidebar-resizing .sidebar-resize::after {
+  background: var(--accent);
+}
+.sidebar-resize:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sidebar-resizing,
+.sidebar-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
 }
 .brand-row {
   height: calc(83px + var(--safe-top));
@@ -269,7 +303,7 @@ button:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
   margin: 0 16px 10px;
   border-bottom: 1px solid var(--line);
 }
@@ -279,7 +313,7 @@ button:hover {
   align-items: center;
 }
 .sidebar-tabs {
-  gap: 16px;
+  gap: 12px;
 }
 .sidebar-tabs [role="tab"] {
   position: relative;
@@ -2263,7 +2297,7 @@ button:hover {
 }
 @media (max-width: 1200px) {
   .app {
-    --sidebar-width: 250px;
+    --sidebar-default-width: 250px;
   }
   .topbar {
     padding: var(--safe-top) 20px 0;
@@ -2277,7 +2311,7 @@ button:hover {
 }
 @media (max-width: 1000px) {
   .app {
-    --sidebar-width: 230px;
+    --sidebar-default-width: 230px;
   }
   .topbar {
     padding: var(--safe-top) 16px 0;
@@ -2320,6 +2354,9 @@ button:hover {
   .app,
   .app.with-sidebar {
     grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .sidebar-resize {
+    display: none;
   }
   .sidebar {
     position: absolute;

@@ -36,6 +36,7 @@ import * as Y from "yjs";
 import { api, send } from "./api";
 import { MarkdownEditor, type EditorHandle, type Selection } from "./editor";
 import { FolderShare, ShareControls, type ShareAccess } from "./sharing";
+import { SidebarResize } from "./sidebar-resize";
 import { DocumentSidebar } from "./document-sidebar";
 import { LinkPicker } from "./link-picker";
 import { LinkPreview } from "./link-preview";
@@ -123,10 +124,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setName,
     sidebar,
     setSidebar,
+    sidebarWidth,
+    setSidebarWidth,
     query,
     setQuery,
-    collapsed,
-    setCollapsed,
+    expanded,
+    setExpanded,
     sidebarView,
     setSidebarView,
     loadTree,
@@ -457,7 +460,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       location.reload();
     });
   const toggleFolder = (path: string) =>
-    setCollapsed((prev) => {
+    setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
       else next.add(path);
@@ -573,6 +576,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       />
     );
   const style = {
+    "--sidebar-custom-width":
+      sidebarWidth === null ? undefined : `${sidebarWidth}px`,
     "--doc-font": documentFontFamily(font),
     "--doc-size": `${fontSize}px`,
     "--doc-line-height": lineHeight,
@@ -594,9 +599,11 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           onClick={() => setSidebar(false)}
         />
         <aside
+          id="workspace-sidebar"
           className={`sidebar ${sidebar ? "is-open" : ""}`}
           inert={!sidebar}
         >
+          <SidebarResize onResize={setSidebarWidth} />
           <div className="brand-row">
             <a
               className="brand"
@@ -631,7 +638,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 query={query}
                 view={sidebarView}
                 setView={setSidebarView}
-                collapsed={collapsed}
+                expanded={expanded}
                 toggleFolder={toggleFolder}
                 choose={choose}
                 label={config.folder?.name}
