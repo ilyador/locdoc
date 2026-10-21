@@ -1939,6 +1939,47 @@ fn an_image_edited_in_place_stays_approved_before_and_after_moves() {
     assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
 }
 
+#[test]
+fn a_hard_link_at_the_destination_never_carries_an_image_approval_along() {
+    let (_directory, s, page, _upload) = album();
+    let png = BASE64.decode(PNG).unwrap();
+    // A second name for the approved image waits in a private folder.
+    s.create_folder("Private").unwrap();
+    fs::hard_link(
+        s.root.join("Album/photo.png"),
+        s.root.join("Private/photo.png"),
+    )
+    .unwrap();
+    s.rename_document(&page.id, "Private/page.md").unwrap();
+    // The image stayed behind, so a later private image at that name was
+    // served as approved.
+    let temporary = s.root.join("Private/photo.png.tmp");
+    fs::write(&temporary, &png).unwrap();
+    fs::rename(&temporary, s.root.join("Private/photo.png")).unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::FORBIDDEN);
+    let moved = s.doc(&page.id).unwrap();
+    assert!(s.attachment_allowed(&moved, &s.root.join("Album/photo.png")));
+}
+
+#[test]
+fn a_symlink_at_the_destination_never_carries_an_image_approval_along() {
+    let (_directory, s, page, _upload) = album();
+    let png = BASE64.decode(PNG).unwrap();
+    s.create_folder("Private").unwrap();
+    fs::write(s.root.join("Private/secret.png"), &png).unwrap();
+    let link = s.root.join("Private/photo.png");
+    std::os::unix::fs::symlink("../Album/photo.png", &link).unwrap();
+    fs::rename(s.root.join("Album/page.md"), s.root.join("Private/page.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Private/page.md");
+    // Through the link the reference still names the approved image.
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    // Pointing the link at a private image never approves that image.
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("secret.png", &link).unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::FORBIDDEN);
+}
+
 /// A walk hook under which the root's Locked folder cannot be listed.
 fn locked(s: &Store) -> impl Fn(&Path) -> std::io::Result<()> + Clone + 'static {
     let locked = s.root.join("Locked");

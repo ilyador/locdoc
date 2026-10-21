@@ -68,11 +68,14 @@ struct StoredRoom {
 
 impl Store {
     /// Relative owner approvals must not resolve to a different private file
-    /// after a move. An approval stays relative only while its spelling names
-    /// the file it approved, as when a folder moves with its images. Else it
-    /// is pinned to that file at its exact old path, or ends once the file
-    /// has left it. An approval recorded without a file identity keeps its
-    /// old target. Called in the move's transaction; source bytes stay intact.
+    /// after a move. An approval stays relative only when the file it approved
+    /// moved with the document, as when a folder moves with its images: its
+    /// spelling names that file from the new folder and no longer from the
+    /// old one. A file still at its old path stayed behind, even when a hard
+    /// link or symlink reaches it from the new folder. It is pinned to that
+    /// file at its exact old path, or ends once the file has left it. An
+    /// approval recorded without a file identity keeps its old target.
+    /// Called in the move's transaction; source bytes stay intact.
     pub(super) fn reanchor_moved_media(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -96,18 +99,20 @@ impl Store {
                     .and_then(|metadata| namespace::Identity::of(&metadata))
                     .is_some_and(|identity| Some(identity.as_str()) == approved.as_deref())
             };
-            if self
-                .media_path(&moved, &reference)
-                .is_ok_and(|path| approves(&path))
-            {
-                continue;
-            }
             let before = self.media_path(document, &reference).ok().or_else(|| {
                 approved.as_ref()?;
                 self.left_folder_media(&document.path, &reference)
             });
+            let stayed = before.as_deref().is_some_and(approves);
+            if !stayed
+                && self
+                    .media_path(&moved, &reference)
+                    .is_ok_and(|path| approves(&path))
+            {
+                continue;
+            }
             if let Some(path) = before
-                && (approved.is_none() || approves(&path))
+                && (approved.is_none() || stayed)
             {
                 tx.execute(
                     "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
