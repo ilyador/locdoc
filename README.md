@@ -3,6 +3,7 @@
 A small, self-hosted Markdown and Fountain editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
 
 - Real nested folders and ordinary UTF-8 `.md` and `.fountain` files.
+- A searchable sidebar with **By date** and **Folders** tabs; your selected view is remembered locally.
 - Autosave, live Markdown formatting, task lists, tables, local images and videos.
 - Live Fountain screenplay formatting: scene headings, dialogue, parentheticals, transitions, title pages, notes, and dual dialogue.
 - Collaborative editing with visible cursors and inline comments.
@@ -129,7 +130,7 @@ For access outside this computer, point your hostname at it and reverse-proxy HT
 
 Forward and allow **TCP 80 and 443** for the HTTPS proxy. On an already enabled UFW firewall, use `sudo ufw allow 80/tcp` and `sudo ufw allow 443/tcp`. **Do not expose port 3477** publicly. UDP 443 is optional for HTTP/3. DNS, certificates, router and firewall changes are managed separately from Locdoc.
 
-Choose **Share** in a document, or expand **Folders** and use the sharing icon beside a folder. A document's share dialog also offers **Share containing folder**.
+Choose **Share** in a document, or switch to the **Folders** tab and use the sharing icon beside a folder. A document's share dialog also offers **Share containing folder**.
 
 - **View & comment** permits reading and commenting. **Edit & comment** also permits collaborative text edits. The owner always retains editing access.
 - Folder links include nested folders and future Markdown files added inside them. Guests get a searchable, scoped sidebar; they cannot browse the rest of your workspace or create/rename files.

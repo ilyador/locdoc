@@ -127,11 +127,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setQuery,
     collapsed,
     setCollapsed,
-    scope,
-    setScope,
+    sidebarView,
+    setSidebarView,
     loadTree,
-    foldersOpen,
-    setFoldersOpen,
   } = workspace;
   const {
     doc,
@@ -627,71 +625,43 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 />
                 <kbd>Ctrl K</kbd>
               </label>
-              {!config.folder && (
-                <nav className="scope-nav" aria-label="Workspace views">
-                  <button
-                    className={scope === "all" ? "selected" : ""}
-                    onClick={() => setScope("all")}
-                  >
-                    <Files />
-                    All documents
-                    <span>
-                      {entries.filter((e) => e.kind === "file").length}
-                    </span>
-                  </button>
-                  <button
-                    className={scope === "shared" ? "selected" : ""}
-                    onClick={() => setScope("shared")}
-                  >
-                    <ShareNetwork />
-                    Shared with others
-                    <span>
-                      {entries.filter((e) => e.kind === "file" && e.shared)
-                        .length || ""}
-                    </span>
-                  </button>
-                </nav>
-              )}
-              <div className="section-label">
-                <span>
-                  {config.folder?.name ||
-                    (scope === "shared" ? "SHARED DOCUMENTS" : "FILES")}
-                </span>
-                {config.owner && !sharedToken && (
-                  <div>
-                    <IconButton
-                      label="New folder"
-                      onClick={() => {
-                        setCreateKind("folder");
-                        setNewPath("");
-                        setPanel("create");
-                      }}
-                    >
-                      <Folder size={16} />
-                    </IconButton>
-                    <IconButton
-                      label="New document"
-                      onClick={() => {
-                        setCreateKind("file");
-                        setNewPath("");
-                        setPanel("create");
-                      }}
-                    >
-                      <Plus size={16} />
-                    </IconButton>
-                  </div>
-                )}
-              </div>
               <DocumentSidebar
                 entries={entries}
                 id={id}
                 query={query}
-                scope={scope}
+                view={sidebarView}
+                setView={setSidebarView}
                 collapsed={collapsed}
                 toggleFolder={toggleFolder}
                 choose={choose}
-                foldersOpen={foldersOpen}
-                setFoldersOpen={setFoldersOpen}
+                label={config.folder?.name}
+                actions={
+                  config.owner &&
+                  !sharedToken && (
+                    <>
+                      <IconButton
+                        label="New folder"
+                        onClick={() => {
+                          setCreateKind("folder");
+                          setNewPath("");
+                          setPanel("create");
+                        }}
+                      >
+                        <Folder size={16} />
+                      </IconButton>
+                      <IconButton
+                        label="New document"
+                        onClick={() => {
+                          setCreateKind("file");
+                          setNewPath("");
+                          setPanel("create");
+                        }}
+                      >
+                        <Plus size={16} />
+                      </IconButton>
+                    </>
+                  )
+                }
                 shareFolder={
                   config.owner && !sharedToken
                     ? (path) => {

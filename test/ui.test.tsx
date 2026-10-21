@@ -251,8 +251,8 @@ function WorkspaceFixture() {
           setQuery() {},
           collapsed: new Set(),
           setCollapsed() {},
-          scope: "all",
-          setScope() {},
+          sidebarView: "date",
+          setSidebarView() {},
           async loadTree() {},
         } as any
       }

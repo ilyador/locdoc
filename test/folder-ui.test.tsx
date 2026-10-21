@@ -59,7 +59,10 @@ before(async () => {
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ FolderShare } = await import("../src/sharing.tsx"));
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  localStorage.removeItem("locdoc.sidebarView");
+});
 after(() => dom.window.close());
 
 test("folder navigation preserves capability and selection in the URL and loads a scoped tree", async () => {
@@ -83,7 +86,7 @@ test("folder navigation preserves capability and selection in the URL and loads 
   const hook = renderHook(() => useWorkspace());
   await waitFor(() => assert.equal(hook.result.current.id, "b"));
   assert.equal(paths[0], "/api/open/folder-token?doc=b");
-  assert.equal(hook.result.current.foldersOpen, true);
+  assert.equal(hook.result.current.sidebarView, "folders");
   assert.equal(hook.result.current.entries.length, 3);
   await act(() => hook.result.current.navigate("b", "a", async () => {}));
   assert.equal(location.pathname, "/s/folder-token");
@@ -118,6 +121,154 @@ test("an empty shared folder settles and can pick up the first new file", async 
   assert.equal(hook.result.current.id, "new");
 });
 
+test("the selected sidebar view survives navigation and a new workspace mount", async () => {
+  globalThis.fetch = async () =>
+    response({
+      owner: false,
+      root: "",
+      guest: "guest",
+      publicUrl: location.origin,
+      folder: { name: "Notes", permission: "view" },
+      entries,
+      document: { id: "b" },
+    });
+  const first = renderHook(() => useWorkspace());
+  await waitFor(() => assert.equal(first.result.current.id, "b"));
+  act(() => first.result.current.setSidebarView("date"));
+  await act(() => first.result.current.navigate("b", "a", async () => {}));
+  assert.equal(first.result.current.sidebarView, "date");
+  assert.equal(localStorage.getItem("locdoc.sidebarView"), "date");
+  first.unmount();
+  const second = renderHook(() => useWorkspace());
+  await waitFor(() =>
+    assert.equal(second.result.current.config?.folder.name, "Notes"),
+  );
+  assert.equal(second.result.current.sidebarView, "date");
+});
+
+const nestedEntries = [
+  { kind: "file", path: "root.md", id: "root", shared: false, modified: 100 },
+  { kind: "file", path: "Design/z.md", id: "z", shared: false, modified: 300 },
+  { kind: "folder", path: "Design/Nested", id: null, shared: false },
+  {
+    kind: "file",
+    path: "Design/Nested/a.fountain",
+    id: "a",
+    shared: true,
+    modified: 200,
+  },
+  { kind: "folder", path: "Empty", id: null, shared: false },
+  { kind: "folder", path: "Design", id: null, shared: false },
+];
+
+function SidebarFixture() {
+  const [view, setView] = React.useState("date");
+  const [collapsed, setCollapsed] = React.useState(new Set<string>());
+  const [query, setQuery] = React.useState("");
+  const [chosen, setChosen] = React.useState("");
+  return (
+    <>
+      <input
+        aria-label="Search"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
+      <output aria-label="Chosen file">{chosen}</output>
+      <DocumentSidebar
+        entries={nestedEntries}
+        id="a"
+        query={query}
+        view={view}
+        setView={setView}
+        collapsed={collapsed}
+        toggleFolder={(path) => {
+          const next = new Set(collapsed);
+          if (next.has(path)) next.delete(path);
+          else next.add(path);
+          setCollapsed(next);
+        }}
+        choose={(entry) => setChosen(entry.id)}
+      />
+    </>
+  );
+}
+
+const visiblePaths = () =>
+  Array.from(document.querySelectorAll(".file-tree .tree-item"), (button) =>
+    button.getAttribute("title"),
+  );
+
+test("date and folder tabs show each file once with distinct ordering and keyboard selection", () => {
+  render(<SidebarFixture />);
+  assert.deepEqual(visiblePaths(), [
+    "Design/z.md",
+    "Design/Nested/a.fountain",
+    "root.md",
+  ]);
+  const dateTab = screen.getByRole("tab", { name: "By date" });
+  const folderTab = screen.getByRole("tab", { name: "Folders" });
+  fireEvent.keyDown(dateTab, { key: "ArrowRight" });
+  assert.equal(folderTab.getAttribute("aria-selected"), "true");
+  assert.ok(
+    document.activeElement === folderTab,
+    "Arrow navigation focuses the selected tab.",
+  );
+  assert.equal(
+    screen.getByRole("tabpanel").getAttribute("aria-labelledby"),
+    folderTab.id,
+  );
+  assert.deepEqual(visiblePaths(), [
+    "Design",
+    "Design/Nested",
+    "Design/Nested/a.fountain",
+    "Design/z.md",
+    "Empty",
+    "root.md",
+  ]);
+  fireEvent.click(document.querySelector('[title="Design/Nested/a.fountain"]'));
+  assert.equal(screen.getByLabelText("Chosen file").textContent, "a");
+  fireEvent.keyDown(folderTab, { key: "Home" });
+  assert.equal(dateTab.getAttribute("aria-selected"), "true");
+  assert.deepEqual(visiblePaths(), [
+    "Design/z.md",
+    "Design/Nested/a.fountain",
+    "root.md",
+  ]);
+  assert.equal(screen.queryByText("All documents"), null);
+  assert.equal(screen.queryByText("Shared with others"), null);
+});
+
+test("folder search reveals matching ancestors, supports collapse, and preserves the normal tree", () => {
+  render(<SidebarFixture />);
+  fireEvent.click(screen.getByRole("tab", { name: "Folders" }));
+  fireEvent.click(document.querySelector('[title="Design"]'));
+  assert.deepEqual(visiblePaths(), ["Design", "Empty", "root.md"]);
+  fireEvent.change(screen.getByLabelText("Search"), {
+    target: { value: "a.fountain" },
+  });
+  assert.deepEqual(visiblePaths(), [
+    "Design",
+    "Design/Nested",
+    "Design/Nested/a.fountain",
+  ]);
+  fireEvent.click(document.querySelector('[title="Design/Nested"]'));
+  assert.deepEqual(visiblePaths(), ["Design", "Design/Nested"]);
+  fireEvent.change(screen.getByLabelText("Search"), {
+    target: { value: "z.md" },
+  });
+  assert.deepEqual(visiblePaths(), ["Design", "Design/z.md"]);
+  fireEvent.click(screen.getByRole("tab", { name: "By date" }));
+  assert.deepEqual(visiblePaths(), ["Design/z.md"]);
+  fireEvent.change(screen.getByLabelText("Search"), {
+    target: { value: "missing" },
+  });
+  assert.ok(screen.getByText("No matching documents."));
+  fireEvent.click(screen.getByRole("tab", { name: "Folders" }));
+  assert.ok(screen.getByText("No matching documents."));
+  fireEvent.change(screen.getByLabelText("Search"), { target: { value: "" } });
+  assert.deepEqual(visiblePaths(), ["Design", "Empty", "root.md"]);
+});
+
 test("folder sharing has a separate accessible target and does not toggle the folder", () => {
   let toggled = 0,
     shared = "";
@@ -126,12 +277,11 @@ test("folder sharing has a separate accessible target and does not toggle the fo
       entries={entries}
       id="b"
       query=""
-      scope="all"
+      view="folders"
+      setView={() => {}}
       collapsed={new Set()}
       toggleFolder={() => toggled++}
       choose={() => {}}
-      foldersOpen
-      setFoldersOpen={() => {}}
       shareFolder={(path) => (shared = path)}
     />,
   );

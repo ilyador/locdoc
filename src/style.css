@@ -28,6 +28,7 @@
   --syntax-violet: #5658b9;
   --syntax-amber: #946800;
   --syntax-mark: #cb156f;
+  --fountain-scene: #971e70;
   --fountain-speaker: #566f8b;
   --fountain-parenthetical: #806b88;
   --ui-font: "IBM Plex Sans", "Segoe UI", sans-serif;
@@ -264,51 +265,59 @@ button:hover {
   padding: 2px 3px;
   border-radius: 3px;
 }
-.scope-nav {
-  padding: 0 12px 19px;
-  border-bottom: 1px solid var(--line);
-  display: grid;
-  gap: 3px;
-}
-.scope-nav button {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  height: 40px;
-  border-radius: 5px;
-  text-align: left;
-  padding: 0 10px;
-  font-size: var(--ui-body-size);
-  color: var(--secondary);
-}
-.scope-nav button.selected {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: var(--weight-semibold);
-}
-.scope-nav button span {
-  margin-left: auto;
-  font-size: var(--ui-meta-size);
-  color: var(--muted);
-}
-.section-label {
+.sidebar-views {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 18px 9px 22px;
-  min-height: 51px;
-  font-size: var(--ui-caption-size);
-  letter-spacing: 1px;
+  gap: 8px;
+  margin: 0 16px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.sidebar-tabs,
+.sidebar-actions {
+  display: flex;
+  align-items: center;
+}
+.sidebar-tabs {
+  gap: 16px;
+}
+.sidebar-tabs [role="tab"] {
+  position: relative;
+  min-height: 40px;
+  padding: 0 2px;
   color: var(--muted);
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.sidebar-tabs [aria-selected="true"] {
+  color: var(--text);
   font-weight: var(--weight-semibold);
 }
-.section-label > div {
-  display: flex;
-  gap: 1px;
+.sidebar-tabs [aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  height: 2px;
+  bottom: -1px;
+  inset-inline: 0;
+  background: var(--accent);
 }
-.section-label .icon-button {
-  width: 24px;
-  height: 24px;
+.sidebar-tabs [role="tab"]:hover {
+  color: var(--text);
+}
+.sidebar-actions {
+  flex-shrink: 0;
+}
+.sidebar-actions .icon-button {
+  width: 32px;
+  height: 32px;
+}
+.sidebar-folder-name {
+  padding: 0 24px 8px;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .file-tree {
   padding: 0 12px;
@@ -335,12 +344,6 @@ button:hover {
 .tree-item.folder {
   gap: 6px;
   font-weight: var(--weight-semibold);
-}
-.tree-item.file {
-  padding-left: 31px;
-}
-.tree-item.file:not([style*="padding-left: 12"]) {
-  gap: 9px;
 }
 .tree-item.active {
   background: var(--accent-soft);
@@ -936,7 +939,7 @@ button:hover {
   line-height: 0.8 !important;
 }
 .fountain-scene > .cm-line {
-  color: var(--syntax-heading);
+  color: var(--fountain-scene);
   font-weight: var(--weight-bold);
   text-transform: uppercase;
 }
@@ -2213,6 +2216,7 @@ button:hover {
   --syntax-violet: #a9a2e5;
   --syntax-amber: #d6b76b;
   --syntax-mark: #e892ba;
+  --fountain-scene: #fffac0;
   --fountain-speaker: #9eb3ca;
   --fountain-parenthetical: #b8a5c0;
   color-scheme: dark;
@@ -2552,13 +2556,13 @@ button:hover {
 }
 
 /* Timestamps share each document row; navigation stays compact. */
-.file-tree nav .tree-item.file {
+.date-list .tree-item.file {
   height: auto;
   padding: 8px 12px;
   min-height: 38px;
   align-items: flex-start;
 }
-.file-tree nav .tree-item > svg {
+.date-list .tree-item > svg {
   margin-top: 3px;
 }
 .file-tree .tree-item > .doc-name {
@@ -2575,25 +2579,14 @@ button:hover {
   font-weight: var(--weight-regular);
   line-height: 1.5;
 }
-.folder-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 12px;
-  color: var(--secondary);
-  font-size: var(--ui-meta-size);
-  text-align: left;
-  border-radius: 6px;
+.file-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
-.folder-toggle span {
-  flex: 1;
-}
-.folder-toggle:hover {
-  background: var(--hover);
-}
-.folder-tree {
-  margin: 4px 0 20px;
+.folder-tree .tree-item {
+  height: 38px;
+  gap: 6px;
 }
 .md-task-toggle {
   display: inline-flex;
@@ -2739,7 +2732,7 @@ button:hover {
   white-space: nowrap;
 }
 
-.file-tree nav .tree-item > .doc-meta {
+.date-list .tree-item > .doc-meta {
   margin-top: 3px;
 }
 

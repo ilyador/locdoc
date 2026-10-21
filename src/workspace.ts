@@ -12,6 +12,8 @@ import {
   type Entry,
 } from "./model";
 
+export type SidebarView = "date" | "folders";
+
 // Workspace state survives document navigation. No document content, sharing
 // state, comments or asynchronous document mutations live at this level.
 export function useWorkspace() {
@@ -66,8 +68,22 @@ export function useWorkspace() {
   }, [sidebar]);
   const [query, setQuery] = useState("");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [scope, setScope] = useState("all");
-  const [foldersOpen, setFoldersOpen] = useState(false);
+  const [sidebarView, setSidebarView] = useState<SidebarView>(() => {
+    try {
+      const saved = localStorage.getItem("locdoc.sidebarView");
+      if (saved === "date" || saved === "folders") return saved;
+    } catch {
+      // Viewing documents must not depend on preference storage.
+    }
+    return sharedToken ? "folders" : "date";
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("locdoc.sidebarView", sidebarView);
+    } catch {
+      // Both views remain available without storage.
+    }
+  }, [sidebarView]);
   const current = useRef(id);
   const folderView = useRef(false);
   current.current = id;
@@ -143,7 +159,6 @@ export function useWorkspace() {
         setConfig(data);
         if (data.folder) {
           setEntries(data.entries);
-          setFoldersOpen(true);
         }
         if (data.owner) setName(data.ownerName || "Owner");
         else
@@ -210,10 +225,8 @@ export function useWorkspace() {
     setQuery,
     collapsed,
     setCollapsed,
-    scope,
-    setScope,
-    foldersOpen,
-    setFoldersOpen,
+    sidebarView,
+    setSidebarView,
     loadTree,
   };
 }
