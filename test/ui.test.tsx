@@ -31,7 +31,9 @@ const held = new Map<string, () => void>();
 let delayShare = false,
   delayComment = false,
   failReply = false,
-  failBootstrap = false;
+  failBootstrap = false,
+  failCreate = false,
+  secondComment = false;
 let docs;
 const response = (body) =>
   new Response(JSON.stringify(body), {
@@ -179,7 +181,11 @@ before(async () => {
           await new Promise<void>((resolve) => held.set("comment", resolve));
         return response({ ...comment, body: body.body });
       }
-      return response({ comments: [comment] });
+      return response({
+        comments: secondComment
+          ? [comment, { ...comment, id: "c2", body: "Second comment" }]
+          : [comment],
+      });
     }
     if (path.endsWith("/versions"))
       return response({
@@ -196,6 +202,10 @@ before(async () => {
         content: id === "old" ? "OLD CONTENT" : "NEW CONTENT",
       });
     }
+    if (path === "/api/files" && failCreate)
+      return new Response(JSON.stringify({ error: "Disk full" }), {
+        status: 507,
+      });
     if (path.endsWith("/comments/c1"))
       return failReply
         ? new Response(JSON.stringify({ error: "Outage" }), { status: 503 })
@@ -208,7 +218,13 @@ afterEach(() => {
   sockets.length = 0;
   requests.length = 0;
   held.clear();
-  delayShare = delayComment = failReply = failBootstrap = false;
+  delayShare =
+    delayComment =
+    failReply =
+    failBootstrap =
+    failCreate =
+    secondComment =
+      false;
 });
 after(() => {
   globalThis.fetch = originalFetch;
@@ -707,6 +723,26 @@ test("dismissing an in-flight comment neither reopens it nor allows a duplicate 
     1,
   );
 });
+test("comment navigation steps through the document's threads in order", async () => {
+  secondComment = true;
+  await openWorkspace();
+  await screen.findAllByRole("button", { name: "Open comment" });
+  fireEvent.click(screen.getByLabelText("Toggle comments"));
+  assert.ok(screen.getByText("Existing comment"));
+  assert.equal(
+    screen.getByRole("button", { name: "Previous comment" }).disabled,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Next comment" }));
+  assert.ok(screen.getByText("Second comment"));
+  assert.ok(!screen.queryByText("Existing comment"));
+  assert.equal(
+    screen.getByRole("button", { name: "Next comment" }).disabled,
+    true,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Previous comment" }));
+  assert.ok(screen.getByText("Existing comment"));
+});
 test("cancel reply clears its draft without changing the posted conversation", () => {
   let cancellations = 0;
   const submitted: string[] = [];
@@ -878,6 +914,91 @@ test("a failed reply preserves the text for retry", async () => {
       "Keep this reply",
     ),
   );
+});
+test("the create form keeps its path until success and remembers the file type", async () => {
+  await openWorkspace();
+  failCreate = true;
+  fireEvent.click(screen.getAllByRole("button", { name: "New document" })[0]);
+  const path = screen.getByLabelText("Document path");
+  fireEvent.change(path, { target: { value: "Notes/Plan.md" } });
+  fireEvent.change(screen.getByLabelText("File type"), {
+    target: { value: "fountain" },
+  });
+  assert.equal(path.value, "Notes/Plan.fountain");
+  fireEvent.click(screen.getByRole("button", { name: "Create document" }));
+  await screen.findByText("Disk full");
+  assert.equal(
+    screen.getByLabelText("Document path").value,
+    "Notes/Plan.fountain",
+  );
+  failCreate = false;
+  fireEvent.click(screen.getByRole("button", { name: "Create document" }));
+  await waitFor(() => assert.ok(!screen.queryByLabelText("Document path")));
+  assert.deepEqual(
+    requests.filter((r) => r.path === "/api/files").map((r) => r.body.path),
+    ["Notes/Plan.fountain", "Notes/Plan.fountain"],
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: "New folder" })[0]);
+  assert.equal(screen.getByLabelText("Folder path").value, "");
+  fireEvent.click(screen.getByLabelText("Close dialog"));
+  fireEvent.click(screen.getAllByRole("button", { name: "New document" })[0]);
+  assert.equal(screen.getByLabelText("Document path").value, "");
+  assert.equal(screen.getByLabelText("File type").value, "fountain");
+});
+test("an upload rejects oversized media and updates only the document that started it", async () => {
+  const { uploadAttachment } = await import("../src/document-upload.ts");
+  const previousFetch = globalThis.fetch;
+  const uploads: string[] = [];
+  globalThis.fetch = async (input) => {
+    uploads.push(new URL(String(input), location.href).pathname);
+    return response({ path: "media/photo.png", usage: 42 });
+  };
+  try {
+    const ydoc = new Y.Doc();
+    ydoc.getText("content").insert(0, "Intro");
+    const events: string[] = [];
+    let update: ((doc: any) => any) | undefined;
+    const session = (id: string) =>
+      ({
+        id,
+        ydoc,
+        drafts: { flush: async () => events.push("flush") },
+        retain: () => () => events.push("release"),
+      }) as any;
+    const options = (id: string) => ({
+      doc: makeDoc("a") as any,
+      session: session(id),
+      editor: { current: null },
+      accessQuery: "",
+      setDoc: (next: any) => (update = next),
+      tell: (message: string) => events.push(message),
+    });
+    const image = (bytes: number, type = "image/png") =>
+      new File([new Uint8Array(bytes)], "photo[1].png", { type });
+    await uploadAttachment(image(1), options("b"));
+    await assert.rejects(
+      uploadAttachment(image(5e6 + 1), options("a")),
+      /Images must be 5 MB or smaller\./,
+    );
+    await assert.rejects(
+      uploadAttachment(image(20e6 + 1, "video/mp4"), options("a")),
+      /Videos must be 20 MB or smaller\./,
+    );
+    assert.deepEqual(uploads, []);
+    assert.deepEqual(events, []);
+    await uploadAttachment(image(1), options("a"));
+    assert.deepEqual(uploads, ["/api/docs/a/upload"]);
+    assert.equal(
+      ydoc.getText("content").toString(),
+      "Intro\n![photo1.png](media/photo.png)\n",
+    );
+    assert.deepEqual(events, ["flush", "Image saved to a.md.", "release"]);
+    const later = makeDoc("b");
+    assert.ok(update!(later) === later, "A later document keeps its usage");
+    assert.equal(update!(makeDoc("a")).usage, 42);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
 });
 test("rename owns a fresh input independent of the create form", () => {
   render(
