@@ -22,6 +22,8 @@ import { documentFormat, type DocumentFormat } from "./document-format";
 import type { DocumentSession } from "./document-session";
 import type { Config, Document } from "./model";
 
+type CreateKind = "file" | "folder";
+
 export function panelTitle(panel: string | null, createKind: CreateKind) {
   return {
     share: "Share document",
@@ -74,8 +76,6 @@ export function DocumentSharePanel({
     </>
   );
 }
-
-type CreateKind = "file" | "folder";
 
 // The create form outlives the dialog: its format choice persists, and its path
 // is cleared only when the form opens again or the entry is created.

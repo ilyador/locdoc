@@ -3,6 +3,12 @@ import type { LinkTarget } from "./editor-types";
 
 // Rendered document links open a preview instead of navigating the page.
 export function linkEvents(open: (target: LinkTarget) => void) {
+  const preview = (link: HTMLAnchorElement) =>
+    open({
+      url: link.dataset.linkUrl!,
+      label: link.dataset.linkLabel!,
+      rect: link.getBoundingClientRect(),
+    });
   return EditorView.domEventHandlers({
     mouseover(e) {
       const link = (e.target as Element).closest<HTMLAnchorElement>(
@@ -13,12 +19,7 @@ export function linkEvents(open: (target: LinkTarget) => void) {
         (e.relatedTarget instanceof Node && link.contains(e.relatedTarget))
       )
         return false;
-      const rect = link.getBoundingClientRect();
-      open({
-        url: link.dataset.linkUrl!,
-        label: link.dataset.linkLabel!,
-        rect,
-      });
+      preview(link);
       return false;
     },
     mousedown(e) {
@@ -26,12 +27,7 @@ export function linkEvents(open: (target: LinkTarget) => void) {
         "a[data-link-url]",
       );
       if (link) {
-        const rect = link.getBoundingClientRect();
-        open({
-          url: link.dataset.linkUrl!,
-          label: link.dataset.linkLabel!,
-          rect,
-        });
+        preview(link);
       }
       return false;
     },
@@ -48,12 +44,7 @@ export function linkEvents(open: (target: LinkTarget) => void) {
         "a[data-link-url]",
       );
       if (!link) return false;
-      const rect = link.getBoundingClientRect();
-      open({
-        url: link.dataset.linkUrl!,
-        label: link.dataset.linkLabel!,
-        rect,
-      });
+      preview(link);
       e.preventDefault();
       return true;
     },

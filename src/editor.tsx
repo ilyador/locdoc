@@ -131,51 +131,39 @@ export const MarkdownEditor = forwardRef<
     onLink,
     onInsertLink,
   };
-  useImperativeHandle(
-    ref,
-    () => ({
+  useImperativeHandle(ref, () => {
+    // Commands run only while this view accepts edits from this user.
+    const writable = () => {
+      const v = view.current;
+      return v && editable && !invalidText.current && !v.state.readOnly
+        ? v
+        : null;
+    };
+    return {
       formatFountain(kind) {
-        const v = view.current;
-        if (
-          !v ||
-          !editable ||
-          invalidText.current ||
-          v.state.readOnly ||
-          documentFormat(path) !== "fountain"
-        )
-          return;
-        formatFountainLine(v, kind);
+        const v = writable();
+        if (v && documentFormat(path) === "fountain")
+          formatFountainLine(v, kind);
       },
       insertLink(url, label, anchor) {
-        const v = view.current;
-        if (
-          !v ||
-          !editable ||
-          invalidText.current ||
-          v.state.readOnly ||
-          !anchor
-        )
-          return;
-        insertDocumentLink(v, ydoc, url, label, anchor);
+        const v = writable();
+        if (v && anchor) insertDocumentLink(v, ydoc, url, label, anchor);
       },
       toggleTasks() {
-        const v = view.current;
-        if (!v || !editable || invalidText.current || v.state.readOnly) return;
-        toggleTaskList(v);
+        const v = writable();
+        if (v) toggleTaskList(v);
       },
       insert(text) {
-        const v = view.current;
-        if (!v || !editable || invalidText.current || v.state.readOnly) return;
-        insertText(v, text);
+        const v = writable();
+        if (v) insertText(v, text);
       },
       insertTable(rows, columns) {
-        const v = view.current;
-        if (!v || !editable || invalidText.current || v.state.readOnly) return;
-        insertMarkdownTable(v, rows, columns);
+        const v = writable();
+        if (v) insertMarkdownTable(v, rows, columns);
       },
       wrap(before, after = "") {
-        const v = view.current;
-        if (!v || !editable || invalidText.current || v.state.readOnly) return;
+        const v = writable();
+        if (!v) return;
         if (
           before === after &&
           (before === "*" || before === "**" || before === "_")
@@ -210,9 +198,8 @@ export const MarkdownEditor = forwardRef<
       revealComment(id) {
         if (view.current) commentExtension.current?.reveal(view.current, id);
       },
-    }),
-    [ydoc, editable, path],
-  );
+    };
+  }, [ydoc, editable, path]);
   useLayoutEffect(() => {
     const text = ydoc.getText("content");
     const source = text.toString();
