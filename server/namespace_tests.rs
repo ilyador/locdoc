@@ -1714,3 +1714,45 @@ fn a_file_moved_into_a_hidden_folder_leaves_with_its_link() {
     assert!(s.doc(&page.id).is_err());
     assert!(shared_text(&s, "old-link").is_none());
 }
+
+#[test]
+fn a_busy_move_within_a_shared_folder_keeps_its_visitors() {
+    let (_directory, s) = store();
+    let page = s.create_document("Shared/page.md").unwrap();
+    let shared = folders::share_folder(
+        &s,
+        serde_json::from_value(json!({"path": "Shared", "permission": "view"})).unwrap(),
+    )
+    .unwrap();
+    let token = shared["shareUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap();
+    let visitor = Access {
+        token: Some(token.into()),
+        ..Access::default()
+    };
+    let room = s.room(&page).unwrap();
+    let busy = room.lock().unwrap();
+    fs::rename(
+        s.root.join("Shared/page.md"),
+        s.root.join("Shared/renamed.md"),
+    )
+    .unwrap();
+    s.discover_file_moves().unwrap();
+    let current = s.doc(&page.id).unwrap();
+    assert_eq!(current.path, "Shared/page.md");
+    assert_eq!(
+        s.found_elsewhere(&page.id).as_deref(),
+        Some("Shared/renamed.md")
+    );
+    assert!(s.access(&HeaderMap::new(), &current, &visitor).is_ok());
+    drop(busy);
+    s.discover_file_moves().unwrap();
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "Shared/renamed.md");
+    assert!(s.found_elsewhere(&page.id).is_none());
+    assert!(s.access(&HeaderMap::new(), &moved, &visitor).is_ok());
+}
