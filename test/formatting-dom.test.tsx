@@ -57,6 +57,73 @@ before(async () => {
 });
 after(() => dom.window.close());
 
+test("document teardown captures reading position before destroying its editor", async () => {
+  const previousStorage = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "localStorage",
+  );
+  const saved = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => saved.get(key) ?? null,
+      setItem: (key: string, value: string) => saved.set(key, value),
+    },
+  });
+  const ydoc = new Y.Doc();
+  const text = ydoc.getText("content");
+  const source = "A synthetic line of text.\n".repeat(20);
+  text.insert(0, source);
+  const awareness = new Awareness(ydoc);
+  const page = render(
+    <div className="writing-pane">
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        editable
+        id="scroll-teardown"
+        path="Note.md"
+        scrollKey="scroll-teardown"
+        onComment={() => {}}
+        onUpload={() => {}}
+      />
+    </div>,
+  );
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector<HTMLElement>(".cm-content")!,
+    )!;
+    let destroyed = false;
+    const destroy = view.destroy.bind(view);
+    view.destroy = () => {
+      destroyed = true;
+      destroy();
+    };
+    Object.defineProperty(view, "documentTop", { get: () => -1000 });
+    view.posAtCoords = () => {
+      assert.ok(!destroyed, "Capture must precede destroy");
+      return 17;
+    };
+    view.coordsAtPos = () => ({ top: -6, bottom: 14, left: 0, right: 0 });
+    page.unmount();
+    assert.ok(
+      saved.has("scroll-teardown"),
+      "Unmount must save the last reading position",
+    );
+    const reading = JSON.parse(saved.get("scroll-teardown")!);
+    assert.equal(reading.pos, 17);
+    assert.equal(reading.offset, 6);
+    assert.equal(text.toString(), source);
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+    if (previousStorage)
+      Object.defineProperty(globalThis, "localStorage", previousStorage);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
 function wordNode(content: HTMLElement) {
   const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT);
   while (walker.nextNode())

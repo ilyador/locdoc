@@ -135,6 +135,17 @@ function open(
     lineBlockAt(pos: number) {
       return { top: lineOf(text, pos) * LINE };
     },
+    // Model CodeMirror's public scroll effect: draw its target, then align it
+    // in the containing pane during the next measurement.
+    dispatch({ effects }: { effects: any }) {
+      const target = effects.value;
+      queue.push({
+        read: () => wrapped(target.range.head) + glyphInset - target.yMargin,
+        write: (delta: number) => {
+          pane.scrollTop += delta;
+        },
+      });
+    },
     requestMeasure(request: any) {
       queue = queue.filter(
         (queued) => !request.key || queued.key !== request.key,
@@ -227,6 +238,7 @@ test("the saved line stays at the top while CodeMirror measures taller text abov
   // Headings, wrapped paragraphs and media above the target get their real
   // heights only once drawn, after the first jump.
   for (let line = 40; line < 58; line++) reopened.heights[line] = 55;
+  for (const resize of resizes) resize();
   reopened.settle();
   assert.equal(reopened.drawn(58), -7);
   reopened.scroll(reopened.pane.scrollTop + 3 * LINE);
@@ -234,7 +246,7 @@ test("the saved line stays at the top while CodeMirror measures taller text abov
   assert.deepEqual(reading(document), { line: 61, offset: 7 });
 });
 
-test("restoration yields between CodeMirror measure passes and stops polling once stable", () => {
+test("restoration delegates one scroll to CodeMirror and then waits for layout changes", () => {
   localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
   const page = open("position");
   page.settle();
@@ -307,7 +319,16 @@ test("font readiness realigns after settling, while cancelled and detached views
   assert.equal(page.pane.scrollTop, landed);
   const pending = open("position");
   pending.frame();
-  assert.equal(animationFrames.size, 1);
+  assert.equal(
+    animationFrames.size,
+    0,
+    "Restoring does not start a polling loop",
+  );
+  for (const resize of resizes) resize();
+  assert.ok(
+    animationFrames.size > 0,
+    "Layout changes are coalesced into a frame",
+  );
   pending.stop();
   assert.equal(animationFrames.size, 0, "cleanup cancels the queued frame");
 });
@@ -447,6 +468,39 @@ test("page exit and hiding flush the latest position without waiting for a scrol
   page.pane.scrollTop = 0;
   window.dispatchEvent(new window.Event("pagehide"));
   assert.deepEqual(reading(page.text), { line: 45, offset: 10 });
+});
+
+test("touch scrolling immediately before switching documents saves the final position", () => {
+  const page = open("position");
+  page.pane.dispatchEvent(new window.Event("touchstart", { bubbles: true }));
+  page.pane.scrollTop = PADDING + 38 * LINE + 9;
+  page.pane.dispatchEvent(new window.Event("scroll"));
+  // iOS can defer CodeMirror's measurement until after navigation unmounts it.
+  page.stop();
+  assert.ok(
+    localStorage.getItem("position"),
+    "Closing must capture a pending scroll",
+  );
+  assert.deepEqual(reading(page.text), { line: 38, offset: 9 });
+});
+
+test("scrollend flushes a touch reading position before a delayed measurement", () => {
+  const page = open("position");
+  page.pane.scrollTop = PADDING + 20 * LINE + 3;
+  page.pane.dispatchEvent(new window.Event("scroll"));
+  page.pane.dispatchEvent(new window.Event("scrollend"));
+  assert.deepEqual(reading(page.text), { line: 20, offset: 3 });
+});
+
+test("restoration does not poll or correct the page on every animation frame", () => {
+  localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
+  const page = open("position");
+  page.frame();
+  assert.equal(
+    animationFrames.size,
+    0,
+    "CodeMirror should own the restore, without a second alignment loop",
+  );
 });
 
 test("the canvas above the first line is remembered as a negative offset", () => {

@@ -1468,7 +1468,12 @@ export const MarkdownEditor = forwardRef<
     };
     text.observe(inspect);
     callbacks.current.onChange?.(text.toString());
+    const stopRemembering = scrollKey
+      ? rememberEditorScroll(v, scrollKey, text)
+      : undefined;
     return () => {
+      // Capture while the view and its DOM geometry still exist.
+      stopRemembering?.();
       alive = false;
       text.unobserve(inspect);
       view.current = null;
@@ -1476,14 +1481,6 @@ export const MarkdownEditor = forwardRef<
       v.destroy();
       undo.destroy();
     };
-  }, [ydoc, provider, id]);
-  useLayoutEffect(() => {
-    if (view.current && scrollKey)
-      return rememberEditorScroll(
-        view.current,
-        scrollKey,
-        ydoc.getText("content"),
-      );
   }, [ydoc, provider, id, scrollKey]);
   useLayoutEffect(() => {
     const v = view.current;

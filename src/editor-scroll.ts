@@ -1,4 +1,4 @@
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 
 // This is browser reading state, never document content or collaborative state.
@@ -87,7 +87,7 @@ export function rememberEditorScroll(
     });
   };
   const keep = (value: string) => {
-    if (!readerControlled) return;
+    if (!active || !readerControlled) return;
     latest = value;
     dirty = true;
   };
@@ -103,7 +103,13 @@ export function rememberEditorScroll(
   const recording = {};
   const scroll = () => {
     if (readerControlled)
-      view.requestMeasure({ key: recording, read: position, write: keep });
+      view.requestMeasure({
+        key: recording,
+        read: () => (active ? position() : null),
+        write: (value) => {
+          if (value !== null) keep(value);
+        },
+      });
     clearTimeout(timer);
     timer = setTimeout(flush, 500);
   };
@@ -127,10 +133,8 @@ export function rememberEditorScroll(
     for (const event of inputs)
       window.removeEventListener(event, stopRestoring, true);
   };
-  // The pane, not CodeMirror's own scroller, scrolls. Lines above the target
-  // keep changing height while CodeMirror measures them. Wait for actual
-  // animation frames: requestMeasure calls made inside its write callback can
-  // otherwise run repeatedly in the same CodeMirror measurement loop.
+  // Restore text positions through CodeMirror; the outer pane remains the only
+  // scrolling surface. Reapply only when layout changes, never by polling.
   if (saved !== null) {
     for (const event of inputs)
       window.addEventListener(event, stopRestoring, {
@@ -147,13 +151,6 @@ export function rememberEditorScroll(
         },
       });
     } else {
-      let measured = false;
-      let frames = 0;
-      let still = 0;
-      const alignment = {};
-      // Canvas offsets were measured from the line box, not its glyphs. Their
-      // tops can differ by a few pixels, which otherwise accumulates on reload.
-      // Earlier records did not identify the canvas case explicitly.
       const canvas = saved.canvas ?? (saved.pos === 0 && saved.offset <= 0);
       const target = () => {
         let pos = saved.pos;
@@ -168,45 +165,27 @@ export function rememberEditorScroll(
         }
         return Math.min(pos, view.state.doc.length);
       };
-      const align = () => {
-        if (!active || readerControlled || frame !== undefined || measured)
-          return;
-        measured = true;
-        view.requestMeasure({
-          key: alignment,
-          read: () => {
-            if (!active || readerControlled) return 0;
-            const pos = target();
-            const line =
-              (!canvas ? view.coordsAtPos(pos, 1)?.top : undefined) ??
-              view.documentTop + view.lineBlockAt(pos).top;
-            return line + saved.offset - pane.getBoundingClientRect().top;
-          },
-          write: (delta) => {
-            measured = false;
-            if (!active || readerControlled) return;
-            const before = pane.scrollTop;
-            if (Math.abs(delta) >= 1) pane.scrollTop = before + delta;
-            still = Math.abs(pane.scrollTop - before) < 1 ? still + 1 : 0;
-            if (++frames < 120 && still < 10) schedule();
-          },
+      const restore = () => {
+        if (!active || readerControlled) return;
+        // Let CodeMirror draw the target before scrolling its ancestors. A
+        // separate pixel-alignment loop fights its height/viewport corrections.
+        const inset = canvas
+          ? (view.coordsAtPos(0, 1)?.top ?? view.documentTop) - view.documentTop
+          : 0;
+        view.dispatch({
+          effects: EditorView.scrollIntoView(target(), {
+            y: "start",
+            yMargin: inset - saved.offset,
+            xMargin: 0,
+          }),
         });
       };
-      const schedule = () => {
-        if (!active || readerControlled || frame !== undefined || measured)
-          return;
+      const realign = () => {
+        if (!active || readerControlled || frame !== undefined) return;
         frame = window.requestAnimationFrame(() => {
           frame = undefined;
-          align();
+          restore();
         });
-      };
-      // Once settled, do no work until layout changes. Fonts, lazy media and
-      // newly measured wrapped text may arrive later than the first frames.
-      // Retain the anchor until reader input, so those changes cannot replace
-      // it with an intermediate scroll position or move the page after reload.
-      const realign = () => {
-        frames = still = 0;
-        align();
       };
       if (typeof ResizeObserver !== "undefined") {
         resize = new ResizeObserver(realign);
@@ -216,17 +195,20 @@ export function rememberEditorScroll(
       fontChanged = realign;
       document.fonts?.addEventListener("loadingdone", fontChanged);
       void document.fonts?.ready.then(realign);
-      align();
+      restore();
     }
   }
   pane.addEventListener("scroll", scroll, { passive: true });
+  pane.addEventListener("scrollend", leaving);
   window.addEventListener("pagehide", leaving);
   document.addEventListener("visibilitychange", visibility);
   return () => {
+    if (!active) return;
+    leaving();
     active = false;
-    flush();
     stopRestoring();
     pane.removeEventListener("scroll", scroll);
+    pane.removeEventListener("scrollend", leaving);
     window.removeEventListener("pagehide", leaving);
     document.removeEventListener("visibilitychange", visibility);
   };

@@ -861,6 +861,7 @@ button:hover {
   flex: 1;
   overflow-y: auto;
   overscroll-behavior-y: none;
+  overflow-anchor: none;
   /* CodeMirror corrects estimated line heights while scrolling. Animate neither
      those corrections nor native trackpad momentum. */
   scroll-behavior: auto;
