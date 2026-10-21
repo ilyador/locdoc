@@ -682,19 +682,21 @@ impl Store {
             .into_iter()
             .chain(moves.iter().map(|change| change.id.clone()))
             .collect();
-        let mut retiring = Vec::new();
-        let mut held = HashSet::new();
-        if !missing.is_empty() {
-            if !complete {
-                sooner(&mut retry, INCOMPLETE_RETRY);
-                held = missing.iter().map(|missing| missing.id.clone()).collect();
-            } else if pass == Pass::Settled {
-                retiring = missing;
-            } else {
-                sooner(&mut retry, RETRY);
-            }
+        // An unlisted folder can only hide a file whose evidence a later walk
+        // could find. Without evidence, waiting would keep a removed
+        // document's links alive for whatever file next takes its name.
+        let (waiting, mut retiring): (Vec<_>, Vec<_>) = missing
+            .into_iter()
+            .partition(|missing| !complete && missing.evidence.is_some());
+        if !waiting.is_empty() {
+            sooner(&mut retry, INCOMPLETE_RETRY);
         }
-        self.reconciliation.hold(held);
+        if pass != Pass::Settled && !retiring.is_empty() {
+            sooner(&mut retry, RETRY);
+            retiring.clear();
+        }
+        self.reconciliation
+            .hold(waiting.into_iter().map(|missing| missing.id).collect());
         // Map before room, and never wait for a room: a busy one defers.
         let rooms: Vec<(String, Arc<Mutex<Room>>)> = {
             let cached = self.rooms.lock().unwrap();

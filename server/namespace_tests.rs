@@ -1517,3 +1517,33 @@ fn a_link_never_opens_a_document_as_it_was_when_the_request_resolved_it() {
     };
     assert!(document_payload(&s, &HeaderMap::new(), &resolved, &link).is_err());
 }
+
+#[test]
+fn an_unreadable_folder_keeps_no_link_alive_for_a_file_no_walk_can_find() {
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    share(&s, &removed.id);
+    // As on a filesystem without birth times: nothing identifies the file.
+    s.db.lock()
+        .unwrap()
+        .execute("DELETE FROM document_identities WHERE doc=?", [&removed.id])
+        .unwrap();
+    s.create_folder("Locked").unwrap();
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    let locked = s.root.join("Locked");
+    let unreadable = move |path: &Path| {
+        if path == locked {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        Ok(())
+    };
+    walking(unreadable.clone(), || s.retire_missing_documents()).unwrap();
+    // Otherwise a new private file at its name would reopen the old link.
+    fs::write(s.root.join("removed.md"), "New private notes\n").unwrap();
+    walking(unreadable, || s.discover_file_moves()).unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+    let notes = s.index_document("removed.md").unwrap();
+    assert_ne!(notes.id, removed.id);
+    assert_eq!(notes.permission, "private");
+}
