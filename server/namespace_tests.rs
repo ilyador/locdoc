@@ -1296,3 +1296,81 @@ fn a_waiting_room_cannot_make_an_unreadable_tree_rescan_every_second() {
     assert!(s.doc(&a.id).is_err());
     assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
 }
+
+#[test]
+fn a_swap_with_a_busy_room_waits_for_both_documents() {
+    let (_directory, s, a, b) = swap_fixture();
+    let room = s.room(&a).unwrap();
+    swap(&s.root);
+    let busy = room.lock().unwrap();
+    s.discover_file_moves().unwrap();
+    // A cannot move yet, so B cannot take A's name either.
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+    drop(busy);
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&a.id).unwrap().path, "q.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+}
+
+#[test]
+fn a_root_replaced_during_the_walk_retires_nothing() {
+    let (directory, s) = store();
+    let kept = s.create_document("kept.md").unwrap();
+    let removed = s.create_document("removed.md").unwrap();
+    share(&s, &kept.id);
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    let root = s.root.clone();
+    let unmounted = directory.path().join("unmounted");
+    let replaced = unmounted.clone();
+    walking(
+        move |path| {
+            if path == root && !replaced.exists() {
+                fs::rename(&root, &replaced)?;
+                fs::create_dir(&root)?;
+            }
+            Ok(())
+        },
+        || s.retire_missing_documents(),
+    )
+    .unwrap();
+    assert!(s.doc(&removed.id).is_ok());
+    assert_eq!(s.doc(&kept.id).unwrap().token.as_deref(), Some("old-link"));
+    fs::remove_dir(&s.root).unwrap();
+    fs::rename(unmounted, &s.root).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    assert_eq!(s.doc(&kept.id).unwrap().token.as_deref(), Some("old-link"));
+}
+
+#[test]
+fn a_file_moved_over_another_document_keeps_its_own_document() {
+    let (_directory, s, a, b) = swap_fixture();
+    // A's file replaces B's file under B's name.
+    fs::rename(s.root.join("p.md"), s.root.join("r.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    // Until a settled pass B keeps its name, so A waits too.
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&b.id).is_err());
+    let moved = s.doc(&a.id).unwrap();
+    assert_eq!(moved.path, "r.md");
+    assert_eq!(moved.token.as_deref(), Some("old-link"));
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+}
