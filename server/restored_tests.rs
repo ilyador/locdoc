@@ -547,3 +547,43 @@ fn token(s: &Store, document: &Document) -> Option<String> {
         })
         .unwrap()
 }
+
+#[test]
+fn normal_startup_refuses_an_unfinished_restore_of_a_backup_without_root_identity() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (directory, s) = store();
+    let a = written(&s, "p.md", "Shared text of A\n");
+    share(&s, &a.id);
+    s.create_folder("Locked").unwrap();
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |root| {
+        fs::rename(root.join("p.md"), root.join("q.md")).unwrap();
+    });
+    // Older backups hold no root.identity, which normal startup would
+    // otherwise record for whatever folder it finds.
+    fs::remove_file(backup.join("state/root.identity")).unwrap();
+    let (root, data) = put_in_place(s, &backup);
+    let locked = root.join("Locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let s = Store::open_restored(root.clone(), data.clone(), "http://localhost".into()).unwrap();
+    let report = restore(&s);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(report.unwrap()["completed"], false);
+    drop(s);
+    match Store::open(root.clone(), data.clone(), "http://localhost".into()) {
+        Err(error) => assert!(error.1.contains("locdoc --restored"), "{}", error.1),
+        Ok(_) => panic!("Normal startup accepted an unfinished restore"),
+    }
+    let s = Store::open_restored(root.clone(), data.clone(), "http://localhost".into()).unwrap();
+    assert_eq!(restore(&s).unwrap()["completed"], true);
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    assert_eq!(s.doc(&a.id).unwrap().path, "q.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+}

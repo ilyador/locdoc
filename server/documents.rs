@@ -30,6 +30,14 @@ fn root_unavailable() -> ApiError {
         "The documents folder is unavailable or was replaced. Restore the configured folder before continuing.".into())
 }
 
+/// What root.identity holds from the start of a restore pass until one
+/// completes. No folder has inode 0, so normal startup refuses the restored
+/// folder even when the backup had no root.identity.
+const RESTORING: RootIdentity = RootIdentity {
+    device: 0,
+    inode: 0,
+};
+
 /// First installation may create a folder; reopening an existing workspace
 /// must never turn a missing mount into an empty replacement workspace.
 pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIdentity)> {
@@ -53,6 +61,12 @@ pub(super) fn prepare_root(root: &Path, data: &Path) -> Result<(PathBuf, RootIde
         Ok(bytes) => {
             let previous: RootIdentity =
                 serde_json::from_slice(&bytes).map_err(|_| root_unavailable())?;
+            if previous == RESTORING {
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "A restore pass has not completed. Run locdoc --restored again.".into(),
+                ));
+            }
             if previous != identity {
                 return Err(root_unavailable());
             }
@@ -77,6 +91,12 @@ pub(super) fn restored_root(root: &Path) -> Result<(PathBuf, RootIdentity)> {
     let root = fs::canonicalize(root).map_err(missing)?;
     let identity = RootIdentity::read(&root).map_err(missing)?;
     Ok((root, identity))
+}
+
+/// Keep normal startup refusing the documents folder until a restore pass
+/// completes and records it.
+pub(super) fn hold_root(data: &Path) -> Result<()> {
+    record_root(data, &RESTORING)
 }
 
 pub(super) fn record_root(data: &Path, identity: &RootIdentity) -> Result<()> {

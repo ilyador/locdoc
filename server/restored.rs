@@ -10,6 +10,9 @@ pub(super) const REPORT: &str = "restore-report.json";
 /// Run the restore pass, record the restored folder once it completes and
 /// write the owner's report into the state folder.
 pub(super) fn restore(store: &Store) -> Result<Value> {
+    // A backup without root.identity would otherwise let normal startup
+    // accept the folder before this pass completes.
+    documents::hold_root(&store.data)?;
     let outcome = store.restore_documents()?;
     let mut problem = outcome.problem;
     if problem.is_none()
