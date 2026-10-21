@@ -635,10 +635,14 @@ fn copies_aliases_and_reused_inodes_never_steal_document_links() {
     let copy = s.index_document("copy.md").unwrap();
     assert_ne!(copy.id, d.id);
     assert_eq!(copy.permission, "private");
+    // A second name for d's file is neither d nor a separate document whose
+    // edits would land in d's file.
     fs::hard_link(s.root.join(&d.path), s.root.join("alias.md")).unwrap();
-    let alias = s.index_document("alias.md").unwrap();
-    assert_ne!(alias.id, d.id);
-    assert_eq!(alias.permission, "private");
+    assert_eq!(
+        s.index_document("alias.md").unwrap_err().0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(s.index_document(&d.path).unwrap().id, d.id);
     fs::remove_file(s.root.join("alias.md")).unwrap();
     s.index_document(&d.path).unwrap();
     s.db.lock()
@@ -1372,5 +1376,97 @@ fn a_file_moved_over_another_document_keeps_its_own_document() {
     assert_eq!(
         shared_text(&s, "old-link").as_deref(),
         Some("Shared text of A\n")
+    );
+}
+
+#[test]
+fn a_hard_link_over_a_shared_name_never_serves_another_documents_file() {
+    let (_directory, s, a, b) = swap_fixture();
+    // `ln -f r.md p.md`, or a deduplicator merging two files: A's own file
+    // is gone and its name now links to B's private file.
+    fs::remove_file(s.root.join("p.md")).unwrap();
+    fs::hard_link(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+    // B keeps saving into its own file while the second name exists.
+    let room = s.room(&b).unwrap();
+    let frame = append_frame(&room, "Private edit of B\n");
+    process_frame(&s, &b, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    assert!(s.persist(&b, &mut room.lock().unwrap()).unwrap());
+    assert!(
+        fs::read_to_string(s.root.join("r.md"))
+            .unwrap()
+            .contains("Private edit of B")
+    );
+    assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+}
+
+#[test]
+fn a_private_name_linked_to_a_shared_file_never_writes_into_it() {
+    let (_directory, s, a, b) = swap_fixture();
+    // B's name now links to A's shared file. Edits accepted in B must not
+    // reach that file, where A's link would publish them.
+    fs::remove_file(s.root.join("r.md")).unwrap();
+    fs::hard_link(s.root.join("p.md"), s.root.join("r.md")).unwrap();
+    let room = s.room(&b).unwrap();
+    let frame = append_frame(&room, "Private edit of B\n");
+    process_frame(&s, &b, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    for _ in 0..2 {
+        s.discover_file_moves().unwrap();
+        let _ = s.persist(&b, &mut room.lock().unwrap());
+        assert_eq!(
+            fs::read_to_string(s.root.join("p.md")).unwrap(),
+            "Shared text of A\n"
+        );
+        assert_eq!(
+            shared_text(&s, "old-link").as_deref(),
+            Some("Shared text of A\n")
+        );
+    }
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&b.id).is_err());
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Shared text of A\n"
+    );
+    // B's accepted edit stays recoverable by the owner.
+    let recovery: String = s.db.lock().unwrap().query_row(
+        "SELECT content FROM revisions WHERE doc=? AND kind='recovery' ORDER BY rowid DESC LIMIT 1",
+        [&b.id], |row| row.get(0),
+    ).unwrap();
+    assert!(recovery.contains("Private edit of B"));
+}
+
+#[test]
+fn two_names_linked_to_one_new_file_belong_to_neither_document() {
+    let (_directory, s, a, b) = swap_fixture();
+    // Both files are replaced by names for one new file. Neither document
+    // can tell whose it is, and sharing it would publish B's edits on A's link.
+    let new = s.root.join("new.tmp");
+    fs::write(&new, "Notes in a new file\n").unwrap();
+    for name in ["p.md", "r.md"] {
+        fs::remove_file(s.root.join(name)).unwrap();
+        fs::hard_link(&new, s.root.join(name)).unwrap();
+    }
+    fs::remove_file(&new).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert!(s.doc(&b.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+    assert_eq!(
+        fs::read_to_string(s.root.join("r.md")).unwrap(),
+        "Notes in a new file\n"
     );
 }

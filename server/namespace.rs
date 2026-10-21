@@ -16,13 +16,14 @@ const RETRY: Duration = Duration::from_secs(1);
 const INCOMPLETE_RETRY: Duration = Duration::from_secs(30);
 
 /// Evidence that a directory entry is one particular file: device, inode and
-/// birth time. An inode alone can be reused after deletion; hard links and
-/// files without a birth time carry no evidence.
+/// birth time. An inode alone can be reused after deletion; files without a
+/// birth time carry no evidence. A hard link is another name for the same
+/// file, so it still shows whose file it is, but not where that file moved.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Identity(String);
 impl Identity {
     pub(super) fn of(metadata: &fs::Metadata) -> Option<Self> {
-        (metadata.is_file() && metadata.nlink() == 1).then_some(())?;
+        metadata.is_file().then_some(())?;
         Some(Self(format!(
             "{}:{}:{}",
             metadata.dev(),
@@ -185,10 +186,12 @@ struct Plan<E> {
 /// Decide where every tracked document is from evidence alone, never from
 /// names or text. Recorded evidence found at one path places its document
 /// there, even over another document's row. A path keeps its document only
-/// when its file carries evidence no other document has recorded, or none:
-/// that is how atomic saves keep their identity. Evidence recorded for two
-/// documents, copies, hard links and files seen at two paths never transfer
-/// a document. `pending` is evidence of documents whose rename is pending.
+/// when its file carries evidence that no other document has recorded and
+/// no other document's path shows, or none: that is how atomic saves keep
+/// their identity. Evidence recorded for two documents, copies, hard links
+/// and files seen at two paths never transfer a document. `pending` is
+/// evidence of documents whose rename is pending; `files` holds only files
+/// no other name links to.
 fn classify<E: Clone + Eq + Hash>(
     tracked: &[Tracked<E>],
     pending: &[(&str, &E)],
@@ -213,6 +216,13 @@ fn classify<E: Clone + Eq + Hash>(
     for (path, evidence) in files {
         if let Some(evidence) = evidence {
             found.entry(evidence).or_default().push(path);
+        }
+    }
+    // One file linked at two documents' names is an atomic save of neither.
+    let mut shown: HashMap<&E, usize> = HashMap::new();
+    for document in tracked {
+        if let Seen::File(Some(evidence)) = &document.seen {
+            *shown.entry(evidence).or_default() += 1;
         }
     }
     let mut plan = Plan {
@@ -251,7 +261,8 @@ fn classify<E: Clone + Eq + Hash>(
         }
         match &document.seen {
             Seen::File(Some(evidence))
-                if owner.get(evidence).is_some_and(|id| *id != document.id) =>
+                if owner.get(evidence).is_some_and(|id| *id != document.id)
+                    || (own != Some(evidence) && shown[evidence] > 1) =>
             {
                 plan.missing.push(Missing {
                     id: document.id.clone(),
@@ -344,7 +355,8 @@ impl Store {
             self.reconcile(Pass::Discover)?;
             evidence = Identity::of(&fs::symlink_metadata(&full)?);
             if !self.assigned(&path, evidence.as_ref())? {
-                // A busy room or a move in progress; a later pass decides.
+                // A busy room or a move in progress; a later pass decides. A
+                // second name for a document's file stays unlisted.
                 self.reconciliation.after(RETRY);
                 return Err(ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -474,7 +486,7 @@ impl Store {
         if !changed {
             return Ok(HashSet::new());
         }
-        let (mut files, complete) = self.walk();
+        let (mut files, mut linked, complete) = self.walk();
         for document in &mut tracked {
             let walked = files.get(&document.path).cloned();
             document.seen = match (&document.seen, walked) {
@@ -484,9 +496,13 @@ impl Store {
                 // An unlisted folder, or a move during the walk. Only a second
                 // look at the same file counts as seeing it.
                 (seen, None) => {
-                    if self.inspect(&document.path) == *seen {
+                    let (again, aliased) = self.observe(&document.path);
+                    if again == *seen {
                         if let Seen::File(evidence) = seen {
                             files.insert(document.path.clone(), evidence.clone());
+                            if aliased {
+                                linked.insert(document.path.clone());
+                            }
                         }
                         seen.clone()
                     } else {
@@ -495,6 +511,9 @@ impl Store {
                 }
             };
         }
+        // A linked file still tells each document whose file is at its path,
+        // but not which of its names a moved document now has.
+        files.retain(|path, _| !linked.contains(path));
         let held: Vec<(&str, &Identity)> = pending
             .iter()
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
@@ -509,8 +528,12 @@ impl Store {
         {
             // A file moved between folders during the walk is in neither
             // listing. Retire only what a second complete walk cannot find.
-            let (again, still_complete) = self.walk();
-            let present: HashSet<&Identity> = again.values().flatten().collect();
+            let (again, again_linked, still_complete) = self.walk();
+            let present: HashSet<&Identity> = again
+                .iter()
+                .filter(|(path, _)| !again_linked.contains(*path))
+                .filter_map(|(_, evidence)| evidence.as_ref())
+                .collect();
             plan.missing.retain(|missing| {
                 let gone = missing
                     .evidence
@@ -568,21 +591,30 @@ impl Store {
 
     /// What a tracked path shows. Inaccessibility is never evidence of a move.
     fn inspect(&self, path: &str) -> Seen<Identity> {
+        self.observe(path).0
+    }
+
+    /// What a path shows, and whether other names link to its file.
+    fn observe(&self, path: &str) -> (Seen<Identity>, bool) {
         let Ok(full) = self.safe(path, false) else {
-            return Seen::Unknown;
+            return (Seen::Unknown, false);
         };
         match fs::symlink_metadata(full) {
-            Ok(metadata) if metadata.is_file() => Seen::File(Identity::of(&metadata)),
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Seen::Unknown,
-            _ => Seen::Absent,
+            Ok(metadata) if metadata.is_file() => {
+                (Seen::File(Identity::of(&metadata)), metadata.nlink() > 1)
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => (Seen::Unknown, false),
+            _ => (Seen::Absent, false),
         }
     }
 
     /// Walk the tree once, never following symlinks or entering dot folders.
     /// An entry that vanishes is skipped; any other error makes the
-    /// observation incomplete rather than failing the pass.
-    fn walk(&self) -> (HashMap<String, Option<Identity>>, bool) {
+    /// observation incomplete rather than failing the pass. Also returns the
+    /// files that other names link to.
+    fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, bool) {
         let mut files = HashMap::new();
+        let mut linked = HashSet::new();
         let mut complete = true;
         let mut folders = vec![self.root.clone()];
         while let Some(folder) = folders.pop() {
@@ -613,6 +645,9 @@ impl Store {
                             && format(relative).is_some()
                         {
                             files.insert(relative.to_owned(), Identity::of(&metadata));
+                            if metadata.nlink() > 1 {
+                                linked.insert(relative.to_owned());
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -621,7 +656,7 @@ impl Store {
                 }
             }
         }
-        (files, complete)
+        (files, linked, complete)
     }
 
     /// Apply a plan in one transaction. A busy room, a failed preparation or
@@ -722,7 +757,8 @@ impl Store {
         });
         // Recheck evidence right before committing it.
         moves.retain(|change| {
-            let current = self.inspect(&change.to) == Seen::File(Some(change.evidence.clone()));
+            let current =
+                self.observe(&change.to) == (Seen::File(Some(change.evidence.clone())), false);
             deferred |= !current;
             current
         });
