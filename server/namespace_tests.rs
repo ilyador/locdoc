@@ -2036,3 +2036,67 @@ fn an_atomic_save_keeps_its_document_after_its_file_came_back() {
         Some("Saved by a rename\n")
     );
 }
+
+/// Log lines written while a test runs on this thread.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl Logs {
+    fn capture<T>(&self, body: impl FnOnce() -> T) -> T {
+        let logs = self.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || logs.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, body)
+    }
+    fn count(&self, text: &str) -> usize {
+        String::from_utf8_lossy(&self.0.lock().unwrap())
+            .matches(text)
+            .count()
+    }
+}
+
+#[test]
+fn an_unreadable_subfolder_never_hides_the_rest_of_the_listing() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    s.create_document("page.md").unwrap();
+    s.create_document("Locked/hidden.md").unwrap();
+    let locked = s.root.join("Locked");
+    let list = || -> Result<Vec<String>> {
+        let mut entries = Vec::new();
+        scan(&s, &s.root, &mut entries)?;
+        Ok(entries.into_iter().map(|entry| entry.path).collect())
+    };
+    let logs = Logs::default();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let polls = logs.capture(|| (0..3).map(|_| list()).collect::<Vec<_>>());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    for listed in polls {
+        assert_eq!(listed.unwrap(), ["Locked", "page.md"]);
+    }
+    assert_eq!(
+        logs.count("listing leaves out"),
+        1,
+        "One unreadable folder is logged once, not on every poll"
+    );
+    assert_eq!(list().unwrap(), ["Locked", "Locked/hidden.md", "page.md"]);
+    // Once read again, a later failure is reported again.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let listed = logs.capture(list);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(listed.unwrap(), ["Locked", "page.md"]);
+    assert_eq!(logs.count("listing leaves out"), 2);
+}

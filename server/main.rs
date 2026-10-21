@@ -176,6 +176,8 @@ struct Store {
     rates: Mutex<HashMap<String, (i64, u32)>>,
     document_files: Mutex<()>,
     reconciliation: namespace::Requests,
+    /// Folders the last listing could not read in full, already logged.
+    unlisted: Mutex<HashSet<PathBuf>>,
 }
 // Blocking filesystem, SQLite and diff work never occupies Tokio's network
 // workers. Four bounded jobs prevent rewrite storms from exhausting resources.
@@ -322,6 +324,7 @@ impl Store {
             rates: Mutex::new(HashMap::new()),
             document_files: Mutex::new(()),
             reconciliation: namespace::Requests::default(),
+            unlisted: Mutex::new(HashSet::new()),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(25))
                 .build()
@@ -532,6 +535,25 @@ impl Store {
             .map(|m| m.len() as usize)
             .sum()
     }
+    /// Whether a listing read a folder in full. One it could not is logged
+    /// once, not on every poll, until a listing reads it again.
+    fn listed(&self, folder: &Path, unreadable: Option<std::io::Error>) {
+        let mut logged = self.unlisted.lock().unwrap();
+        match unreadable {
+            None => {
+                logged.remove(folder);
+            }
+            Some(error) => {
+                if logged.insert(folder.to_owned()) {
+                    let relative = folder.strip_prefix(&self.root).unwrap_or(folder);
+                    tracing::warn!(
+                        folder = %relative.display(),
+                        "listing leaves out what it cannot read: {error}"
+                    );
+                }
+            }
+        }
+    }
     fn epoch(&self, id: &str) -> Result<String> {
         Ok(self.db.lock().unwrap().query_row(
             "SELECT collaboration_epoch FROM docs WHERE id=? AND active=1",
@@ -721,21 +743,55 @@ struct Entry {
     title: String,
     url: Option<String>,
 }
+/// List a folder and its descendants. A subfolder or entry that cannot be
+/// read is left out, logged once until it can be read again, rather than
+/// failing every poll of the whole listing.
 fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
-    let mut children = fs::read_dir(dir)?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let listing = fs::read_dir(dir)?;
+    scan_folder(s, dir, listing, entries)
+}
+fn scan_folder(
+    s: &Store,
+    dir: &Path,
+    listing: fs::ReadDir,
+    entries: &mut Vec<Entry>,
+) -> Result<()> {
+    let mut unreadable = None;
+    let mut children = Vec::new();
+    for child in listing {
+        match child {
+            Ok(child) => children.push(child),
+            Err(error) => {
+                unreadable.get_or_insert(error);
+            }
+        }
+    }
     children.sort_by_key(|e| e.file_name());
     for e in children {
         let name = e.file_name();
-        if name.to_string_lossy().starts_with('.') || e.file_type()?.is_symlink() {
+        if name.to_string_lossy().starts_with('.') {
             continue;
         }
         let p = e.path();
+        // An entry removed since it was listed is simply gone.
+        let metadata = match fs::symlink_metadata(&p) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    unreadable.get_or_insert(error);
+                }
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         let rel = p
             .strip_prefix(&s.root)
             .unwrap()
             .to_string_lossy()
             .to_string();
-        if p.is_dir() {
+        if metadata.is_dir() {
             entries.push(Entry {
                 path: rel,
                 kind: "folder",
@@ -745,14 +801,24 @@ fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
                 title: name.to_string_lossy().into_owned(),
                 url: None,
             });
-            scan(s, &p, entries)?;
-        } else if documents::format(&rel).is_some() {
+            match fs::read_dir(&p) {
+                Ok(listing) => scan_folder(s, &p, listing, entries)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => s.listed(&p, Some(error)),
+            }
+        } else if metadata.is_file() && documents::format(&rel).is_some() {
             let d = match s.index_document(&rel) {
                 // A file still being matched to its document is listed once a
-                // pass decides; it must not hide the rest of the workspace.
+                // pass decides. One removed or replaced by a link meanwhile,
+                // or with a name no document path can have, is left out.
+                // None of them may hide the rest of the workspace.
                 Err(error)
-                    if error.0 == StatusCode::SERVICE_UNAVAILABLE
-                        && s.root_identity.matches(&s.root) =>
+                    if (error.0 == StatusCode::SERVICE_UNAVAILABLE
+                        && s.root_identity.matches(&s.root))
+                        || matches!(
+                            error.0,
+                            StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST
+                        ) =>
                 {
                     continue;
                 }
@@ -763,7 +829,7 @@ fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
                 kind: "file",
                 id: Some(d.id.clone()),
                 shared: d.permission != "private",
-                modified: fs::metadata(&p)?
+                modified: metadata
                     .modified()
                     .ok()
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
@@ -782,6 +848,7 @@ fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
             });
         }
     }
+    s.listed(dir, unreadable);
     Ok(())
 }
 async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Result<Json<Value>> {
