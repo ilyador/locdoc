@@ -113,6 +113,7 @@ async function connect(scopes, clientName) {
   }));
   assert.equal(registration.status, 201);
   const client = registration.body.client_id;
+  assert.match(client, /^mcp_c_[\w-]+\.[\w-]{43}$/, 'Registration returns a signed client ID');
   const verifier = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   const state = randomBytes(16).toString('hex');
@@ -127,7 +128,7 @@ async function connect(scopes, clientName) {
   assert.equal(consentUrl.pathname, '/');
   assert.equal(consentUrl.searchParams.has('code'), false, 'Authorization is never auto-approved');
   const pending = consentUrl.searchParams.get('mcp_authorize');
-  assert.ok(pending);
+  assert.match(pending, /^mcp_q_[\w-]+\.[\w-]{43}$/, 'Consent receives a signed request handle');
   const previewPath = `/api/mcp/authorize?${new URLSearchParams({ request: pending })}`;
   assert.equal((await request(previewPath)).status, 403, 'Only the owner may inspect consent');
   const preview = await request(previewPath, { headers: { Authorization: `Bearer ${ownerSession}` } });
@@ -660,4 +661,35 @@ test('refresh rotates bearer credentials and both OAuth and owner revocation sto
   assert.equal((await request(`/api/mcp/connections/${id}/revoke`, json({}))).status, 403);
   assert.equal((await request(`/api/mcp/connections/${id}/revoke`, json({}, ownerSession))).status, 200);
   assert.equal((await rpc(readConnection, 'tools/list', {})).status, 401);
+});
+
+test('an authorization flood cannot refuse or alter a later owner-approved connection', { timeout: 30_000 }, async () => {
+  const registration = await request('/oauth/register', json({ client_name: 'Flooding client', redirect_uris: [callback] }));
+  assert.equal(registration.status, 201);
+  const query = new URLSearchParams({
+    client_id: registration.body.client_id, redirect_uri: callback, response_type: 'code', scope: 'locdoc:read',
+    resource, code_challenge: createHash('sha256').update('flood').digest('base64url'), code_challenge_method: 'S256',
+  });
+  let pending;
+  // Each forwarded address has its own rate budget, as separate attackers would.
+  for (let index = 0; index < 300; index++) {
+    const flood = await request(`/oauth/authorize?${query}`, {
+      headers: { 'X-Forwarded-For': `198.18.${index >> 8}.${index & 255}` },
+    });
+    assert.ok([302, 303].includes(flood.status), 'Unapproved requests never exhaust authorization capacity');
+    pending = new URL(flood.headers.get('location')).searchParams.get('mcp_authorize');
+  }
+  const [body, mac] = pending.split('.');
+  const claims = JSON.parse(Buffer.from(body.slice('mcp_q_'.length), 'base64url').toString());
+  assert.equal(claims.scope, 'locdoc:read');
+  const scope = 'locdoc:read locdoc:write locdoc:share';
+  const escalated = `mcp_q_${Buffer.from(JSON.stringify({ ...claims, scope })).toString('base64url')}.${mac}`;
+  const preview = await request(`/api/mcp/authorize?${new URLSearchParams({ request: escalated })}`, { headers: ownerHeaders() });
+  assert.equal(preview.status, 400, 'A modified request cannot reach consent');
+  assert.equal((await request('/api/mcp/authorize', json({ request: escalated, allow: true }, ownerSession))).status, 400);
+  const connection = await connect('locdoc:read', 'Fixture client after a flood');
+  assert.equal((await rpc(connection, 'tools/list', {})).status, 200);
+  const revoked = await request('/oauth/revoke', form({ client_id: connection.client_id, token: connection.refresh_token }));
+  assert.equal(revoked.status, 200);
+  assert.equal((await rpc(connection, 'tools/list', {})).status, 401);
 });

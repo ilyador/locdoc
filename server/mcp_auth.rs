@@ -1,8 +1,14 @@
 //! MCP uses its own revocable OAuth grants. Browser sessions, share URLs and
 //! the local setup key are deliberately not connector credentials.
+//!
+//! Registration and authorization are unauthenticated, so they write nothing.
+//! Client IDs and pending requests are signed, self-contained handles; owner
+//! consent is the first write and persists the client together with its code.
 use super::*;
 use axum::{extract::Form, response::Redirect};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hmac::{Hmac, Mac};
+use serde::de::DeserializeOwned;
 use std::sync::RwLock;
 
 const SCOPES: [&str; 3] = ["locdoc:read", "locdoc:write", "locdoc:share"];
@@ -11,19 +17,23 @@ const REFRESH_SECONDS: i64 = 30 * 86400;
 const REQUEST_SECONDS: i64 = 600;
 const CODE_SECONDS: i64 = 120;
 const CLIENT_SECONDS: i64 = 3600;
-const MAX_CLIENTS: i64 = 256;
-const MAX_REQUESTS: i64 = 256;
+const MAX_CODES: i64 = 256;
 const MAX_CONNECTIONS: i64 = 64;
+const MAX_REDIRECT_BYTES: usize = 4096;
+// A token request carrying this ID and its longest redirect fits in 16 KiB.
+const MAX_CLIENT_ID: usize = 8 * 1024;
+const MAX_SIGNED: usize = 64 * 1024;
+const SIGNED_VERSION: u8 = 1;
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
+    // Stored pending requests predate signed handles; their clients retry.
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS mcp_clients(
             id TEXT PRIMARY KEY,name TEXT NOT NULL,redirects TEXT NOT NULL,
             created INTEGER NOT NULL,expires INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS mcp_requests(
-            hash TEXT PRIMARY KEY,client TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
-            redirect TEXT NOT NULL,scope TEXT NOT NULL,challenge TEXT NOT NULL,
-            state TEXT NOT NULL,resource TEXT NOT NULL,expires INTEGER NOT NULL);
+        DROP TABLE IF EXISTS mcp_requests;
+        CREATE TABLE IF NOT EXISTS mcp_used_requests(
+            hash TEXT PRIMARY KEY,expires INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS mcp_codes(
             hash TEXT PRIMARY KEY,client TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE,
             redirect TEXT NOT NULL,scope TEXT NOT NULL,challenge TEXT NOT NULL,
@@ -161,6 +171,109 @@ fn credential(value: &str, prefix: &str) -> bool {
 fn opaque(prefix: &str) -> String {
     format!("{prefix}{}", token())
 }
+/// Legacy registrations used opaque hex IDs, which are also base64url text.
+fn client_id(value: &str) -> bool {
+    value.len() <= MAX_CLIENT_ID
+        && value.strip_prefix("mcp_c_").is_some_and(|value| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+}
+
+/// Signed handles are self-contained until the owner approves a request.
+#[derive(Serialize, Deserialize)]
+struct SignedClient {
+    v: u8,
+    redirect_uris: Vec<String>,
+    name: String,
+    iat: i64,
+}
+#[derive(Serialize, Deserialize)]
+struct SignedRequest {
+    v: u8,
+    client_id: String,
+    client_name: String,
+    redirect: String,
+    scope: String,
+    challenge: String,
+    state: String,
+    resource: String,
+    exp: i64,
+}
+/// The owner key is never used directly as this MAC key.
+fn signer(s: &Store) -> Hmac<Sha256> {
+    let mut derived = Hmac::<Sha256>::new_from_slice(s.key.as_bytes()).unwrap();
+    derived.update(b"locdoc mcp oauth v1");
+    Hmac::<Sha256>::new_from_slice(&derived.finalize().into_bytes()).unwrap()
+}
+/// The MAC covers the prefix, so a client ID never verifies as a request.
+fn sign<T: Serialize>(s: &Store, prefix: &str, claims: &T) -> String {
+    let body = format!(
+        "{prefix}{}",
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap())
+    );
+    let mut mac = signer(s);
+    mac.update(body.as_bytes());
+    format!(
+        "{body}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    )
+}
+fn verify<T: DeserializeOwned>(s: &Store, prefix: &str, value: &str) -> Option<T> {
+    if value.len() > MAX_SIGNED {
+        return None;
+    }
+    let (body, signature) = value.split_once('.')?;
+    let payload = body.strip_prefix(prefix)?;
+    let mut mac = signer(s);
+    mac.update(body.as_bytes());
+    // verify_slice compares in constant time.
+    mac.verify_slice(&URL_SAFE_NO_PAD.decode(signature).ok()?)
+        .ok()?;
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()
+}
+fn signed_client(s: &Store, id: &str) -> Option<SignedClient> {
+    verify(s, "mcp_c_", id).filter(|client: &SignedClient| client.v == SIGNED_VERSION)
+}
+fn signed_request(s: &Store, value: &str) -> Option<SignedRequest> {
+    verify(s, "mcp_q_", value)
+        .filter(|request: &SignedRequest| request.v == SIGNED_VERSION && request.exp > now())
+}
+/// A signed registration authorizes for CLIENT_SECONDS without storage. Rows
+/// persisted by consent, including legacy registrations, keep authorizing
+/// while cleanup would retain them: unexpired, or used by a live code or grant.
+fn registered(s: &Store, id: &str) -> OAuthResult<Option<(String, Vec<String>)>> {
+    const READ_CLIENT: &str = "SELECT name,redirects FROM mcp_clients c WHERE id=?1 AND (
+        expires>?2 OR EXISTS(SELECT 1 FROM mcp_codes k WHERE k.client=c.id AND k.expires>?2)
+        OR EXISTS(SELECT 1 FROM mcp_connections g WHERE g.client=c.id AND g.expires>?2))";
+    if let Some(client) = signed_client(s, id).filter(|client| now() < client.iat + CLIENT_SECONDS)
+    {
+        return Ok(Some((client.name, client.redirect_uris)));
+    }
+    let row: Option<(String, String)> =
+        s.db.lock()
+            .unwrap()
+            .query_row(READ_CLIENT, params![id, now()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+    Ok(row.and_then(|(name, redirects)| Some((name, serde_json::from_str(&redirects).ok()?))))
+}
+/// Owner decisions are single use. A handle is recorded only by authenticated
+/// consent, and only until the handle itself expires.
+fn undecided(s: &Store, db: &Connection, value: &str) -> rusqlite::Result<Option<SignedRequest>> {
+    let Some(request) = signed_request(s, value) else {
+        return Ok(None);
+    };
+    let used: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mcp_used_requests WHERE hash=?)",
+        [hash(value)],
+        |row| row.get(0),
+    )?;
+    Ok((!used).then_some(request))
+}
 fn scopes(value: &str) -> OAuthResult<HashSet<String>> {
     let values: HashSet<String> = value.split_ascii_whitespace().map(str::to_owned).collect();
     if values.is_empty() || values.iter().any(|scope| !SCOPES.contains(&scope.as_str())) {
@@ -270,14 +383,13 @@ async fn storage<T: Send + 'static>(
 }
 fn cleanup(db: &Connection) -> OAuthResult<()> {
     let time = now();
-    db.execute("DELETE FROM mcp_requests WHERE expires<=?", [time])?;
+    db.execute("DELETE FROM mcp_used_requests WHERE expires<=?", [time])?;
     db.execute("DELETE FROM mcp_codes WHERE expires<=?", [time])?;
     db.execute("DELETE FROM mcp_used_refresh WHERE expires<=?", [time])?;
     db.execute("DELETE FROM mcp_connections WHERE expires<=?", [time])?;
     db.execute(
         "DELETE FROM mcp_clients WHERE expires<=?
          AND id NOT IN (SELECT client FROM mcp_connections)
-         AND id NOT IN (SELECT client FROM mcp_requests)
          AND id NOT IN (SELECT client FROM mcp_codes)",
         [time],
     )?;
@@ -329,6 +441,12 @@ pub(super) struct Registration {
     response_types: Option<Vec<String>>,
 }
 fn register_client(s: &Store, request: Registration) -> OAuthResult<Value> {
+    let oversized = || {
+        oauth(
+            "invalid_client_metadata",
+            "Use fewer or shorter redirect URIs.",
+        )
+    };
     if request.redirect_uris.is_empty()
         || request.redirect_uris.len() > 8
         || request
@@ -351,6 +469,9 @@ fn register_client(s: &Store, request: Registration) -> OAuthResult<Value> {
             "Use a public authorization-code client with PKCE.",
         ));
     }
+    if request.redirect_uris.iter().map(String::len).sum::<usize>() > MAX_REDIRECT_BYTES {
+        return Err(oversized());
+    }
     for value in &request.redirect_uris {
         redirect(value)?;
     }
@@ -358,49 +479,29 @@ fn register_client(s: &Store, request: Registration) -> OAuthResult<Value> {
     if name.trim().is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
         return Err(oauth("invalid_client_metadata", "Use a short client name."));
     }
-    let name = name.trim();
-    let id = opaque("mcp_c_");
-    let time = now();
-    let mut db = s.db.lock().unwrap();
-    let tx = db.transaction()?;
-    cleanup(&tx)?;
-    let clients: i64 = tx.query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))?;
-    if clients >= MAX_CLIENTS {
-        // An unauthenticated registrant cannot reserve the registration pool.
-        // Preserve every client with a live request, code or owner-approved grant.
-        tx.execute(
-            "DELETE FROM mcp_clients WHERE id IN (
-                SELECT c.id FROM mcp_clients c
-                WHERE NOT EXISTS (SELECT 1 FROM mcp_requests r WHERE r.client=c.id)
-                AND NOT EXISTS (SELECT 1 FROM mcp_codes k WHERE k.client=c.id)
-                AND NOT EXISTS (SELECT 1 FROM mcp_connections g WHERE g.client=c.id)
-                ORDER BY c.created,c.id LIMIT ?)",
-            [clients - MAX_CLIENTS + 1],
-        )?;
+    let client = SignedClient {
+        v: SIGNED_VERSION,
+        redirect_uris: request.redirect_uris,
+        name: name.trim().into(),
+        iat: now(),
+    };
+    let id = sign(s, "mcp_c_", &client);
+    // JSON escaping can still enlarge the ID past what token requests accept.
+    if id.len() > MAX_CLIENT_ID {
+        return Err(oversized());
     }
-    count(&tx, "mcp_clients", MAX_CLIENTS)?;
-    tx.execute(
-        "INSERT INTO mcp_clients(id,name,redirects,created,expires) VALUES(?,?,?,?,?)",
-        params![
-            id,
-            name,
-            serde_json::to_string(&request.redirect_uris).unwrap(),
-            time,
-            time + CLIENT_SECONDS
-        ],
-    )?;
-    tx.commit()?;
     Ok(
-        json!({"client_id":id,"client_name":name,"redirect_uris":request.redirect_uris,
-        "client_id_issued_at":time,"token_endpoint_auth_method":"none",
+        json!({"client_id":id,"client_name":client.name,"redirect_uris":client.redirect_uris,
+        "client_id_issued_at":client.iat,"token_endpoint_auth_method":"none",
         "grant_types":["authorization_code","refresh_token"],"response_types":["code"]}),
     )
 }
+/// Registration stores nothing, so it never waits for a storage worker.
 pub(super) async fn register(
     State(s): State<App>,
     Json(request): Json<Registration>,
 ) -> OAuthResult<Response> {
-    let client = storage(s, move |s| register_client(s, request)).await?;
+    let client = register_client(&s, request)?;
     Ok((StatusCode::CREATED, Json(client)).into_response())
 }
 
@@ -416,8 +517,6 @@ pub(super) struct Authorization {
     resource: String,
 }
 fn begin(s: &Store, request: Authorization) -> OAuthResult<String> {
-    const INSERT_REQUEST: &str = "INSERT INTO mcp_requests
-        (hash,client,redirect,scope,challenge,state,resource,expires) VALUES(?,?,?,?,?,?,?,?)";
     if request.response_type != "code"
         || request.code_challenge_method != "S256"
         || !valid_challenge(&request.code_challenge)
@@ -429,48 +528,36 @@ fn begin(s: &Store, request: Authorization) -> OAuthResult<String> {
         ));
     }
     let state = request.state.unwrap_or_default();
-    if state.len() > 2048
-        || state.chars().any(char::is_control)
-        || !credential(&request.client_id, "mcp_c_")
-    {
+    if state.len() > 2048 || state.chars().any(char::is_control) || !client_id(&request.client_id) {
         return Err(oauth("invalid_request", "Invalid authorization request."));
     }
     let scope = scope_string(&scopes(request.scope.as_deref().unwrap_or("locdoc:read"))?);
     redirect(&request.redirect_uri)?;
-    let id = opaque("mcp_q_");
-    let db = s.db.lock().unwrap();
-    cleanup(&db)?;
-    let redirects: Option<String> = db
-        .query_row(
-            "SELECT redirects FROM mcp_clients WHERE id=?",
-            [&request.client_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let valid = redirects
-        .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-        .is_some_and(|values| values.contains(&request.redirect_uri));
-    if !valid {
-        return Err(oauth(
-            "invalid_request",
-            "The client or redirect URI is not registered.",
-        ));
-    }
-    count(&db, "mcp_requests", MAX_REQUESTS)?;
-    db.execute(
-        INSERT_REQUEST,
-        params![
-            hash(&id),
-            request.client_id,
-            request.redirect_uri,
+    let (client_name, _) = registered(s, &request.client_id)?
+        .filter(|(_, redirects)| redirects.contains(&request.redirect_uri))
+        .ok_or_else(|| {
+            oauth(
+                "invalid_request",
+                "The client or redirect URI is not registered.",
+            )
+        })?;
+    // The handle carries everything consent needs; nothing is stored yet.
+    let pending = sign(
+        s,
+        "mcp_q_",
+        &SignedRequest {
+            v: SIGNED_VERSION,
+            client_id: request.client_id,
+            client_name,
+            redirect: request.redirect_uri,
             scope,
-            request.code_challenge,
+            challenge: request.code_challenge,
             state,
-            request.resource,
-            now() + REQUEST_SECONDS
-        ],
-    )?;
-    Ok(format!("{}/?mcp_authorize={id}", s.public_url))
+            resource: request.resource,
+            exp: now() + REQUEST_SECONDS,
+        },
+    );
+    Ok(format!("{}/?mcp_authorize={pending}", s.public_url))
 }
 pub(super) async fn begin_authorization(
     State(s): State<App>,
@@ -489,27 +576,12 @@ pub(super) async fn consent_preview(
     _owner: security::Owner,
     Query(query): Query<ConsentQuery>,
 ) -> Result<Json<Value>> {
-    const PREVIEW: &str = "SELECT c.name,r.scope,r.redirect FROM mcp_requests r
-        JOIN mcp_clients c ON c.id=r.client WHERE r.hash=? AND r.expires>?";
     job(s, move |s| {
-        if !credential(&query.request, "mcp_q_") {
-            return Err(bad("This connection request has expired."));
-        }
-        let value =
-            s.db.lock()
-                .unwrap()
-                .query_row(PREVIEW, params![hash(&query.request), now()], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()?
-                .ok_or_else(|| bad("This connection request has expired."))?;
+        let request = undecided(s, &s.db.lock().unwrap(), &query.request)?
+            .ok_or_else(|| bad("This connection request has expired."))?;
         Ok(Json(json!({
-            "clientName":value.0, "redirectUri":value.2,
-            "scopes":value.1.split_ascii_whitespace().collect::<Vec<_>>()
+            "clientName":request.client_name, "redirectUri":request.redirect,
+            "scopes":request.scope.split_ascii_whitespace().collect::<Vec<_>>()
         })))
     })
     .await
@@ -520,55 +592,53 @@ pub(super) struct Consent {
     allow: bool,
 }
 fn decide(s: &Store, request: Consent) -> OAuthResult<String> {
-    const READ_REQUEST: &str = "SELECT client,redirect,scope,challenge,state,resource
-        FROM mcp_requests WHERE hash=? AND expires>?";
+    const INSERT_CLIENT: &str = "INSERT INTO mcp_clients(id,name,redirects,created,expires)
+        VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING";
     const INSERT_CODE: &str = "INSERT INTO mcp_codes
         (hash,client,redirect,scope,challenge,resource,expires) VALUES(?,?,?,?,?,?,?)";
-    if !credential(&request.request, "mcp_q_") {
-        return Err(oauth(
-            "invalid_request",
-            "This connection request has expired.",
-        ));
-    }
+    let expired = || oauth("invalid_request", "This connection request has expired.");
     let mut db = s.db.lock().unwrap();
     let tx = db.transaction()?;
-    let value = tx
-        .query_row(
-            READ_REQUEST,
-            params![hash(&request.request), now()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            },
-        )
-        .optional()?
-        .ok_or_else(|| oauth("invalid_request", "This connection request has expired."))?;
-    let (client, uri, scope, challenge, state, resource) = value;
-    let mut url = redirect(&uri)?;
+    let pending = undecided(s, &tx, &request.request)?.ok_or_else(expired)?;
+    let mut url = redirect(&pending.redirect)?;
     tx.execute(
-        "DELETE FROM mcp_requests WHERE hash=?",
-        [hash(&request.request)],
+        "INSERT INTO mcp_used_requests(hash,expires) VALUES(?,?)",
+        params![hash(&request.request), pending.exp],
     )?;
     if request.allow {
         cleanup(&tx)?;
-        count(&tx, "mcp_codes", MAX_REQUESTS)?;
+        if let Some(client) = signed_client(s, &pending.client_id) {
+            tx.execute(
+                INSERT_CLIENT,
+                params![
+                    pending.client_id,
+                    client.name,
+                    serde_json::to_string(&client.redirect_uris).unwrap(),
+                    client.iat,
+                    client.iat + CLIENT_SECONDS
+                ],
+            )?;
+        } else if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM mcp_clients WHERE id=?)",
+            [&pending.client_id],
+            |row| row.get::<_, bool>(0),
+        )? {
+            // A legacy client exists only as a row, which cleanup may have
+            // retired since this request began.
+            return Err(expired());
+        }
+        count(&tx, "mcp_codes", MAX_CODES)?;
         count(&tx, "mcp_connections", MAX_CONNECTIONS)?;
         let code = opaque("mcp_k_");
         tx.execute(
             INSERT_CODE,
             params![
                 hash(&code),
-                client,
-                uri,
-                scope,
-                challenge,
-                resource,
+                pending.client_id,
+                pending.redirect,
+                pending.scope,
+                pending.challenge,
+                pending.resource,
                 now() + CODE_SECONDS
             ],
         )?;
@@ -576,8 +646,8 @@ fn decide(s: &Store, request: Consent) -> OAuthResult<String> {
     } else {
         url.query_pairs_mut().append_pair("error", "access_denied");
     }
-    if !state.is_empty() {
-        url.query_pairs_mut().append_pair("state", &state);
+    if !pending.state.is_empty() {
+        url.query_pairs_mut().append_pair("state", &pending.state);
     }
     tx.commit()?;
     Ok(url.into())
@@ -681,7 +751,8 @@ fn exchange_token(s: &Store, request: TokenRequest) -> OAuthResult<Value> {
             "This authorization has expired, was already used or does not match this client.",
         )
     };
-    if !credential(&request.client_id, "mcp_c_") || request.resource != resource(s) {
+    // Codes and grants name their client, so no signature check is needed.
+    if !client_id(&request.client_id) || request.resource != resource(s) {
         return Err(invalid());
     }
     let mut db = s.db.lock().unwrap();
@@ -825,7 +896,7 @@ fn revoke(s: &Store, request: Revocation) -> OAuthResult<()> {
         UNION SELECT c.id FROM mcp_used_refresh u
         JOIN mcp_connections c ON c.id=u.connection
         WHERE c.client=? AND u.hash=? LIMIT 1";
-    if !credential(&request.client_id, "mcp_c_")
+    if !client_id(&request.client_id)
         || !(credential(&request.token, "mcp_a_") || credential(&request.token, "mcp_r_"))
     {
         return Ok(());
@@ -899,6 +970,13 @@ mod tests {
     use super::*;
     const CALLBACK: &str = "https://chatgpt.example.test/oauth/callback";
     const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    const TABLES: [&str; 5] = [
+        "mcp_clients",
+        "mcp_used_requests",
+        "mcp_codes",
+        "mcp_connections",
+        "mcp_used_refresh",
+    ];
 
     fn fixture() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
@@ -921,10 +999,60 @@ mod tests {
         }
     }
     fn client(s: &Store) -> String {
-        register_client(s, registration()).unwrap()["client_id"]
+        named_client(s, "Test client")
+    }
+    // Identical registrations in the same second share one signed ID.
+    fn named_client(s: &Store, name: &str) -> String {
+        let mut request = registration();
+        request.client_name = Some(name.into());
+        register_client(s, request).unwrap()["client_id"]
             .as_str()
             .unwrap()
             .into()
+    }
+    fn signed(s: &Store, name: &str, iat: i64) -> String {
+        let client = SignedClient {
+            v: SIGNED_VERSION,
+            redirect_uris: vec![CALLBACK.into()],
+            name: name.into(),
+            iat,
+        };
+        sign(s, "mcp_c_", &client)
+    }
+    /// Opaque IDs were registered before clients were signed.
+    fn legacy_client(s: &Store, expires: i64) -> String {
+        let id = opaque("mcp_c_");
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO mcp_clients(id,name,redirects,created,expires) VALUES(?,?,?,?,?)",
+                params![
+                    id,
+                    "Legacy client",
+                    json!([CALLBACK]).to_string(),
+                    now(),
+                    expires
+                ],
+            )
+            .unwrap();
+        id
+    }
+    /// Re-encodes claims under the original MAC, as a tampering client would.
+    fn forged<T: Serialize>(prefix: &str, claims: &T, original: &str) -> String {
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+        format!("{prefix}{payload}.{}", original.split_once('.').unwrap().1)
+    }
+    fn rows(s: &Store) -> i64 {
+        let db = s.db.lock().unwrap();
+        TABLES
+            .iter()
+            .map(|table| {
+                db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+            })
+            .sum()
     }
     fn authorization(s: &Store, client: &str) -> Authorization {
         Authorization {
@@ -939,7 +1067,11 @@ mod tests {
         }
     }
     fn pending(s: &Store, client: &str) -> String {
-        let result = begin(s, authorization(s, client)).unwrap();
+        requested(s, authorization(s, client))
+    }
+    // Identical parameters in the same second also share one signed handle.
+    fn requested(s: &Store, request: Authorization) -> String {
+        let result = begin(s, request).unwrap();
         url::Url::parse(&result)
             .unwrap()
             .query_pairs()
@@ -1097,6 +1229,12 @@ mod tests {
         assert!(url.contains("error=access_denied"));
         assert!(!url.contains("code="));
         assert!(
+            undecided(&s, &s.db.lock().unwrap(), &request)
+                .unwrap()
+                .is_none(),
+            "A decided request no longer previews"
+        );
+        assert!(
             decide(
                 &s,
                 Consent {
@@ -1135,11 +1273,14 @@ mod tests {
     fn expired_requests_and_codes_cannot_authorize() {
         let (_dir, s) = fixture();
         let client = client(&s);
-        let request = pending(&s, &client);
-        s.db.lock()
-            .unwrap()
-            .execute("UPDATE mcp_requests SET expires=0", [])
-            .unwrap();
+        let mut claims: SignedRequest = verify(&s, "mcp_q_", &pending(&s, &client)).unwrap();
+        claims.exp = now();
+        let request = sign(&s, "mcp_q_", &claims);
+        assert!(
+            undecided(&s, &s.db.lock().unwrap(), &request)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             decide(
                 &s,
@@ -1219,7 +1360,8 @@ mod tests {
     fn revocation_does_not_cross_clients_and_remains_revoked_after_reload() {
         let (dir, s) = fixture();
         let first_client = client(&s);
-        let other_client = client(&s);
+        let other_client = named_client(&s, "Other client");
+        assert_ne!(first_client, other_client);
         let first = issued(&s, &first_client);
         let other = issued(&s, &other_client);
         revoke(
@@ -1317,77 +1459,252 @@ mod tests {
         );
     }
     #[test]
-    fn untrusted_registration_and_authorization_have_bounded_capacity() {
+    fn unauthenticated_registration_and_authorization_write_no_shared_state() {
         let (_dir, s) = fixture();
-        let client = client(&s);
-        {
-            let mut db = s.db.lock().unwrap();
-            let tx = db.transaction().unwrap();
-            for index in 0..MAX_REQUESTS {
-                tx.execute(
-                    "INSERT INTO mcp_requests(hash,client,redirect,scope,challenge,state,resource,expires) VALUES(?,?,?,?,?,?,?,?)",
-                    params![index.to_string(),client,CALLBACK,"locdoc:read",challenge(VERIFIER),"",resource(&s),now()+REQUEST_SECONDS],
-                ).unwrap();
-            }
-            tx.commit().unwrap();
-        }
-        assert_eq!(
-            begin(&s, authorization(&s, &client)).unwrap_err().status,
-            StatusCode::TOO_MANY_REQUESTS
-        );
+        // Any write from registration or authorization would now fail.
         s.db.lock()
             .unwrap()
-            .execute("UPDATE mcp_requests SET expires=0", [])
+            .execute_batch("PRAGMA query_only=ON")
             .unwrap();
-        assert!(begin(&s, authorization(&s, &client)).is_ok());
+        let flooding = client(&s);
+        for _ in 0..300 {
+            pending(&s, &flooding);
+        }
+        let request = pending(&s, &named_client(&s, "Legitimate client"));
+        s.db.lock()
+            .unwrap()
+            .execute_batch("PRAGMA query_only=OFF")
+            .unwrap();
+        assert_eq!(
+            rows(&s),
+            0,
+            "Unapproved clients and requests are not stored"
+        );
+        let url = decide(
+            &s,
+            Consent {
+                request,
+                allow: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            url.contains("code="),
+            "A flood cannot exhaust owner consent"
+        );
     }
     #[test]
-    fn abandoned_registrations_are_evicted_without_retiring_live_authorizations() {
+    fn consent_persists_the_client_and_stored_clients_authorize_while_retained() {
         let (_dir, s) = fixture();
-        let pending_client = client(&s);
-        let _pending = pending(&s, &pending_client);
-        let code_client = client(&s);
-        let _code = approved(&s, &code_client);
-        let connected_client = client(&s);
-        let access = issued(&s, &connected_client);
-        {
-            let mut db = s.db.lock().unwrap();
-            let tx = db.transaction().unwrap();
-            for index in 3..MAX_CLIENTS {
-                tx.execute(
-                    "INSERT INTO mcp_clients(id,name,redirects,created,expires) VALUES(?,?,?,?,?)",
-                    params![
-                        format!("abandoned-{index}"),
-                        "Abandoned",
-                        "[]",
-                        0,
-                        now() + CLIENT_SECONDS
-                    ],
-                )
+        let client = client(&s);
+        let iat = signed_client(&s, &client).unwrap().iat;
+        let access = issued(&s, &client);
+        let mut again = authorization(&s, &client);
+        again.state = None;
+        let request = requested(&s, again);
+        let url = decide(
+            &s,
+            Consent {
+                request,
+                allow: true,
+            },
+        )
+        .unwrap();
+        assert!(
+            url.contains("code="),
+            "A connected client can authorize again"
+        );
+        const STORED: &str = "SELECT name,redirects,created,expires,
+            (SELECT count(*) FROM mcp_clients) FROM mcp_clients WHERE id=?";
+        let stored =
+            s.db.lock()
+                .unwrap()
+                .query_row(STORED, [&client], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
                 .unwrap();
-            }
-            tx.commit().unwrap();
-        }
-        let fresh = client(&s);
-        let db = s.db.lock().unwrap();
-        let total: i64 = db
-            .query_row("SELECT count(*) FROM mcp_clients", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(total, MAX_CLIENTS);
-        for retained in [pending_client, code_client, connected_client, fresh] {
-            let present: bool = db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM mcp_clients WHERE id=?)",
-                    [retained],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert!(
-                present,
-                "Live authorization clients must survive abandoned registration eviction"
-            );
-        }
+        assert_eq!(
+            stored,
+            (
+                "Test client".into(),
+                json!([CALLBACK]).to_string(),
+                iat,
+                iat + CLIENT_SECONDS,
+                1
+            )
+        );
         assert!(admitted(&s, &access).is_ok());
+        // An expired signed registration authorizes only through a kept row.
+        let stale = signed(&s, "Stale client", now() - CLIENT_SECONDS);
+        assert!(begin(&s, authorization(&s, &stale)).is_err());
+        {
+            let db = s.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO mcp_clients(id,name,redirects,created,expires) VALUES(?,?,?,0,0)",
+                params![stale, "Stale client", json!([CALLBACK]).to_string()],
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO mcp_connections(id,client,scope,access_hash,access_expires,
+                 refresh_hash,expires,created) VALUES('stale-grant',?,'locdoc:read',
+                 'stale-access',0,'stale-refresh',?,0)",
+                params![stale, now() + 60],
+            )
+            .unwrap();
+        }
+        assert!(begin(&s, authorization(&s, &stale)).is_ok());
+        s.db.lock()
+            .unwrap()
+            .execute("DELETE FROM mcp_connections WHERE id='stale-grant'", [])
+            .unwrap();
+        assert!(begin(&s, authorization(&s, &stale)).is_err());
+    }
+    #[test]
+    fn tampered_expired_and_foreign_handles_are_rejected() {
+        let (_dir, s) = fixture();
+        let (_other_dir, other) = fixture();
+        let attacker = "https://attacker.example.test/callback";
+        let client = client(&s);
+        let (body, mac) = client.split_once('.').unwrap();
+        let mut redirected: SignedClient = verify(&s, "mcp_c_", &client).unwrap();
+        redirected.redirect_uris = vec![attacker.into()];
+        let flipped = if mac.starts_with('A') { "B" } else { "A" };
+        let mut raw = Hmac::<Sha256>::new_from_slice(s.key.as_bytes()).unwrap();
+        raw.update(body.as_bytes());
+        let raw = URL_SAFE_NO_PAD.encode(raw.finalize().into_bytes());
+        for (id, uri) in [
+            (forged("mcp_c_", &redirected, &client), attacker),
+            (format!("{body}.{flipped}{}", &mac[1..]), CALLBACK),
+            (
+                signed(&s, "Expired client", now() - CLIENT_SECONDS),
+                CALLBACK,
+            ),
+            (signed(&other, "Foreign client", now()), CALLBACK),
+            (format!("{body}.{raw}"), CALLBACK),
+            (pending(&s, &client), CALLBACK),
+        ] {
+            let mut request = authorization(&s, &id);
+            request.redirect_uri = uri.into();
+            assert!(begin(&s, request).is_err(), "Rejected client {id}");
+        }
+        let request = pending(&s, &client);
+        let mut escalated: SignedRequest = verify(&s, "mcp_q_", &request).unwrap();
+        escalated.scope = "locdoc:read locdoc:write locdoc:share".into();
+        let mut expired: SignedRequest = verify(&s, "mcp_q_", &request).unwrap();
+        expired.exp = now();
+        for value in [
+            forged("mcp_q_", &escalated, &request),
+            sign(&s, "mcp_q_", &expired),
+            pending(&other, &signed(&other, "Foreign client", now())),
+            format!("mcp_q_{}", client.strip_prefix("mcp_c_").unwrap()),
+            client.clone(),
+        ] {
+            assert!(
+                undecided(&s, &s.db.lock().unwrap(), &value)
+                    .unwrap()
+                    .is_none()
+            );
+            let consent = Consent {
+                request: value,
+                allow: true,
+            };
+            assert!(decide(&s, consent).is_err());
+        }
+        assert_eq!(rows(&s), 0, "Rejected handles are not recorded");
+        let url = decide(
+            &s,
+            Consent {
+                request,
+                allow: true,
+            },
+        )
+        .unwrap();
+        assert!(url.contains("code="));
+    }
+    #[test]
+    fn legacy_client_rows_keep_working_until_cleanup_retires_them() {
+        let (_dir, s) = fixture();
+        let legacy = legacy_client(&s, now() + CLIENT_SECONDS);
+        let first = issued(&s, &legacy);
+        let second = exchange_token(&s, refresh(&s, &legacy, &first)).unwrap();
+        assert!(admitted(&s, &first).is_err());
+        assert!(admitted(&s, &second).is_ok());
+        revoke(
+            &s,
+            Revocation {
+                token: second["access_token"].as_str().unwrap().into(),
+                client_id: legacy,
+            },
+        )
+        .unwrap();
+        assert!(admitted(&s, &second).is_err());
+        let retired = legacy_client(&s, now());
+        assert!(begin(&s, authorization(&s, &retired)).is_err());
+        let removed = legacy_client(&s, now() + CLIENT_SECONDS);
+        let request = pending(&s, &removed);
+        s.db.lock()
+            .unwrap()
+            .execute("DELETE FROM mcp_clients WHERE id=?", [&removed])
+            .unwrap();
+        let error = decide(
+            &s,
+            Consent {
+                request,
+                allow: true,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            (error.code, error.status),
+            ("invalid_request", StatusCode::BAD_REQUEST)
+        );
+    }
+    #[test]
+    fn registration_bounds_signed_client_ids() {
+        let (_dir, s) = fixture();
+        let register = |path: &str, count: usize| {
+            let mut request = registration();
+            request.redirect_uris = vec![format!("https://callback.example.test/{path}"); count];
+            register_client(&s, request)
+        };
+        // A 30-byte origin and slash plus 482 path bytes is 512 bytes each.
+        let largest = register(&"a".repeat(482), 8).unwrap();
+        let id = largest["client_id"].as_str().unwrap();
+        assert!(client_id(id) && signed_client(&s, id).is_some());
+        assert!(register("a", 9).is_err());
+        assert!(register(&"a".repeat(1000), 5).is_err());
+        assert!(
+            register(&"\"".repeat(482), 8).is_err(),
+            "JSON escaping cannot enlarge an ID past token request limits"
+        );
+        assert_eq!(rows(&s), 0);
+    }
+    #[test]
+    fn migration_drops_requests_stored_by_earlier_versions() {
+        let (_dir, s) = fixture();
+        let db = s.db.lock().unwrap();
+        db.execute_batch(
+            "INSERT INTO mcp_clients(id,name,redirects,created,expires) VALUES('old','Old','[]',0,0);
+            CREATE TABLE mcp_requests(hash TEXT PRIMARY KEY,
+                client TEXT NOT NULL REFERENCES mcp_clients(id) ON DELETE CASCADE);
+            INSERT INTO mcp_requests(hash,client) VALUES('pending','old');",
+        )
+        .unwrap();
+        migrate(&db).unwrap();
+        let remaining: i64 = db
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='mcp_requests'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
     #[test]
     fn queued_grants_observe_revocation_and_reduced_permissions() {
