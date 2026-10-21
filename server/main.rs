@@ -369,7 +369,7 @@ impl Store {
                 .as_deref()
                 .and_then(|token| folders::grant(self, token).ok());
             match grant {
-                Some(grant) if grant.contains(&d.path) => Ok((false, grant.permission == "edit")),
+                Some(grant) if grant.holds(self, d) => Ok((false, grant.permission == "edit")),
                 _ => Err(denied()),
             }
         }

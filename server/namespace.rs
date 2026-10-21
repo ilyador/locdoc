@@ -62,6 +62,9 @@ struct Requested {
     /// Missing documents the last incomplete listing keeps until its own
     /// retry. Asking again for them cannot complete the listing sooner.
     held: HashSet<String>,
+    /// Where the last pass found the file of a document whose row could not
+    /// follow yet: a busy room, or a name another document still keeps.
+    elsewhere: HashMap<String, String>,
 }
 
 impl Requests {
@@ -79,6 +82,21 @@ impl Requests {
     }
     fn hold(&self, documents: HashSet<String>) {
         self.0.lock().unwrap().held = documents;
+    }
+    /// Whether a document is now found somewhere it was not before.
+    fn found(&self, elsewhere: HashMap<String, String>) -> bool {
+        let mut requested = self.0.lock().unwrap();
+        let narrower = elsewhere
+            .iter()
+            .any(|(id, path)| requested.elsewhere.get(id) != Some(path));
+        requested.elsewhere = elsewhere;
+        narrower
+    }
+    fn keep_found(&self, keep: impl Fn(&str) -> bool) {
+        self.0.lock().unwrap().elsewhere.retain(|id, _| keep(id));
+    }
+    fn elsewhere(&self, document: &str) -> Option<String> {
+        self.0.lock().unwrap().elsewhere.get(document).cloned()
     }
     pub(super) fn take(&self) -> Option<Instant> {
         self.0.lock().unwrap().next.take()
@@ -440,6 +458,13 @@ impl Store {
         Ok(unmatched)
     }
 
+    /// Where a pass found this document's file while its row could not move
+    /// there yet. Grants scoped to a folder must cover that path as well as
+    /// the row's, so a file moved out of a shared folder is not served on.
+    pub(super) fn found_elsewhere(&self, document: &str) -> Option<String> {
+        self.reconciliation.elsewhere(document)
+    }
+
     /// Find moves missed while offline or during watcher overflow, and record
     /// atomic saves. Missing documents wait for the maintenance loop.
     pub(super) fn discover_file_moves(&self) -> Result<()> {
@@ -484,6 +509,14 @@ impl Store {
                 && document.seen != Seen::File(document.recorded.clone());
         }
         if !changed {
+            // Every readable path shows its own file; an unreadable one tells
+            // nothing new about where its file was found.
+            let unknown: HashSet<&str> = tracked
+                .iter()
+                .filter(|document| document.seen == Seen::Unknown)
+                .map(|document| document.id.as_str())
+                .collect();
+            self.reconciliation.keep_found(|id| unknown.contains(id));
             return Ok(HashSet::new());
         }
         let (mut files, mut linked, complete) = self.walk();
@@ -682,6 +715,16 @@ impl Store {
             .into_iter()
             .chain(moves.iter().map(|change| change.id.clone()))
             .collect();
+        // Until its row follows, a moved file is also where it was found.
+        // Sockets recheck folder grants against that place now, not at the
+        // next heartbeat.
+        let mut elsewhere: HashMap<String, String> = moves
+            .iter()
+            .map(|change| (change.id.clone(), change.to.clone()))
+            .collect();
+        if self.reconciliation.found(elsewhere.clone()) {
+            self.permissions.invalidate();
+        }
         // An unlisted folder can only hide a file whose evidence a later walk
         // could find. Without evidence, waiting would keep a removed
         // document's links alive for whatever file next takes its name.
@@ -859,11 +902,13 @@ impl Store {
             }
             tx.commit()?;
             drop(db);
-            if !moves.is_empty() || !retiring.is_empty() {
-                self.permissions.invalidate();
-            }
             for change in &moves {
                 unplaced.remove(&change.id);
+                elsewhere.remove(&change.id);
+            }
+            self.reconciliation.found(elsewhere);
+            if !moves.is_empty() || !retiring.is_empty() {
+                self.permissions.invalidate();
             }
         }
         // Cache operations acquire map -> room. Release every room before

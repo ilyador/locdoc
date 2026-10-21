@@ -1576,3 +1576,77 @@ fn a_second_name_in_a_shared_folder_never_opens_a_private_document() {
     assert!(folders::document(&s, &grant, Some(&private.id)).is_err());
     assert_eq!(s.doc(&private.id).unwrap().path, "Private/page.md");
 }
+
+#[test]
+fn a_folder_link_stops_covering_a_document_moved_out_before_its_row_can_follow() {
+    let (_directory, s) = store();
+    let page = s.create_document("Shared/page.md").unwrap();
+    let removed = s.create_document("Private/removed.md").unwrap();
+    s.create_folder("Locked").unwrap();
+    let shared = folders::share_folder(
+        &s,
+        serde_json::from_value(json!({"path": "Shared", "permission": "view"})).unwrap(),
+    )
+    .unwrap();
+    let token = shared["shareUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap()
+        .to_owned();
+    let identity = folders::directory_identity(&s, "Shared").unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO mcp_folders(path,identity) VALUES('Shared',?)",
+            [identity],
+        )
+        .unwrap();
+    assert!(mcp_access::document_access(&s, &page).unwrap().mcp_allowed);
+    // The owner removes one private file and moves the shared page into its
+    // name. The removed document keeps that name while a folder is unreadable.
+    fs::remove_file(s.root.join("Private/removed.md")).unwrap();
+    fs::rename(
+        s.root.join("Shared/page.md"),
+        s.root.join("Private/removed.md"),
+    )
+    .unwrap();
+    let locked = s.root.join("Locked");
+    let generation = s.permissions.current();
+    walking(
+        move |path| {
+            if path == locked {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(())
+        },
+        || s.retire_missing_documents(),
+    )
+    .unwrap();
+    assert!(s.doc(&removed.id).is_ok());
+    assert_ne!(
+        s.permissions.current(),
+        generation,
+        "Open sockets recheck the folder grant before their next heartbeat"
+    );
+    let grant = folders::grant(&s, &token).unwrap();
+    let visitor = Access {
+        token: Some(token.clone()),
+        ..Access::default()
+    };
+    let current = s.doc(&page.id).unwrap();
+    assert!(s.access(&HeaderMap::new(), &current, &visitor).is_err());
+    assert!(folders::document(&s, &grant, Some(&page.id)).is_err());
+    assert!(
+        !mcp_access::document_access(&s, &current)
+            .unwrap()
+            .mcp_allowed
+    );
+    // Once the folder can be read, the row follows the file.
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "Private/removed.md");
+    assert!(s.access(&HeaderMap::new(), &moved, &visitor).is_err());
+}

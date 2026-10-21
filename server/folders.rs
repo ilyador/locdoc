@@ -25,6 +25,13 @@ impl Grant {
         path.strip_prefix(&self.path)
             .is_some_and(|tail| tail.starts_with('/'))
     }
+    /// Whether this folder holds a document: its row, and any file a pass
+    /// found elsewhere before the row could follow it.
+    pub fn holds(&self, s: &Store, document: &Document) -> bool {
+        self.contains(&document.path)
+            && s.found_elsewhere(&document.id)
+                .is_none_or(|path| self.contains(&path))
+    }
     fn valid(&self, s: &Store) -> bool {
         directory_identity(s, &self.path).is_ok_and(|value| value == self.identity)
     }
@@ -131,7 +138,7 @@ pub(super) fn document(
     selected
         .map(|id| {
             let doc = s.doc(&id)?;
-            if !folder.contains(&doc.path) {
+            if !folder.holds(s, &doc) {
                 return Err(denied());
             }
             Ok(doc)

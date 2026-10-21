@@ -83,7 +83,12 @@ pub(super) fn document_access(s: &Store, document: &Document) -> Result<Access> 
             )
             .optional()?
             .is_some();
-    Ok(Access::new(direct, inherited(s, &current.path)?))
+    // A file found outside its row's folder leaves that folder's grant.
+    let mut covered = inherited(s, &current.path)?;
+    if let Some(path) = s.found_elsewhere(&current.id) {
+        covered &= inherited(s, &path)?;
+    }
+    Ok(Access::new(direct, covered))
 }
 
 pub(super) fn folder_access(s: &Store, input: &str) -> Result<Access> {

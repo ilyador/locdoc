@@ -134,7 +134,7 @@ Choose **Share** in a document, or switch to the **Folders** tab and use the sha
 
 - **View & comment** permits reading and commenting. **Edit & comment** also permits collaborative text edits. The owner always retains editing access.
 - Folder links include nested folders and future Markdown files added inside them. Guests get a searchable, scoped sidebar; they cannot browse the rest of your workspace or create/rename files.
-- Folder access and individual document links are independent. Turning off a document's own link does not remove access granted through a shared parent folder. To remove that access, change the folder link or move the file outside the folder.
+- Folder access and individual document links are independent. Turning off a document's own link does not remove access granted through a shared parent folder. To remove that access, change the folder link or move the file outside the folder; access ends as soon as Locdoc finds the file outside, even while its new name is still being recorded.
 - A document's own links, comments and history follow a move between folders. Folder access is recalculated from its current location; it is never copied onto the document.
 - Turn a link private to revoke it, or choose **Replace link** to invalidate the old URL. Moving, removing, or replacing a shared folder invalidates its capability. A folder share does not follow an external rename; share the new location again.
 - Visitors choose a display name without signing in. Names are labels, not verified identities.
