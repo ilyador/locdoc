@@ -1282,7 +1282,16 @@ impl Store {
             path.as_deref()
                 .map_or(Ok(false), |path| movement.contains(path))
         };
-        match (holds(&source)?, holds(&destination)?, source, destination) {
+        let at_source = holds(&source)?;
+        // Our file at its source under its only name is not at the
+        // destination, even when the destination folder cannot be read.
+        let only_at_source = at_source
+            && source
+                .as_deref()
+                .and_then(|path| fs::symlink_metadata(path).ok())
+                .is_some_and(|metadata| metadata.nlink() == 1);
+        let at_destination = !only_at_source && holds(&destination)?;
+        match (at_source, at_destination, source, destination) {
             (false, true, _, _) => self.commit_move(movement),
             (true, true, Some(source), _) => {
                 // An interrupted legacy hard-link move. Both names refer to

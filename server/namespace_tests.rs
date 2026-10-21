@@ -2143,6 +2143,38 @@ fn an_unreadable_subfolder_never_hides_the_rest_of_the_listing() {
 }
 
 #[test]
+fn a_rename_into_an_unreadable_folder_ends_and_blocks_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let page = s.create_document("page.md").unwrap();
+    s.create_folder("Locked").unwrap();
+    let locked = s.root.join("Locked");
+    // The sidebar lists the folder, but its entries cannot be reached.
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let renamed = s.rename_document(&page.id, "Locked/page.md");
+    let pending = pending_moves(&s);
+    let mut entries = Vec::new();
+    let listed = scan(&s, &s.root, &mut entries);
+    let opened = s.room(&page).map(|_| ());
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(renamed.is_err());
+    // The file never left its name, yet its intent stayed pending, which
+    // failed every listing and kept the document from opening.
+    assert_eq!(pending, 0);
+    listed.unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.id.as_deref() == Some(page.id.as_str()))
+    );
+    opened.unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "page.md");
+}
+
+#[test]
 fn listings_never_walk_the_tree_while_an_unreadable_folder_holds_a_document() {
     let (directory, s, a, b) = swap_fixture();
     s.create_folder("Locked").unwrap();
