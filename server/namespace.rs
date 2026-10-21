@@ -150,6 +150,8 @@ struct Missing<E> {
     id: String,
     path: String,
     seen: Seen<E>,
+    /// Its own recorded evidence, which a second look may still find.
+    evidence: Option<E>,
 }
 
 struct Plan<E> {
@@ -236,6 +238,7 @@ fn classify<E: Clone + Eq + Hash>(
                     id: document.id.clone(),
                     path: document.path.clone(),
                     seen: document.seen.clone(),
+                    evidence: own.cloned(),
                 });
             }
             Seen::File(evidence) => {
@@ -247,6 +250,7 @@ fn classify<E: Clone + Eq + Hash>(
                 id: document.id.clone(),
                 path: document.path.clone(),
                 seen: Seen::Absent,
+                evidence: own.cloned(),
             }),
             Seen::Unknown => plan.undecided.push(document.id.clone()),
         }
@@ -471,7 +475,29 @@ impl Store {
             .iter()
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
             .collect();
-        let plan = classify(&tracked, &held, &files);
+        let mut plan = classify(&tracked, &held, &files);
+        if pass == Pass::Settled
+            && complete
+            && plan
+                .missing
+                .iter()
+                .any(|missing| missing.evidence.is_some())
+        {
+            // A file moved between folders during the walk is in neither
+            // listing. Retire only what a second complete walk cannot find.
+            let (again, still_complete) = self.walk();
+            let present: HashSet<&Identity> = again.values().flatten().collect();
+            plan.missing.retain(|missing| {
+                let gone = missing
+                    .evidence
+                    .as_ref()
+                    .is_none_or(|evidence| still_complete && !present.contains(evidence));
+                if !gone {
+                    plan.undecided.push(missing.id.clone());
+                }
+                gone
+            });
+        }
         self.apply(pass, plan, &tracked, &reserved, complete)
     }
 

@@ -1123,3 +1123,48 @@ fn renaming_onto_a_name_never_retires_a_document_whose_file_was_found_elsewhere(
     assert_eq!(kept.path, "q.md");
     assert_eq!(kept.token.as_deref(), Some("old-link"));
 }
+
+#[test]
+fn a_file_moved_between_folders_during_the_walk_is_not_retired() {
+    let (directory, s) = store();
+    let document = s.create_document("page.md").unwrap();
+    share(&s, &document.id);
+    s.create_folder("Left").unwrap();
+    s.create_folder("Right").unwrap();
+    let outside = directory.path().join("page.md");
+    fs::rename(s.root.join("page.md"), &outside).unwrap();
+    let folders = [s.root.join("Left"), s.root.join("Right")];
+    let mut visits: HashMap<PathBuf, u32> = HashMap::new();
+    let mut listed: Option<PathBuf> = None;
+    walking(
+        move |path| {
+            // A folder is visited as an entry of its parent, then again just
+            // before it is listed. Once one folder is listed and the other is
+            // about to be, the file arrives in the one already listed.
+            if folders.iter().any(|folder| folder == path) {
+                let count = visits.entry(path.to_owned()).or_default();
+                *count += 1;
+                if *count == 2 {
+                    match &listed {
+                        None => listed = Some(path.to_owned()),
+                        Some(first) if outside.exists() => {
+                            fs::rename(&outside, first.join("page.md"))?;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            Ok(())
+        },
+        || s.retire_missing_documents(),
+    )
+    .unwrap();
+    assert_eq!(
+        s.doc(&document.id).unwrap().token.as_deref(),
+        Some("old-link")
+    );
+    s.retire_missing_documents().unwrap();
+    let found = s.doc(&document.id).unwrap();
+    assert!(found.path == "Left/page.md" || found.path == "Right/page.md");
+    assert_eq!(found.token.as_deref(), Some("old-link"));
+}
