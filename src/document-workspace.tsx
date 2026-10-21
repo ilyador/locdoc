@@ -988,9 +988,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 role="status"
                 aria-label="Opening document"
               >
-                <div />
-                <div />
-                <div />
+                <div className="loading-line" />
+                <div className="loading-line" />
+                <div className="loading-line" />
               </div>
             ) : !config.owner && !sharedToken ? (
               <div className="welcome">
@@ -1097,8 +1097,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                     </div>
                   ) : (
                     <div className="loading-surface">
-                      <div />
-                      <div />
+                      <div className="loading-line" />
+                      <div className="loading-line" />
                     </div>
                   )}
                 </div>

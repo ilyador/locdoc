@@ -1769,20 +1769,19 @@ button:hover {
   max-width: 650px;
   padding: 60px 40px;
 }
-.loading-surface div {
+.loading-surface > .loading-line {
   height: 14px;
   background: var(--subtle);
   border-radius: 3px;
   margin: 20px 0;
   width: 100%;
-  animation: pulse 1.5s infinite;
 }
-.loading-surface div:first-child {
+.loading-surface > .loading-line:first-child {
   height: 38px;
   width: 70%;
   margin-bottom: 35px;
 }
-.loading-surface div:last-child {
+.loading-surface > .loading-line:last-child {
   width: 80%;
 }
 .error-banner {
@@ -2241,11 +2240,6 @@ button:hover {
 }
 [data-theme="dark"] .comment-selection {
   background: #66572c;
-}
-@keyframes pulse {
-  50% {
-    opacity: 0.4;
-  }
 }
 @keyframes dialog-in {
   from {
