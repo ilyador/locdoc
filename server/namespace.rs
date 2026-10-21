@@ -1068,10 +1068,13 @@ impl Store {
 
     /// The journaled inode is at the destination: commit the document there.
     fn commit_move(&self, movement: &FileMove) -> Result<Outcome> {
-        let source = self.safe(&movement.source, false)?;
         let destination = self.safe(&movement.destination, false)?;
         disk::sync_directories(destination.parent().unwrap(), &self.root)?;
-        if source.parent().unwrap().is_dir() {
+        // The old folder may since have been removed or replaced by a link;
+        // then there is no entry left to sync, and nothing may block saves.
+        if let Some(source) = self.journaled(&movement.source)?
+            && source.parent().unwrap().is_dir()
+        {
             disk::sync_directories(source.parent().unwrap(), &self.root)?;
         }
         let mut old = self.doc(&movement.document)?;

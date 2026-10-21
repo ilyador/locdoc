@@ -1168,3 +1168,21 @@ fn a_file_moved_between_folders_during_the_walk_is_not_retired() {
     assert!(found.path == "Left/page.md" || found.path == "Right/page.md");
     assert_eq!(found.token.as_deref(), Some("old-link"));
 }
+
+#[test]
+fn an_interrupted_rename_settles_after_its_old_folder_became_a_link() {
+    let (directory, s) = store();
+    let document = s.create_document("Old/page.md").unwrap();
+    s.create_folder("New").unwrap();
+    share(&s, &document.id);
+    interrupted_move(&s, &document, "New/page.md");
+    disk::rename_new(&s.root.join("Old/page.md"), &s.root.join("New/page.md")).unwrap();
+    // While Locdoc is stopped, the emptied folder is replaced by a link.
+    fs::remove_dir(s.root.join("Old")).unwrap();
+    std::os::unix::fs::symlink(directory.path(), s.root.join("Old")).unwrap();
+    let s = reopen(s);
+    assert_eq!(pending_moves(&s), 0);
+    let moved = s.doc(&document.id).unwrap();
+    assert_eq!(moved.path, "New/page.md");
+    assert_eq!(moved.token.as_deref(), Some("old-link"));
+}
