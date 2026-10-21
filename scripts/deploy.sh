@@ -16,7 +16,8 @@ deploy        Build the committed checkout into target/stage and target/stage-we
               the new release, point `current` at it and restart the service.
               Any failed check after the switch restores the previous release.
   --rehearse  Also start the staged build against copies of the state database
-              and documents folder; document and comment counts must not change.
+              and documents folder; comment counts must not change and document
+              and revision counts must not drop.
   --force     Deploy even if the commit is already current.
 rollback      Point `current` at RELEASE (default: the previous release recorded
               in the current manifest), restart and run the same checks.
@@ -91,12 +92,13 @@ elif command == "inspect":
     json.dump({"integrity": integrity, "counts": counts}, sys.stdout, sort_keys=True)
 elif command == "compare":
     # exact: nothing may change. startup: projecting accepted text at startup
-    # may add an autosave revision. grow: a live service may add any rows.
+    # may add an autosave revision, and the owner tree request indexes files
+    # that had no row yet. grow: a live service may add any rows.
     before, after = (json.load(open(path)) for path in args[:2])
     problems = [f"integrity_check: {d['integrity'][:200]}" for d in (before, after) if d["integrity"] != "ok"]
     for table in ("docs", "revisions", "comments"):
         b, a = before["counts"].get(table, 0), after["counts"].get(table, 0)
-        grows = args[2] == "grow" or (args[2] == "startup" and table == "revisions")
+        grows = args[2] == "grow" or (args[2] == "startup" and table != "comments")
         if a < b if grows else a != b:
             problems.append(f"{table} rows {b} -> {a}")
     if problems:
