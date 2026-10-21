@@ -2136,10 +2136,21 @@ fn main() -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     match arguments.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => {}
+        // The pass rewrites what it finds: never pair a state folder with
+        // a documents folder by the working folder's defaults.
+        ["--restored"]
+            if std::env::var_os("LOCDOC_STATE").is_none()
+                || std::env::var_os("LOCDOC_DOCS").is_none() =>
+        {
+            eprintln!(
+                "locdoc --restored: set LOCDOC_STATE and LOCDOC_DOCS to the service's state and documents folders."
+            );
+            return std::process::ExitCode::from(2);
+        }
         ["--restored"] => return restored::run(root.into(), data.into(), public),
         _ => {
             eprintln!(
-                "Usage: locdoc [--restored]\n\nWithout arguments, serve LOCDOC_DOCS with the state in LOCDOC_STATE.\n--restored  After copying a backup's state files and documents folder\n            into place, match its files to documents once and exit."
+                "Usage: locdoc [--restored]\n\nWithout arguments, serve LOCDOC_DOCS with the state in LOCDOC_STATE.\n--restored  After copying a backup's state files and documents folder\n            into place, match its files to documents once and exit.\n            LOCDOC_STATE and LOCDOC_DOCS must both be set."
             );
             return std::process::ExitCode::from(2);
         }

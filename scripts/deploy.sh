@@ -153,12 +153,14 @@ elif command == "space":
         print("; ".join(short))
         sys.exit(1)
 elif command == "exec-env":
-    # environ-file folder program args...: run a program in that folder with
-    # a NUL-separated environment saved from /proc.
+    # environ-file folder state docs program args...: run a program in that
+    # folder with a NUL-separated environment saved from /proc, naming the
+    # state and documents folders explicitly.
     raw = Path(args[0]).read_bytes().split(b"\0")
     env = dict(item.partition(b"=")[::2] for item in raw if item)
+    env[b"LOCDOC_STATE"], env[b"LOCDOC_DOCS"] = os.fsencode(args[2]), os.fsencode(args[3])
     os.chdir(args[1])
-    os.execve(args[2], args[2:], env)
+    os.execve(args[4], args[4:], env)
 elif command == "write":
     # key=value pairs; @path embeds a JSON file and an empty value is null.
     data = {}
@@ -763,8 +765,8 @@ restore_pass() {
   release_state_lock
   say "running $binary --restored"
   if [[ -f $work/unit.environ ]]; then
-    py exec-env "$work/unit.environ" "$(<"$work/unit.cwd")" "$binary" --restored {snapshot_fd}<&- >&2 ||
-      status=$?
+    py exec-env "$work/unit.environ" "$(<"$work/unit.cwd")" "$state" "$docs" "$binary" --restored \
+      {snapshot_fd}<&- >&2 || status=$?
   else
     LOCDOC_STATE=$state LOCDOC_DOCS=$docs "$binary" --restored {snapshot_fd}<&- >&2 || status=$?
   fi

@@ -495,26 +495,32 @@ elif action == "start" and not running():
     env["LOCDOC_WEB"] = str(current / "web")
     with open(unit / "server.log", "ab") as log:
         server = subprocess.Popen(
-            [str(current / "locdoc")], cwd=unit, env=env, stdin=subprocess.DEVNULL,
+            [str(current / "locdoc")], cwd=(unit / "cwd").read_text(), env=env, stdin=subprocess.DEVNULL,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     (unit / "pid").write_text(str(server.pid))
     (unit / "invocation").write_text(uuid.uuid4().hex)
 `;
 
-async function fakeUnit(root, fixture) {
+// With `defaults`, the unit names no folders and runs in the live folder,
+// whose .locdoc links to its state folder.
+async function fakeUnit(root, fixture, defaults) {
   const unit = join(root, "unit");
   const bin = join(root, "unit-bin");
   await mkdir(unit);
   await mkdir(bin);
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
+  const folders = defaults
+    ? {}
+    : { LOCDOC_STATE: fixture.state, LOCDOC_DOCS: fixture.docs };
+  if (defaults) await symlink("state", join(fixture.live, ".locdoc"));
+  await writeFile(join(unit, "cwd"), defaults ? fixture.live : unit);
   await writeFile(
     join(unit, "env.json"),
     JSON.stringify({
       PATH: process.env.PATH,
       HOME: root,
-      LOCDOC_STATE: fixture.state,
-      LOCDOC_DOCS: fixture.docs,
+      ...folders,
       LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_PUBLIC_URL: base,
     }),
@@ -665,7 +671,8 @@ test("restore restarts the unit, and stops it to put the live data back when its
       const folder = join(root, point || "kept");
       await mkdir(folder);
       const fixture = await restoreFixture(folder);
-      const unit = await fakeUnit(folder, fixture);
+      // The restore pass gets the folders even from a unit that names none.
+      const unit = await fakeUnit(folder, fixture, !point);
       units.push(unit);
       assert.equal(unit.systemctl("start").status, 0);
       await unit.ready();
@@ -817,6 +824,46 @@ test("a restore killed in its pass keeps startup refusing a backup without root.
       await refusedStartup(fixture.state, fixture.docs),
       /restore pass has not completed/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("locdoc --restored needs both folders named", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    // A working folder whose .locdoc holds a workspace's state and whose
+    // docs is some other folder: defaults would pair them.
+    const cwd = join(root, "checkout");
+    await mkdir(join(cwd, "docs"), { recursive: true });
+    await writeFile(join(cwd, "docs/notes.md"), "Unrelated\n");
+    assert.equal(
+      spawnSync("cp", ["-a", fixture.state, join(cwd, ".locdoc")]).status,
+      0,
+    );
+    const before = fingerprint(join(cwd, ".locdoc"));
+    for (const unset of [
+      ["LOCDOC_STATE"],
+      ["LOCDOC_DOCS"],
+      ["LOCDOC_STATE", "LOCDOC_DOCS"],
+    ]) {
+      const env = {
+        ...process.env,
+        LOCDOC_STATE: join(cwd, ".locdoc"),
+        LOCDOC_DOCS: join(cwd, "docs"),
+      };
+      for (const name of unset) delete env[name];
+      const run = spawnSync(binary, ["--restored"], {
+        cwd,
+        env,
+        encoding: "utf8",
+        timeout: 10000,
+      });
+      assert.equal(run.status, 2, `${unset}: ${run.stderr}`);
+      assert.match(run.stderr, /set LOCDOC_STATE and LOCDOC_DOCS/);
+    }
+    assert.equal(fingerprint(join(cwd, ".locdoc")), before, "state unchanged");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
