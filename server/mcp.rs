@@ -1372,7 +1372,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(found["matches"], json!([]));
-        // Listing ran a pass: the enabled document followed its own file.
+        // Listings leave both files to the maintenance loop's next pass,
+        // which moves the enabled document with its own file.
+        assert_eq!(s.doc(&d.id).unwrap().path, "test.md");
+        s.discover_file_moves().unwrap();
         assert_eq!(s.doc(&d.id).unwrap().path, "private.md");
         let read = execute(s.clone(), tools, "read_document", json!({"doc_id": d.id}))
             .await

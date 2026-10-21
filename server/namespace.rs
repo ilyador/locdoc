@@ -112,6 +112,15 @@ impl Requests {
             self.after(RETRY);
         }
     }
+    /// A listing found a file no pass has matched yet. While an incomplete
+    /// walk holds missing documents only its own retry can settle them, and
+    /// every pass meanwhile walks the tree, so listings do not ask.
+    fn unlisted(&self) {
+        let held = !self.0.lock().unwrap().held.is_empty();
+        if !held {
+            self.after(RETRY);
+        }
+    }
     fn hold(&self, documents: HashSet<String>) {
         self.0.lock().unwrap().held = documents;
     }
@@ -411,24 +420,45 @@ impl Store {
     /// whose file a changed or moved entry is; a file that no document has
     /// recorded gets a fresh, private identity.
     pub(super) fn index_document(&self, input: &str) -> Result<Document> {
+        self.find_document(input, true)
+    }
+
+    /// `index_document` for listings, which tabs poll every few seconds: a
+    /// file no pass has matched yet is left to the maintenance loop and its
+    /// backoff, never matched by walking the tree here.
+    pub(super) fn listed_document(&self, input: &str) -> Result<Document> {
+        self.find_document(input, false)
+    }
+
+    fn find_document(&self, input: &str, discover: bool) -> Result<Document> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
         let full = self.safe(&path, false)?;
+        let not_found = || ApiError(StatusCode::NOT_FOUND, "Document not found.".into());
         if format(&path).is_none() || !full.is_file() {
-            return Err(ApiError(
-                StatusCode::NOT_FOUND,
-                "Document not found.".into(),
-            ));
+            return Err(not_found());
         }
-        let mut evidence = Identity::of(&fs::symlink_metadata(&full)?);
+        let observe = || match fs::symlink_metadata(&full) {
+            Ok(metadata) => Ok(Identity::of(&metadata)),
+            // Removed since it was listed.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(not_found()),
+            Err(error) => Err(error.into()),
+        };
+        let mut evidence = observe()?;
         if !self.assigned(&path, evidence.as_ref())? {
-            self.reconcile(Pass::Discover)?;
-            evidence = Identity::of(&fs::symlink_metadata(&full)?);
-            if !self.assigned(&path, evidence.as_ref())? {
+            if discover {
+                self.reconcile(Pass::Discover)?;
+                evidence = observe()?;
+            }
+            if !discover || !self.assigned(&path, evidence.as_ref())? {
                 // A busy room or a move in progress; a later pass decides. A
                 // second name for a document's file stays unlisted.
-                self.reconciliation.after(RETRY);
+                if discover {
+                    self.reconciliation.after(RETRY);
+                } else {
+                    self.reconciliation.unlisted();
+                }
                 return Err(ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "This file is still being matched to its document. Try again shortly.".into(),

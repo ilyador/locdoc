@@ -2100,3 +2100,45 @@ fn an_unreadable_subfolder_never_hides_the_rest_of_the_listing() {
     assert_eq!(listed.unwrap(), ["Locked", "page.md"]);
     assert_eq!(logs.count("listing leaves out"), 2);
 }
+
+#[test]
+fn listings_never_walk_the_tree_while_an_unreadable_folder_holds_a_document() {
+    let (directory, s, a, b) = swap_fixture();
+    s.create_folder("Locked").unwrap();
+    // A's file leaves the root and B's file takes A's name. B cannot take
+    // that name until a complete walk retires A.
+    fs::rename(s.root.join("p.md"), directory.path().join("outside.md")).unwrap();
+    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    let walks = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (root, counted, unreadable) = (s.root.clone(), walks.clone(), locked(&s));
+    s.reconciliation.take();
+    walking(
+        move |path| {
+            if path == root {
+                counted.set(counted.get() + 1);
+            }
+            unreadable(path)
+        },
+        || {
+            s.retire_missing_documents().unwrap();
+            let held = s.reconciliation.take().unwrap();
+            let before = walks.get();
+            // Tabs, including folder-link visitors, poll every few seconds.
+            for _ in 0..5 {
+                let mut entries = Vec::new();
+                scan(&s, &s.root, &mut entries).unwrap();
+                assert!(entries.iter().all(|entry| entry.id.is_none()));
+            }
+            assert_eq!(walks.get(), before, "A listing must never walk the tree");
+            assert!(
+                s.reconciliation.take().is_none_or(|next| next >= held),
+                "Listings must not bring the next walk forward"
+            );
+        },
+    );
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
+}

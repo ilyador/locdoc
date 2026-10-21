@@ -807,7 +807,7 @@ fn scan_folder(
                 Err(error) => s.listed(&p, Some(error)),
             }
         } else if metadata.is_file() && documents::format(&rel).is_some() {
-            let d = match s.index_document(&rel) {
+            let d = match s.listed_document(&rel) {
                 // A file still being matched to its document is listed once a
                 // pass decides. One removed or replaced by a link meanwhile,
                 // or with a name no document path can have, is left out.
