@@ -8,7 +8,8 @@ import { EditorView } from "@codemirror/view";
 import { EditorState } from "@codemirror/state";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { NodeType, Tree } from "@lezer/common";
-import { MarkdownEditor, livePreview } from "../src/editor";
+import { MarkdownEditor } from "../src/editor";
+import { livePreview } from "../src/markdown-preview";
 import { emphasisContentRange } from "../src/emphasis-range";
 
 let dom: JSDOM;

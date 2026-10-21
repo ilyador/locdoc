@@ -15,7 +15,7 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
-import type { Anchor } from "./editor";
+import type { Anchor } from "./editor-types";
 import { sourceComments } from "./comment-syntax";
 
 // Source records stay editable on disk, while the writing surface shows only

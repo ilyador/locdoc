@@ -1,4 +1,4 @@
-import type { Anchor } from "./editor";
+import type { Anchor } from "./editor-types";
 
 export type Entry = {
   path: string;

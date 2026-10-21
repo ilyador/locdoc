@@ -14,7 +14,7 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { JSDOM } from "jsdom";
 import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
-import { livePreview } from "../src/editor";
+import { livePreview } from "../src/markdown-preview";
 
 const language = markdown({
   base: markdownLanguage,
