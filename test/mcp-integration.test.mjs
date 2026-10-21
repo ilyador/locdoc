@@ -440,6 +440,27 @@ test('MCP reads history and restores only against the current revision without l
   assert.equal(recovery.content, current.content, 'Restore keeps the replaced accepted source in history');
 });
 
+test('MCP moves require an enabled destination and folder inheritance ends on an owner move out', async () => {
+  await ownerCreate('Move enabled', 'folder');
+  await ownerCreate('Move private', 'folder');
+  await allowFolder('Move enabled', true);
+  const doc = await ownerCreate('Move enabled/page.md');
+  denied(await call(ownerConnection, 'rename_document', { doc_id: doc.id, path: 'Move private/page.md' }),
+    'A document opt-in cannot authorize writes into an unapproved folder');
+  assert.equal((await request(`/api/docs/${doc.id}`, { headers: ownerHeaders() })).body.path, 'Move enabled/page.md');
+  await allowFolder('Move private', true);
+  value(await call(ownerConnection, 'rename_document', { doc_id: doc.id, path: 'Move private/page.md' }));
+  assert.equal(value(await call(ownerConnection, 'read_document', { doc_id: doc.id })).path, 'Move private/page.md');
+  await allowFolder('Move private', false);
+  denied(await call(ownerConnection, 'read_document', { doc_id: doc.id }));
+  // Direct document access remains attached to identity across owner moves.
+  await allowDocument(doc.id, true);
+  const moved = await request(`/api/docs/${doc.id}`, { ...json({ path: 'Move enabled/returned.md' }, ownerSession), method: 'PATCH' });
+  assert.equal(moved.status, 200);
+  await allowFolder('Move enabled', false);
+  assert.equal(value(await call(ownerConnection, 'read_document', { doc_id: doc.id })).path, 'Move enabled/returned.md');
+});
+
 test('MCP discovery and search filter before pagination and never expose unrelated private folders', { timeout: 20_000 }, async () => {
   const visible = await ownerCreate('Discoverable/Deep/Visible.md');
   const hidden = await ownerCreate('Unrelated private folder/Secret.md');

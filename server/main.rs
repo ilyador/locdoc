@@ -324,6 +324,7 @@ impl Store {
                 .unwrap(),
         });
         store.recover_file_operations()?;
+        store.discover_file_moves()?;
         Ok(store)
     }
     fn owner(&self, h: &HeaderMap) -> bool {

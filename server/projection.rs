@@ -105,10 +105,13 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                 }
                 coordinator.sweep(&s, rescan);
                 if missing_after.is_some_and(|deadline| Instant::now() >= deadline) {
-                    if let Err(error) = s.retire_missing_documents() {
-                        tracing::warn!("document scan failed: {error}");
-                    }
-                    missing_after = None;
+                    missing_after = match s.retire_missing_documents() {
+                        Ok(()) => None,
+                        Err(error) => {
+                            tracing::debug!("document scan pending: {error}");
+                            Some(Instant::now() + settle)
+                        }
+                    };
                 }
                 next_sweep = Instant::now() + Duration::from_millis(100);
             }

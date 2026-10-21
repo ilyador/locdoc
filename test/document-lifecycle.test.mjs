@@ -100,8 +100,10 @@ test("document identity survives aliases and rename, while new files never inher
     assert.equal(replacement.body.permission, "private");
     assert.equal(
       (await request(`/api/open/${token}`, "GET", undefined, false)).status,
-      404,
+      200,
     );
+    assert.equal((await request(`/api/open/${token}`, "GET", undefined, false)).body.document.id, first.body.id);
+    assert.equal((await request(`/api/docs/${replacement.body.id}?token=${token}`, "GET", undefined, false)).status, 403);
 
     const alias = await request("/api/files", "POST", {
       kind: "file",

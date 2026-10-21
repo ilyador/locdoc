@@ -168,6 +168,18 @@ impl FileMove {
     }
 }
 
+// An inode alone can be reused after deletion. Only a regular, unaliased file
+// with a birth time is evidence for following an unannounced desktop move.
+fn file_identity(metadata: &fs::Metadata) -> Option<String> {
+    (metadata.is_file() && metadata.nlink() == 1).then_some(())?;
+    Some(format!(
+        "{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        FileMove::birth(metadata)?
+    ))
+}
+
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
     let db = connection.unchecked_transaction()?;
     let has_active = db
@@ -214,6 +226,12 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS document_moves(
             doc TEXT PRIMARY KEY,source TEXT NOT NULL,destination TEXT NOT NULL UNIQUE,
             device TEXT NOT NULL,inode TEXT NOT NULL,born TEXT);",
+    )?;
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS document_identities(
+            doc TEXT PRIMARY KEY,identity TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS document_physical_identity
+            ON document_identities(identity);",
     )?;
     let has_move_birth = db
         .prepare("PRAGMA table_info(document_moves)")?
@@ -329,11 +347,26 @@ impl Store {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
-        if format(&path).is_none() || !self.safe(&path, false)?.is_file() {
+        let full = self.safe(&path, false)?;
+        if format(&path).is_none() || !full.is_file() {
             return Err(ApiError(
                 StatusCode::NOT_FOUND,
                 "Document not found.".into(),
             ));
+        }
+        let metadata = fs::metadata(&full)?;
+        let indexed = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM docs WHERE path=? AND active=1",
+                [&path],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        if indexed.is_none() {
+            self.follow_file_move(&path, &metadata)?;
         }
         let id = {
             let db = self.db.lock().unwrap();
@@ -347,7 +380,192 @@ impl Store {
                 |r| r.get::<_, String>(0),
             )?
         };
+        self.remember_file_identity(&id, &metadata)?;
         self.doc(&id)
+    }
+
+    fn remember_file_identity(&self, id: &str, metadata: &fs::Metadata) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        Self::remember_file_identity_in(&db, id, metadata)
+    }
+
+    fn remember_file_identity_in(db: &Connection, id: &str, metadata: &fs::Metadata) -> Result<()> {
+        if let Some(identity) = file_identity(metadata) {
+            db.execute(
+                "INSERT INTO document_identities(doc,identity) VALUES(?,?)
+                 ON CONFLICT(doc) DO UPDATE SET identity=excluded.identity
+                 WHERE identity!=excluded.identity",
+                params![id, identity],
+            )?;
+        } else {
+            db.execute("DELETE FROM document_identities WHERE doc=?", [id])?;
+        }
+        Ok(())
+    }
+
+    /// Called under document_files, before discovery allocates a new identity.
+    /// Copies, hard links, inaccessible sources and ambiguous matches never
+    /// acquire another document's links or history.
+    fn follow_file_move(&self, path: &str, metadata: &fs::Metadata) -> Result<()> {
+        let Some(identity) = file_identity(metadata) else {
+            return Ok(());
+        };
+        let candidates = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT d.id,d.path FROM docs d JOIN document_identities f ON f.doc=d.id
+             WHERE d.active=1 AND f.identity=? AND d.path!=?
+             AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=d.id)",
+            )?
+            .query_map(params![identity, path], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let missing = candidates
+            .into_iter()
+            .filter(|(_, source)| {
+                self.safe(source, false).is_ok_and(|source| {
+                    fs::symlink_metadata(source)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                })
+            })
+            .collect::<Vec<_>>();
+        if missing.len() != 1 {
+            return Ok(());
+        }
+        let (id, source) = &missing[0];
+        let room = self.rooms.lock().unwrap().get(id).cloned();
+        let mut live = if let Some(room) = &room {
+            Some(room.try_lock().map_err(|_| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The moved document is busy. Retry shortly.".into(),
+                )
+            })?)
+        } else {
+            None
+        };
+        if let Some(room) = live.as_mut() {
+            room.ensure_committed(self, &self.doc(id)?)?;
+        }
+        let movement = FileMove {
+            document: id.clone(),
+            source: source.clone(),
+            destination: path.into(),
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+            born: FileMove::birth(metadata),
+        };
+        // Recheck after admission: an editor may have recreated the old name.
+        if !fs::symlink_metadata(self.safe(source, false)?)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            || !movement.contains(&self.safe(path, false)?)?
+        {
+            return Err(bad(
+                "The moved file changed during discovery. Retry shortly.",
+            ));
+        }
+        self.journal_file_move(&movement)?;
+        self.finish_file_move(&movement)?;
+        Ok(())
+    }
+
+    /// Refresh atomic-save identities and find moves missed while offline or
+    /// during watcher overflow. Only missing tracked files require a tree walk.
+    pub(super) fn discover_file_moves(&self) -> Result<()> {
+        let _files = self.document_files.lock().unwrap();
+        self.discover_file_moves_locked()
+    }
+
+    fn discover_file_moves_locked(&self) -> Result<()> {
+        let rows = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT d.id,d.path,f.identity FROM docs d
+             LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active=1
+             AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=d.id)",
+            )?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut missing = HashSet::new();
+        let mut present = Vec::new();
+        for (id, path, identity) in rows {
+            let Ok(full) = self.safe(&path, false) else {
+                continue;
+            };
+            match fs::metadata(full) {
+                Ok(metadata) => present.push((id, metadata)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(identity) = identity {
+                        missing.insert(identity);
+                    }
+                }
+                // Inaccessibility is never evidence for an external move.
+                Err(_) => {}
+            }
+        }
+        {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            for (id, metadata) in present {
+                Self::remember_file_identity_in(&tx, &id, &metadata)?;
+            }
+            tx.commit()?;
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let mut folders = vec![self.root.clone()];
+        while let Some(folder) = folders.pop() {
+            let children = match fs::read_dir(folder) {
+                Ok(children) => children,
+                Err(_) => continue,
+            };
+            for child in children {
+                let child = child?;
+                if child.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(child.path())?;
+                if metadata.is_dir() {
+                    folders.push(child.path());
+                } else if file_identity(&metadata)
+                    .is_some_and(|identity| missing.contains(&identity))
+                {
+                    let path = child.path();
+                    let relative = path.strip_prefix(&self.root).unwrap().to_string_lossy();
+                    if format(&relative).is_some() {
+                        // Never reinterpret an existing destination document as
+                        // a move: ordinary atomic replacement preserves its ID.
+                        let exists = self
+                            .db
+                            .lock()
+                            .unwrap()
+                            .query_row(
+                                "SELECT 1 FROM docs WHERE path=? AND active=1",
+                                [&*relative],
+                                |_| Ok(()),
+                            )
+                            .optional()?
+                            .is_some();
+                        if !exists {
+                            self.follow_file_move(&relative, &metadata)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn close_document(&self, id: &str) {
@@ -386,14 +604,17 @@ impl Store {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        if let Some(previous) = previous
-            && !self.retire_missing_identity(&previous, &full)?
-        {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "The previous document is busy or its file changed. Retry after its save finishes."
-                    .into(),
-            ));
+        if let Some(previous) = previous {
+            self.discover_file_moves_locked()?;
+            if self.doc(&previous)?.path == path
+                && !self.retire_missing_identity(&previous, &full)?
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "The previous document is busy or its file changed. Retry after its save finishes."
+                        .into(),
+                ));
+            }
         }
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -423,6 +644,7 @@ impl Store {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;
+            Self::remember_file_identity_in(&tx, &id, &file.metadata()?)?;
             tx.commit()?;
             drop(db);
             self.permissions.invalidate();
@@ -440,23 +662,34 @@ impl Store {
     }
 
     pub(super) fn rename_document(&self, id: &str, input: &str) -> Result<()> {
+        self.rename_document_checked(id, input, |_, _| Ok(()))
+    }
+
+    /// Recheck scoped callers after filesystem discovery and under the same
+    /// namespace lock as folder opt-ins and the move itself.
+    pub(super) fn rename_document_checked(
+        &self,
+        id: &str,
+        input: &str,
+        authorize: impl FnOnce(&Document, &str) -> Result<()>,
+    ) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         self.finish_pending_path(&self.doc(id)?.path)?;
+        self.discover_file_moves_locked()?;
         let d = self.doc(id)?;
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
+        authorize(&d, &path)?;
         if path == d.path {
             return Ok(());
         }
         if format(&path).is_none() {
             return Err(bad("Document names must end with .md or .fountain."));
         }
-        if Path::new(&path).parent() != Path::new(&d.path).parent() {
-            return Err(bad(
-                "Rename within the same folder to preserve relative attachments.",
-            ));
-        }
         let dest = self.safe(&path, false)?;
+        if !dest.parent().is_some_and(Path::is_dir) {
+            return Err(bad("Choose an existing destination folder."));
+        }
         if dest.exists() {
             return Err(bad("That path already exists."));
         }
@@ -496,11 +729,21 @@ impl Store {
                     .into(),
             ));
         }
+        self.journal_file_move(&movement)?;
+        let completed = self.finish_file_move(&movement)?;
+        drop(r);
+        if !completed {
+            return Err(bad("That path already exists."));
+        }
+        Ok(())
+    }
+
+    fn journal_file_move(&self, movement: &FileMove) -> Result<()> {
         self.db.lock().unwrap().execute(
             "INSERT INTO document_moves(doc,source,destination,device,inode,born)
                     VALUES(?,?,?,?,?,?)",
             params![
-                id,
+                movement.document,
                 movement.source,
                 movement.destination,
                 movement.device,
@@ -508,11 +751,6 @@ impl Store {
                 movement.born
             ],
         )?;
-        let completed = self.finish_file_move(&movement)?;
-        drop(r);
-        if !completed {
-            return Err(bad("That path already exists."));
-        }
         Ok(())
     }
 
@@ -570,9 +808,19 @@ impl Store {
             fs::remove_file(&source)?;
         }
         disk::sync_directories(destination.parent().unwrap(), &self.root)?;
+        if source.parent().unwrap().is_dir() {
+            disk::sync_directories(source.parent().unwrap(), &self.root)?;
+        }
+        let mut old = self.doc(&movement.document)?;
+        old.path = movement.source.clone();
+        let metadata = fs::metadata(&destination)?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
+        if Path::new(&movement.source).parent() != Path::new(&movement.destination).parent() {
+            self.freeze_moved_media(&tx, &old)?;
+        }
         let previous = Self::move_identity(&tx, movement)?;
+        Self::remember_file_identity_in(&tx, &movement.document, &metadata)?;
         tx.execute(
             "DELETE FROM document_moves WHERE doc=?",
             [&movement.document],
@@ -653,6 +901,7 @@ impl Store {
         if !self.root_identity.matches(&self.root) {
             return Ok(());
         }
+        self.discover_file_moves_locked()?;
         let rows = self
             .db
             .lock()
@@ -877,7 +1126,9 @@ mod tests {
         assert_ne!(old.id, new.id);
         assert_eq!(new.permission, "private");
         assert!(new.token.is_none());
-        assert_eq!(s.doc(&old.id).unwrap_err().0, StatusCode::NOT_FOUND);
+        let moved = s.doc(&old.id).unwrap();
+        assert_eq!(moved.path, "archive.md");
+        assert_eq!(moved.token.as_deref(), Some("old-link"));
     }
     #[test]
     fn rename_retires_a_missing_destination_but_preserves_the_source_identity() {
@@ -1292,7 +1543,8 @@ mod tests {
             let doc = s.create_document("folder//note.md").unwrap();
             assert_eq!(doc.permission, "private");
             if let Some(ref old) = previous {
-                assert!(s.doc(old).is_err());
+                assert_ne!(&doc.id, old);
+                assert_eq!(s.doc(old).unwrap().token.as_deref(), Some("old-link"));
             }
             share(&s, &doc.id);
             s.rename_document(&doc.id, "folder/renamed.md").unwrap();
@@ -1305,5 +1557,146 @@ mod tests {
             s.retire_missing_documents().unwrap();
             previous = Some(doc.id);
         }
+    }
+
+    #[test]
+    fn moves_keep_identity_history_and_bytes_across_folders_and_restart() {
+        let (_dir, s) = store();
+        let d = s.create_document("Drafts/page.md").unwrap();
+        s.create_folder("Published").unwrap();
+        share(&s, &d.id);
+        let source = fs::read(s.root.join(&d.path)).unwrap();
+        s.snapshot(&d, "Earlier text", true).unwrap();
+        s.rename_document(&d.id, "Published/page.md").unwrap();
+        let moved = s.doc(&d.id).unwrap();
+        assert_eq!(moved.path, "Published/page.md");
+        assert_eq!(moved.token.as_deref(), Some("old-link"));
+        assert_eq!(fs::read(s.root.join(&moved.path)).unwrap(), source);
+        assert!(!s.root.join(&d.path).exists());
+        // Also follow a directory move made while the process is stopped.
+        fs::rename(s.root.join("Published"), s.root.join("Archived")).unwrap();
+        let s = reopen(s);
+        let recovered = s.doc(&d.id).unwrap();
+        assert_eq!(recovered.path, "Archived/page.md");
+        assert_eq!(recovered.token.as_deref(), Some("old-link"));
+        assert_eq!(s.index_document(&recovered.path).unwrap().id, d.id);
+        let history: i64 =
+            s.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM revisions WHERE doc=? AND content='Earlier text'",
+                    [&d.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(history, 1);
+    }
+
+    #[test]
+    fn desktop_moves_keep_pending_accepted_text_and_never_require_a_text_replacement() {
+        let (_dir, s) = store();
+        let d = s.create_document("Drafts/page.fountain").unwrap();
+        s.create_folder("Archive").unwrap();
+        share(&s, &d.id);
+        let room = s.room(&d).unwrap();
+        let frame = append_frame(&room, "Browser text still waiting for projection");
+        process_frame(&s, &d, &room, &frame, true, true, &mut Peer::default()).unwrap();
+        let expected = room_text(&room.lock().unwrap());
+        fs::rename(s.root.join(&d.path), s.root.join("Archive/page.fountain")).unwrap();
+        let moved = s.index_document("Archive/page.fountain").unwrap();
+        assert_eq!(moved.id, d.id);
+        assert_eq!(moved.token.as_deref(), Some("old-link"));
+        s.persist(&moved, &mut room.lock().unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(s.root.join(&moved.path)).unwrap(),
+            expected
+        );
+        assert!(!s.root.join(&d.path).exists());
+    }
+
+    #[test]
+    fn a_busy_external_move_retries_before_retiring_its_identity() {
+        let (_dir, s) = store();
+        let d = s.create_document("Drafts/page.md").unwrap();
+        s.create_folder("Archive").unwrap();
+        let room = s.room(&d).unwrap();
+        let busy = room.lock().unwrap();
+        fs::rename(s.root.join(&d.path), s.root.join("Archive/page.md")).unwrap();
+        assert!(s.retire_missing_documents().is_err());
+        assert!(s.doc(&d.id).is_ok());
+        drop(busy);
+        s.retire_missing_documents().unwrap();
+        assert_eq!(s.doc(&d.id).unwrap().path, "Archive/page.md");
+    }
+
+    #[test]
+    fn copies_aliases_and_reused_inodes_never_steal_document_links() {
+        let (_dir, s) = store();
+        let d = s.create_document("original.md").unwrap();
+        share(&s, &d.id);
+        fs::copy(s.root.join(&d.path), s.root.join("copy.md")).unwrap();
+        let copy = s.index_document("copy.md").unwrap();
+        assert_ne!(copy.id, d.id);
+        assert_eq!(copy.permission, "private");
+        fs::hard_link(s.root.join(&d.path), s.root.join("alias.md")).unwrap();
+        let alias = s.index_document("alias.md").unwrap();
+        assert_ne!(alias.id, d.id);
+        assert_eq!(alias.permission, "private");
+        fs::remove_file(s.root.join("alias.md")).unwrap();
+        s.index_document(&d.path).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE document_identities SET identity=identity||'-wrong-birth' WHERE doc=?",
+                [&d.id],
+            )
+            .unwrap();
+        fs::rename(s.root.join(&d.path), s.root.join("unconfirmed.md")).unwrap();
+        let unrelated = s.index_document("unconfirmed.md").unwrap();
+        assert_ne!(unrelated.id, d.id);
+        assert_eq!(unrelated.permission, "private");
+    }
+
+    #[test]
+    fn moving_does_not_turn_relative_media_approval_into_access_to_another_private_image() {
+        let (_dir, s) = store();
+        let d = s.create_document("Drafts/page.md").unwrap();
+        s.create_folder("Private").unwrap();
+        fs::write(s.root.join("Drafts/image.png"), "Original image").unwrap();
+        fs::write(s.root.join("Private/image.png"), "Unshared private image").unwrap();
+        fs::write(s.root.join(&d.path), "![image](image.png)").unwrap();
+        let room = s.room(&d).unwrap();
+        let original = s.root.join("Drafts/image.png");
+        assert!(s.active_attachment_allowed(&d, &original));
+        s.rename_document(&d.id, "Private/page.md").unwrap();
+        let moved = s.doc(&d.id).unwrap();
+        assert!(!s.active_attachment_allowed(&moved, &s.root.join("Private/image.png")));
+        assert_eq!(room_text(&room.lock().unwrap()), "![image](image.png)");
+        assert!(s.attachment_allowed(&moved, &original));
+    }
+
+    #[test]
+    fn a_rejected_external_move_stays_journaled_and_replays_without_allocating_a_second_id() {
+        let (_dir, s) = store();
+        let d = s.create_document("Drafts/page.md").unwrap();
+        s.create_folder("Archive").unwrap();
+        share(&s, &d.id);
+        fs::rename(s.root.join(&d.path), s.root.join("Archive/page.md")).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_move BEFORE UPDATE OF path ON docs
+             BEGIN SELECT RAISE(ABORT,'fixture rejection'); END;",
+            )
+            .unwrap();
+        assert!(s.index_document("Archive/page.md").is_err());
+        assert_eq!(s.pending_file_moves(None).unwrap().len(), 1);
+        s.db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_move")
+            .unwrap();
+        let s = reopen(s);
+        assert_eq!(s.index_document("Archive/page.md").unwrap().id, d.id);
+        assert_eq!(s.doc(&d.id).unwrap().token.as_deref(), Some("old-link"));
     }
 }

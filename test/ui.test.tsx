@@ -885,7 +885,7 @@ test("rename owns a fresh input independent of the create form", () => {
       onRename={() => {}}
     />,
   );
-  const input = screen.getByLabelText("Rename document");
+  const input = screen.getByLabelText("Rename or move document");
   fireEvent.change(input, { target: { value: "" } });
   assert.equal(input.value, "");
 });

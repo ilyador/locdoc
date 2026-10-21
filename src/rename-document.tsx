@@ -31,7 +31,7 @@ export function RenameDocument({
       }}
     >
       <label className="field-label" htmlFor="rename">
-        Rename document
+        Rename or move document
       </label>
       <div className="inline-form">
         <input
@@ -44,11 +44,11 @@ export function RenameDocument({
           required
         />
         <button className="button quiet" disabled={pending}>
-          Rename
+          Apply
         </button>
       </div>
       <p className="field-help">
-        Keep the folder path to preserve relative attachment links.
+        Change the folder path to move. Relative attachment links may need updating.
       </p>
       {error && <p role="alert">{error}</p>}
     </form>

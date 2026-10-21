@@ -246,6 +246,55 @@ test("new nested documents inherit folder access; empty folders can be shared", 
   });
 });
 
+test("moving between folders preserves direct links and applies inheritance only at the current location", async () => {
+  const d = await doc("MoveSource/page.md", "# Moving document\n\nOriginal passage.\n");
+  await request("/api/files", { method: "POST", body: { kind: "folder", path: "MoveDest" } });
+  const source = await share("MoveSource", "edit");
+  const destination = await share("MoveDest", "view");
+  const direct = await request(`/api/docs/${d.id}/share`, {
+    method: "POST", body: { permission: "view" },
+  });
+  const directToken = direct.shareUrl.split("/").pop();
+  const snapshot = await request(`/api/docs/${d.id}?token=${source.token}`, { owner: false });
+  const viewer = connect(snapshot, source.token);
+  const independent = connect(snapshot, directToken);
+  await until(() => viewer.provider.synced && independent.provider.synced);
+  await request(`/api/docs/${d.id}/comments`, {
+    method: "POST", body: { name: "Owner", body: "Keep this conversation", quote: "passage" },
+  });
+  await request(`/api/docs/${d.id}`, { method: "PATCH", body: { path: "MoveDest/page.md" } });
+  const opened = await request(`/api/open/${directToken}`, { owner: false });
+  assert.equal(opened.document.id, d.id);
+  assert.equal(opened.document.edit, false);
+  await request(`/api/docs/${d.id}?token=${source.token}`, { owner: false, status: 403 });
+  assert.equal((await request(`/api/docs/${d.id}?token=${destination.token}`, { owner: false })).edit, false);
+  assert.equal((await request(`/api/docs/${d.id}`)).shareUrl, direct.shareUrl);
+  const comments = await request(`/api/docs/${d.id}/comments?token=${directToken}`, { owner: false });
+  assert.ok(comments.comments.some(c => c.body === "Keep this conversation"));
+  const revokedText = viewer.text.toString();
+  await until(() => !viewer.provider.wsconnected);
+  assert.equal(independent.provider.wsconnected, true);
+  // Former folder editors cannot write or receive future private changes.
+  viewer.text.insert(0, "FORGED AFTER MOVE");
+  await writeFile(join(dir, "docs/MoveDest/page.md"), (await readFile(join(dir, "docs/MoveDest/page.md"), "utf8")) + "\nPrivate after move.\n");
+  await until(() => independent.text.toString().includes("Private after move"));
+  assert.ok(!viewer.text.toString().includes("Private after move"));
+  assert.ok(!independent.text.toString().includes("FORGED AFTER MOVE"));
+  assert.ok(revokedText.includes("Original passage"));
+
+  // A native desktop move has the same identity and access behavior.
+  await rename(join(dir, "docs/MoveDest/page.md"), join(dir, "docs/MoveSource/returned.md"));
+  await until(async () => {
+    const response = await fetch(`${base}/api/docs/${d.id}`, { headers: { Authorization: `Bearer ${key}` } });
+    return response.ok && (await response.json()).path === "MoveSource/returned.md";
+  });
+  assert.equal((await request(`/api/docs/${d.id}?token=${source.token}`, { owner: false })).edit, true);
+  await request(`/api/docs/${d.id}?token=${destination.token}`, { owner: false, status: 403 });
+  assert.equal((await request(`/api/open/${directToken}`, { owner: false })).document.id, d.id);
+  viewer.provider.destroy();
+  independent.provider.destroy();
+});
+
 test("view links allow source comments but reject forged CRDT writes and uploads", async () => {
   const d = await doc("Review/page.md");
   const grant = await share("Review");

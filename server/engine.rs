@@ -67,6 +67,30 @@ struct StoredRoom {
 }
 
 impl Store {
+    /// Relative owner approvals must not resolve to a different private file
+    /// after a move. Retain their exact targets, not authority over the same
+    /// spelling in an unrelated destination folder. Source bytes stay intact.
+    pub(super) fn freeze_moved_media(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        document: &Document,
+    ) -> Result<()> {
+        let references = tx
+            .prepare("SELECT reference FROM trusted_references WHERE doc=?")?
+            .query_map([&document.id], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for reference in references {
+            if let Ok(path) = self.media_path(document, &reference) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
+                    params![document.id, path.to_string_lossy()],
+                )?;
+            }
+        }
+        tx.execute("DELETE FROM trusted_references WHERE doc=?", [&document.id])?;
+        Ok(())
+    }
+
     fn check_identity(db: &Connection, id: &str) -> Result<()> {
         let identity = db.query_row(
             "SELECT active,EXISTS(SELECT 1 FROM document_moves WHERE doc=docs.id) FROM docs WHERE id=?",

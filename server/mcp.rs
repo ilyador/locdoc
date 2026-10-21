@@ -161,8 +161,8 @@ fn tools() -> Vec<Tool> {
         tool::<Renaming>(
             "rename_document",
             concat!(
-                "Rename a document within its current folder, preserving identity, history and share ",
-                "links. Moving to a different folder is unsupported because attachments are relative.",
+                "Rename or move a document, preserving identity, history and direct share links. ",
+                "A different destination folder must be enabled for MCP. Relative media links may need updating.",
             ),
         ),
         tool::<Sharing>(
@@ -788,7 +788,14 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
         "rename_document" => {
             let b: Renaming = arguments(input)?;
             document_job(s, grant, b.doc_id.clone(), required, move |s, d| {
-                s.rename_document(&d.id, &b.path)?;
+                s.rename_document_checked(&d.id, &b.path, |current, path| {
+                    mcp_access::require_document(s, current)?;
+                    let parent = Path::new(path).parent().unwrap();
+                    if parent != Path::new(&current.path).parent().unwrap() {
+                        mcp_access::require_folder(s, &parent.to_string_lossy())?;
+                    }
+                    Ok(())
+                })?;
                 Ok(json!({"ok":true}))
             })
             .await
