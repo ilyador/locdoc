@@ -189,6 +189,7 @@ let dom: JSDOM;
 let render: typeof import("@testing-library/react").render;
 let act: typeof import("@testing-library/react").act;
 let cleanup: typeof import("@testing-library/react").cleanup;
+let waitFor: typeof import("@testing-library/react").waitFor;
 before(async () => {
   dom = new JSDOM("<!doctype html><html><body></body></html>", {
     url: "http://localhost/",
@@ -232,7 +233,7 @@ before(async () => {
     disconnect() {}
   } as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, act, cleanup } = await import("@testing-library/react"));
+  ({ render, act, cleanup, waitFor } = await import("@testing-library/react"));
 });
 afterEach(() => cleanup());
 after(() => dom.window.close());
@@ -274,6 +275,162 @@ function mount(source: string, path = "Note.md") {
     },
   };
 }
+
+test("native Backspace at a new line removes its break even when the browser mutates the preceding word", async () => {
+  for (const path of ["Note.md", "Script.fountain"]) {
+    const fixture = mount("First word\n", path);
+    try {
+      act(() => {
+        fixture.view.dispatch({ selection: { anchor: fixture.text.length } });
+        fixture.view.focus();
+      });
+      await act(async () => {
+        fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("beforeinput", {
+            inputType: "deleteContentBackward",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        // Reproduce the mobile browser's reported DOM mutation. The caret's
+        // logical intent is to join lines, never delete the preceding initial.
+        const walker = document.createTreeWalker(
+          fixture.view.contentDOM.querySelector(".cm-line")!,
+          window.NodeFilter.SHOW_TEXT,
+        );
+        (walker.nextNode() as Text).deleteData(0, 1);
+        fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("input", {
+            inputType: "deleteContentBackward",
+            bubbles: true,
+          }),
+        );
+        await waitFor(() => {
+          assert.equal(fixture.text.toString(), "First word", path);
+        });
+      });
+      assert.equal(fixture.view.state.selection.main.head, 10);
+      assert.equal(
+        fixture.view.contentDOM.querySelector(".cm-line")!.textContent,
+        "First word",
+        "Repair the rendered text as well as the collaborative source",
+      );
+      act(() => {
+        yUndoManagerKeymap.find((binding) => binding.key === "Mod-z")!.run!(
+          fixture.view,
+        );
+      });
+      assert.equal(fixture.text.toString(), "First word\n");
+    } finally {
+      fixture.close();
+    }
+  }
+});
+
+test("native line-join intent follows concurrent text without deleting the collaborator's insertion", async () => {
+  for (const at of [0, 11]) {
+    const fixture = mount("First word\n");
+    try {
+      act(() => {
+        fixture.view.dispatch({ selection: { anchor: fixture.text.length } });
+        fixture.view.focus();
+        fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("beforeinput", {
+            inputType: "deleteContentBackward",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        fixture.ydoc.transact(() => fixture.text.insert(at, "Remote "), {});
+      });
+      await act(async () => {
+        const node =
+          fixture.view.contentDOM.querySelector(".cm-line")!.firstChild!;
+        (node as Text).deleteData(0, 1);
+        fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("input", {
+            inputType: "deleteContentBackward",
+            bubbles: true,
+          }),
+        );
+        await waitFor(() =>
+          assert.equal(
+            fixture.text.toString(),
+            at === 0 ? "Remote First word" : "First wordRemote ",
+          ),
+        );
+      });
+    } finally {
+      fixture.close();
+    }
+  }
+});
+
+test("a collaborator deleting the pending line break cancels its old native intent", async () => {
+  const fixture = mount("First word\n");
+  try {
+    act(() => {
+      fixture.view.dispatch({ selection: { anchor: fixture.text.length } });
+      fixture.view.focus();
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("beforeinput", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      fixture.ydoc.transact(() => fixture.text.delete(10, 1), {});
+    });
+    await act(async () => {
+      const node =
+        fixture.view.contentDOM.querySelector(".cm-line")!.firstChild!;
+      (node as Text).deleteData(9, 1);
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("input", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+        }),
+      );
+      await waitFor(() => assert.equal(fixture.text.toString(), "First wor"));
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("native line-join repair retains hidden comment records", async () => {
+  const source = "First word[[comment(ana): Keep this record]]\n";
+  const fixture = mount(source);
+  try {
+    act(() => {
+      fixture.view.dispatch({ selection: { anchor: fixture.text.length } });
+      fixture.view.focus();
+    });
+    await act(async () => {
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("beforeinput", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      const node =
+        fixture.view.contentDOM.querySelector(".cm-line")!.firstChild!;
+      (node as Text).deleteData(0, 1);
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("input", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+        }),
+      );
+      await waitFor(() =>
+        assert.equal(fixture.text.toString(), source.trimEnd()),
+      );
+    });
+  } finally {
+    fixture.close();
+  }
+});
 
 test("formatting retains visible and hidden CRDT item identities and supports undo", () => {
   const source = "left[[comment(ana): Keep this record]]right";

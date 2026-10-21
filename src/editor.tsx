@@ -1279,6 +1279,7 @@ export const MarkdownEditor = forwardRef<
       callbacks.current.onOpenComment?.(id),
     );
     commentExtension.current = layer;
+    let lineBackspace: { doc: EditorState["doc"]; head: number } | null = null;
     const v = new EditorView({
       parent: host.current!,
       state: EditorState.create({
@@ -1315,6 +1316,19 @@ export const MarkdownEditor = forwardRef<
           Prec.highest(
             EditorView.domEventHandlers({
               beforeinput(event, view) {
+                const { state } = view;
+                const caret = state.selection.main;
+                lineBackspace =
+                  event.inputType === "deleteContentBackward" &&
+                  !event.isComposing &&
+                  !view.composing &&
+                  !state.readOnly &&
+                  state.selection.ranges.length === 1 &&
+                  caret.empty &&
+                  caret.head > 0 &&
+                  state.doc.lineAt(caret.head).from === caret.head
+                    ? { doc: state.doc, head: caret.head }
+                    : null;
                 // yCollab handles native historyUndo/historyRedo independently of
                 // its keymap. Intercept before that plugin after a permission change.
                 if (!view.state.readOnly) return false;
@@ -1323,6 +1337,27 @@ export const MarkdownEditor = forwardRef<
               },
             }),
           ),
+          EditorView.inputHandler.of((view) => {
+            const intended = lineBackspace;
+            lineBackspace = null;
+            if (
+              !intended ||
+              view.state.readOnly ||
+              view.composing ||
+              view.state.doc !== intended.doc
+            )
+              return false;
+            // Mobile contenteditable can report deleting the preceding line's
+            // first letter instead of its break. Apply the captured caret intent
+            // through normal transactions, including comment/permission guards.
+            view.dispatch({
+              changes: { from: intended.head - 1, to: intended.head },
+              selection: { anchor: intended.head - 1 },
+              userEvent: "delete.backward",
+              scrollIntoView: true,
+            });
+            return true;
+          }),
           EditorView.lineWrapping,
           drawSelection(),
           highlightSelectionMatches(),
@@ -1364,8 +1399,19 @@ export const MarkdownEditor = forwardRef<
             indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged && callbacks.current.onChange)
-              callbacks.current.onChange(u.state.doc.toString());
+            if (u.docChanged) {
+              if (
+                lineBackspace &&
+                u.transactions.every((tr) => tr.annotation(ySyncAnnotation))
+              ) {
+                const head = u.changes.mapPos(lineBackspace.head, -1);
+                lineBackspace =
+                  head > 0 && u.state.sliceDoc(head - 1, head) === "\n"
+                    ? { doc: u.state.doc, head }
+                    : null;
+              } else lineBackspace = null;
+              callbacks.current.onChange?.(u.state.doc.toString());
+            }
           }),
           EditorView.domEventHandlers({
             mouseover(e) {
