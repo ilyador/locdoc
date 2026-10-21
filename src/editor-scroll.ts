@@ -1,4 +1,4 @@
-import { EditorView } from "@codemirror/view";
+import type { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 
 // This is browser reading state, never document content or collaborative state.
@@ -133,8 +133,8 @@ export function rememberEditorScroll(
     for (const event of inputs)
       window.removeEventListener(event, stopRestoring, true);
   };
-  // Restore text positions through CodeMirror; the outer pane remains the only
-  // scrolling surface. Reapply only when layout changes, never by polling.
+  // Only the document pane may scroll. CodeMirror's scrollIntoView also walks
+  // page ancestors and can invoke native viewport scrolling on iOS.
   if (saved !== null) {
     for (const event of inputs)
       window.addEventListener(event, stopRestoring, {
@@ -165,19 +165,26 @@ export function rememberEditorScroll(
         }
         return Math.min(pos, view.state.doc.length);
       };
+      const alignment = {};
       const restore = () => {
         if (!active || readerControlled) return;
-        // Let CodeMirror draw the target before scrolling its ancestors. A
-        // separate pixel-alignment loop fights its height/viewport corrections.
-        const inset = canvas
-          ? (view.coordsAtPos(0, 1)?.top ?? view.documentTop) - view.documentTop
-          : 0;
-        view.dispatch({
-          effects: EditorView.scrollIntoView(target(), {
-            y: "start",
-            yMargin: inset - saved.offset,
-            xMargin: 0,
-          }),
+        view.requestMeasure({
+          key: alignment,
+          read: () => {
+            if (!active || readerControlled) return 0;
+            const pos = target();
+            const top = canvas
+              ? view.documentTop
+              : (view.coordsAtPos(pos, 1)?.top ??
+                view.documentTop + view.lineBlockAt(pos).top);
+            return top + saved.offset - pane.getBoundingClientRect().top;
+          },
+          write: (delta) => {
+            // Virtualized text can resize as it is measured. Once aligned,
+            // leave the scroll layer alone instead of reissuing a scroll.
+            if (active && !readerControlled && Math.abs(delta) >= 1)
+              pane.scrollTop += delta;
+          },
         });
       };
       const realign = () => {

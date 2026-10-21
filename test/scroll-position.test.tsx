@@ -85,6 +85,16 @@ function open(
   });
   const editor = pane.appendChild(document.createElement("div"));
   document.body.appendChild(pane);
+  let scrollTop = 0;
+  let scrollWrites = 0;
+  let scrollEffects = 0;
+  Object.defineProperty(pane, "scrollTop", {
+    get: () => scrollTop,
+    set: (value: number) => {
+      scrollWrites++;
+      scrollTop = value;
+    },
+  });
   const heights: number[] = [];
   const drawn = (line: number) => {
     let top = PADDING - pane.scrollTop;
@@ -138,6 +148,7 @@ function open(
     // Model CodeMirror's public scroll effect: draw its target, then align it
     // in the containing pane during the next measurement.
     dispatch({ effects }: { effects: any }) {
+      scrollEffects++;
       const target = effects.value;
       queue.push({
         read: () => wrapped(target.range.head) + glyphInset - target.yMargin,
@@ -165,6 +176,12 @@ function open(
     wrapped,
     get maxMeasures() {
       return maxMeasures;
+    },
+    get scrollWrites() {
+      return scrollWrites;
+    },
+    get scrollEffects() {
+      return scrollEffects;
     },
     // CodeMirror can drain requests added by a write in the SAME frame. An
     // alignment callback must yield to a real animation frame between passes.
@@ -246,7 +263,7 @@ test("the saved line stays at the top while CodeMirror measures taller text abov
   assert.deepEqual(reading(document), { line: 61, offset: 7 });
 });
 
-test("restoration delegates one scroll to CodeMirror and then waits for layout changes", () => {
+test("restoration adjusts only the document pane and then waits for layout changes", () => {
   localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
   const page = open("position");
   page.settle();
@@ -256,6 +273,7 @@ test("restoration delegates one scroll to CodeMirror and then waits for layout c
     "alignment must not recurse in a measure pass",
   );
   assert.equal(animationFrames.size, 0);
+  assert.equal(page.scrollEffects, 0, "Never invoke ancestor/viewport scrolling");
   assert.equal(
     resizes.size,
     1,
@@ -263,6 +281,19 @@ test("restoration delegates one scroll to CodeMirror and then waits for layout c
   );
   page.stop();
   assert.equal(resizes.size, 0);
+});
+
+test("repeated Markdown layout notifications do not scroll an already aligned pane", () => {
+  localStorage.setItem("position", JSON.stringify({ pos: 120, offset: 7 }));
+  const page = open("position");
+  page.settle();
+  const writes = page.scrollWrites;
+  for (let pass = 0; pass < 20; pass++) {
+    for (const resize of resizes) resize();
+    page.settle();
+  }
+  assert.equal(page.scrollWrites, writes, "No repeated scroll-layer invalidation");
+  assert.equal(page.scrollEffects, 0, "No native viewport scroll requests");
 });
 
 test("late layout changes preserve the saved text after initial restoration has settled", () => {
