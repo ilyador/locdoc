@@ -32,6 +32,7 @@ export function insertAttachment(
     text.insert(from, markdown);
   });
 }
+export type DocumentSession = ReturnType<typeof documentSession>;
 export function documentSession(
   id: string,
   ydoc: Y.Doc,

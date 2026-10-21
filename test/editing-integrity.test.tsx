@@ -602,7 +602,7 @@ test("moving the cursor within one line reuses preview decoration sets", () => {
 });
 
 test("counter updates are coalesced in their own component during sustained editing", async () => {
-  const { DocumentWordMetrics } = await import("../src/document-workspace");
+  const { DocumentWordMetrics } = await import("../src/document-footer");
   const doc = new Y.Doc();
   const text = doc.getText("content");
   text.insert(0, "one");
