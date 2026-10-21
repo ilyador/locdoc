@@ -29,10 +29,10 @@ restore       Restore SNAPSHOT, a folder holding state/ (locdoc.sqlite from
               moves the documents folder to DOCS.before-restore-TIME and the
               state files into STATE/before-restore-TIME, puts the copies in
               their place, runs current/locdoc --restored, starts the service
-              and runs the same checks. A failure or interruption before the
-              start puts the previous data back and keeps the restored copies
-              as *failed-restore-TIME. Nothing is deleted and the snapshot is
-              never changed.
+              and runs the same checks. A failure or interruption before those
+              checks pass stops the service, puts the previous data back, keeps
+              the restored copies as *failed-restore-TIME and starts the service
+              again. Nothing is deleted and the snapshot is never changed.
 install-unit  Install deployment/locdoc-release.conf as the unit's release.conf
               drop-in. Without a current release, the running build is adopted
               as the first release. The running process is not restarted.
@@ -72,7 +72,7 @@ work= incoming= activating= revert_to= failure=
 pids=()
 # Restore progress, so a failure or interrupt can put the live data back.
 snapshot= snapshot_fd= snapshot_sha= restoring= restore_stamp= state_lock=
-aside_docs= aside_state= state_aside=0 docs_placed=0
+aside_docs= aside_state= state_aside=0 docs_placed=0 started=0
 # State files a snapshot replaces. The database always moves with its journals.
 state_files=(locdoc.sqlite locdoc.sqlite-wal locdoc.sqlite-shm locdoc.sqlite-journal
   owner.key root.identity fonts restore-report.json)
@@ -775,11 +775,15 @@ restore_pass() {
 }
 
 # Undo replace_data after a failure or interrupt before the restored service
-# started, then start the service again. The restored copies stay next to the
-# live data.
+# passed its checks, then start the service again. A service started on the
+# restored data stops first; the restored copies stay next to the live data.
 put_back() {
   local name failed=failed-restore-$restore_stamp kept_docs= kept_state=
   restoring=
+  if ((started)) && ! systemctl --user stop -- "$service"; then
+    say "systemctl --user stop $service failed; the restored data stays in place and the previous data is in $(aside_paths)"
+    return 0
+  fi
   if [[ -z $restore_stamp ]]; then
     : # Nothing was copied or moved yet.
   elif ! take_state_lock; then
@@ -871,15 +875,14 @@ cmd_restore() {
     die "the restored database fails its check: $output"
   [[ $fail_at != restore ]] || die "restore: failure injected by LOCDOC_DEPLOY_TEST_FAIL"
   release_state_lock
-  # From here the service may use the restored data, so it stays in place.
-  restoring=
   if ((restart)); then
     say "starting $service"
-    systemctl --user start -- "$service" ||
-      die "systemctl --user start $service failed; the restored data stays in place and the previous data is in $(aside_paths)"
+    started=1
+    systemctl --user start -- "$service" || die "systemctl --user start $service failed"
   fi
-  check_release "$current" "$work/restored.json" "$invocation" ||
-    die "$failure; the restored data stays in place and the previous data is in $(aside_paths)"
+  check_release "$current" "$work/restored.json" "$invocation" || die "$failure"
+  # The restored service passed its checks and keeps the restored data.
+  restoring=
   say "restored $snapshot"
   [[ -z $aside_docs ]] || say "the previous documents folder is $aside_docs"
   say "the previous state files are in $aside_state"

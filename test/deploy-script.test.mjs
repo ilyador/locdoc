@@ -452,6 +452,101 @@ async function refusedStartup(state, docs) {
   return started.stderr;
 }
 
+// `systemctl --user` for one stand-in unit, first on PATH. It runs the
+// current release in the background with the unit's environment, logs each
+// stop and start, and never talks to systemd.
+const fakeSystemctl = `#!/usr/bin/env python3
+import json, os, signal, subprocess, sys, time, uuid
+from pathlib import Path
+
+unit = Path(os.environ["FAKE_UNIT"])
+current = Path(os.environ["LOCDOC_RELEASES"]) / "current"
+action = sys.argv[2]
+
+def running():
+    try:
+        pid = int((unit / "pid").read_text())
+        status = Path(f"/proc/{pid}/stat").read_text()
+    except (FileNotFoundError, ValueError):
+        return None
+    return None if status.rsplit(")", 1)[1].split()[0] == "Z" else pid
+
+if action == "show":
+    pid = running()
+    print({
+        "LoadState": "loaded",
+        "NeedDaemonReload": "no",
+        "ExecStart": f"{{ path={current}/locdoc ; argv[]={current}/locdoc ; }}",
+        "Environment": f"LOCDOC_WEB={current}/web",
+        "MainPID": pid or 0,
+        "InvocationID": (unit / "invocation").read_text() if pid else "",
+        "NRestarts": 0,
+        "ActiveState": "active" if pid else "inactive",
+    }[sys.argv[sys.argv.index("-p") + 1]])
+    sys.exit(0)
+with open(unit / "calls", "a") as calls:
+    calls.write(action + "\\n")
+if action == "stop" and (pid := running()):
+    os.kill(pid, signal.SIGINT)
+    while running():
+        time.sleep(0.05)
+elif action == "start" and not running():
+    env = json.loads((unit / "env.json").read_text())
+    env["LOCDOC_WEB"] = str(current / "web")
+    with open(unit / "server.log", "ab") as log:
+        server = subprocess.Popen(
+            [str(current / "locdoc")], cwd=unit, env=env, stdin=subprocess.DEVNULL,
+            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    (unit / "pid").write_text(str(server.pid))
+    (unit / "invocation").write_text(uuid.uuid4().hex)
+`;
+
+async function fakeUnit(root, fixture) {
+  const unit = join(root, "unit");
+  const bin = join(root, "unit-bin");
+  await mkdir(unit);
+  await mkdir(bin);
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  await writeFile(
+    join(unit, "env.json"),
+    JSON.stringify({
+      PATH: process.env.PATH,
+      HOME: root,
+      LOCDOC_STATE: fixture.state,
+      LOCDOC_DOCS: fixture.docs,
+      LOCDOC_BIND: `127.0.0.1:${port}`,
+      LOCDOC_PUBLIC_URL: base,
+    }),
+  );
+  await writeFile(join(bin, "systemctl"), fakeSystemctl, { mode: 0o700 });
+  await writeFile(join(bin, "journalctl"), "#!/bin/sh\n", { mode: 0o700 });
+  // The service's own folders, read from the running process.
+  const env = {
+    ...fixture.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    FAKE_UNIT: unit,
+  };
+  delete env.LOCDOC_STATE;
+  delete env.LOCDOC_DOCS;
+  const systemctl = (action) =>
+    spawnSync(join(bin, "systemctl"), ["--user", action], {
+      env,
+      encoding: "utf8",
+    });
+  const ready = async () => {
+    for (const deadline = Date.now() + 20000; ; await delay(50)) {
+      if (Date.now() > deadline) throw Error("The unit did not start");
+      try {
+        if ((await fetch(`${base}/api/config`)).ok) return;
+      } catch {}
+    }
+  };
+  const calls = async () =>
+    (await readFile(join(unit, "calls"), "utf8")).trim().split("\n");
+  return { base, env, systemctl, ready, calls };
+}
+
 // Remove the restored copies a failed restore keeps next to the live data.
 async function removeKeptCopies(fixture) {
   for (const name of await names(fixture.live))
@@ -519,38 +614,96 @@ test("restore puts a snapshot in place, keeps the live data aside and follows a 
   }
 });
 
-test("a restore that fails before the service starts puts the live data back", async () => {
+test("a restore that fails before its checks pass puts the live data back", async () => {
+  // `restore` fails after the pass, before the service would start;
+  // `activate` fails the checks that follow the start.
+  for (const point of ["restore", "activate"]) {
+    const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+    try {
+      const fixture = await restoreFixture(root);
+      const live = fingerprint(fixture.live);
+      const snapshot = fingerprint(fixture.snapshot);
+      const failed = fixture.restore(fixture.snapshot, {
+        LOCDOC_DEPLOY_TEST_FAIL: point,
+      });
+      assert.equal(failed.status, 1, point);
+      assert.match(failed.stderr, /failure injected/);
+      assert.match(failed.stderr, /put the previous data back/);
+      assert.equal(
+        fingerprint(fixture.snapshot),
+        snapshot,
+        "snapshot unchanged",
+      );
+      // The restored copies are kept instead of deleted; apart from them the
+      // live folders are exactly as before.
+      const keptDocs = (await names(fixture.live)).filter((name) =>
+        name.startsWith("docs.failed-restore-"),
+      );
+      const keptState = (await names(fixture.state)).filter((name) =>
+        name.startsWith("failed-restore-"),
+      );
+      assert.equal(keptDocs.length, 1, point);
+      assert.equal(keptState.length, 1, point);
+      assert.ok(
+        (await names(join(fixture.state, keptState[0]))).includes(
+          "restore-report.json",
+        ),
+      );
+      await removeKeptCopies(fixture);
+      assert.equal(fingerprint(fixture.live), live, point);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("restore restarts the unit, and stops it to put the live data back when its checks fail", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  const units = [];
   try {
-    const fixture = await restoreFixture(root);
-    const live = fingerprint(fixture.live);
-    const snapshot = fingerprint(fixture.snapshot);
-    const failed = fixture.restore(fixture.snapshot, {
-      LOCDOC_DEPLOY_TEST_FAIL: "restore",
-    });
-    assert.equal(failed.status, 1);
-    assert.match(failed.stderr, /failure injected/);
-    assert.match(failed.stderr, /put the previous data back/);
-    assert.equal(fingerprint(fixture.snapshot), snapshot, "snapshot unchanged");
-    // The restored copies are kept instead of deleted; apart from them the
-    // live folders are exactly as before.
-    const keptDocs = (await names(fixture.live)).filter((name) =>
-      name.startsWith("docs.failed-restore-"),
-    );
-    const keptState = (await names(fixture.state)).filter((name) =>
-      name.startsWith("failed-restore-"),
-    );
-    assert.equal(keptDocs.length, 1);
-    assert.equal(keptState.length, 1);
-    assert.ok(
-      (await names(join(fixture.state, keptState[0]))).includes(
-        "restore-report.json",
-      ),
-    );
-    await rm(join(fixture.live, keptDocs[0]), { recursive: true });
-    await rm(join(fixture.state, keptState[0]), { recursive: true });
-    assert.equal(fingerprint(fixture.live), live);
+    for (const point of ["", "activate"]) {
+      const folder = join(root, point || "kept");
+      await mkdir(folder);
+      const fixture = await restoreFixture(folder);
+      const unit = await fakeUnit(folder, fixture);
+      units.push(unit);
+      assert.equal(unit.systemctl("start").status, 0);
+      await unit.ready();
+      const run = spawnSync("bash", [script, "restore", fixture.snapshot], {
+        env: { ...unit.env, LOCDOC_DEPLOY_TEST_FAIL: point },
+        encoding: "utf8",
+      });
+      await unit.ready();
+      const owner = { Authorization: "Bearer restore-owner" };
+      const tree = await (
+        await fetch(`${unit.base}/api/tree`, { headers: owner })
+      ).json();
+      const paths = tree.entries.map((entry) => entry.path);
+      if (!point) {
+        assert.equal(run.status, 0, run.stderr);
+        assert.deepEqual(await unit.calls(), ["start", "stop", "start"]);
+        // The unit serves the snapshot, where only q.md exists.
+        assert.ok(!paths.includes("after.md"), paths.join());
+        const opened = await (
+          await fetch(`${unit.base}/api/open/${fixture.token}`)
+        ).json();
+        assert.equal(opened.document.content, "Shared text of A\n");
+      } else {
+        assert.equal(run.status, 1, run.stderr);
+        assert.match(run.stderr, /put the previous data back/);
+        // Stopped before the data moved back, then started on it.
+        assert.deepEqual(await unit.calls(), [
+          "start",
+          "stop",
+          "start",
+          "stop",
+          "start",
+        ]);
+        assert.ok(paths.includes("after.md"), paths.join());
+      }
+    }
   } finally {
+    for (const unit of units) unit.systemctl("stop");
     await rm(root, { recursive: true, force: true });
   }
 });
