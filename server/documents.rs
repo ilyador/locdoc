@@ -197,6 +197,19 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // The file each owner approval resolved to. Existing rows have none
+    // until the first pass observes their document in its folder.
+    let has_media_identity = db
+        .prepare("PRAGMA table_info(trusted_references)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|column| column == "identity");
+    if !has_media_identity {
+        db.execute(
+            "ALTER TABLE trusted_references ADD COLUMN identity TEXT",
+            [],
+        )?;
+    }
     let rows = db
         .prepare("SELECT id,path FROM docs WHERE active=1 ORDER BY path")?
         .query_map([], |row| {

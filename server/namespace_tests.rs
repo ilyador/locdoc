@@ -1756,3 +1756,175 @@ fn a_busy_move_within_a_shared_folder_keeps_its_visitors() {
     assert!(s.found_elsewhere(&page.id).is_none());
     assert!(s.access(&HeaderMap::new(), &moved, &visitor).is_ok());
 }
+
+const PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=";
+
+/// A shared page showing an image beside it, approved by the desktop file,
+/// and an upload its editor embedded. Returns the upload's reference.
+fn album() -> (tempfile::TempDir, App, Document, String) {
+    let (directory, s) = store();
+    let page = s.create_document("Album/page.md").unwrap();
+    share(&s, &page.id);
+    let png = BASE64.decode(PNG).unwrap();
+    fs::write(s.root.join("Album/photo.png"), &png).unwrap();
+    fs::write(s.root.join("Album/page.md"), "![photo](photo.png)\n").unwrap();
+    let room = s.room(&page).unwrap();
+    let upload = format!(".assets/{}/upload.png", page.id);
+    s.write_upload(&page, &upload, &png).unwrap();
+    let embed = append_frame(&room, &format!("![upload](../{upload})\n"));
+    process_frame(&s, &page, &room, &embed, true, true, &mut Peer::default()).unwrap();
+    assert!(s.persist(&page, &mut room.lock().unwrap()).unwrap());
+    (directory, s, page, format!("../{upload}"))
+}
+
+/// What a visitor with the page's link gets for one of its media references.
+fn guest_media(s: &Store, page: &Document, path: &str) -> StatusCode {
+    let request = Media {
+        path: path.into(),
+        token: Some("old-link".into()),
+    };
+    match media_file(s, &page.id, &request, &HeaderMap::new()) {
+        Ok(_) => StatusCode::OK,
+        Err(error) => error.0,
+    }
+}
+
+#[test]
+fn approved_images_and_uploads_follow_a_folder_moved_with_its_document() {
+    let (_directory, s, page, upload) = album();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    assert_eq!(guest_media(&s, &page, &upload), StatusCode::OK);
+    // The approval used to be pinned to Album/photo.png, which no longer
+    // exists, so the moved page showed every approved image as forbidden.
+    fs::rename(s.root.join("Album"), s.root.join("Trip")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Trip/page.md");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    assert_eq!(guest_media(&s, &page, &upload), StatusCode::OK);
+}
+
+#[test]
+fn approved_images_follow_a_folder_moved_while_locdoc_was_stopped() {
+    let (_directory, s, page, upload) = album();
+    // The old folder is gone before any pass can resolve approvals there.
+    let s = stopped(s, |root| {
+        fs::rename(root.join("Album"), root.join("Trip")).unwrap();
+    });
+    assert_eq!(s.doc(&page.id).unwrap().path, "Trip/page.md");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    assert_eq!(guest_media(&s, &page, &upload), StatusCode::OK);
+}
+
+#[test]
+fn a_locdoc_move_keeps_an_approved_image_that_moved_ahead_of_it() {
+    let (_directory, s, page, _upload) = album();
+    s.create_folder("Trip").unwrap();
+    fs::rename(
+        s.root.join("Album/photo.png"),
+        s.root.join("Trip/photo.png"),
+    )
+    .unwrap();
+    s.rename_document(&page.id, "Trip/page.md").unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+}
+
+#[test]
+fn approvals_recorded_before_file_identities_are_identified_before_a_move() {
+    let (_directory, s, page, _upload) = album();
+    // As in a database written before approvals recorded their files.
+    s.db.lock()
+        .unwrap()
+        .execute_batch("ALTER TABLE trusted_references DROP COLUMN identity")
+        .unwrap();
+    let s = reopen(s);
+    fs::rename(s.root.join("Album"), s.root.join("Trip")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Trip/page.md");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+}
+
+#[test]
+fn a_move_never_approves_another_image_that_has_the_approved_spelling() {
+    let (_directory, s) = store();
+    let png = BASE64.decode(PNG).unwrap();
+    // A folder moved with its page, but its cover lives in the parent.
+    let page = s.create_document("Projects/Album/page.md").unwrap();
+    share(&s, &page.id);
+    fs::write(s.root.join("Projects/cover.png"), &png).unwrap();
+    fs::write(
+        s.root.join("Projects/Album/page.md"),
+        "![cover](../cover.png)\n",
+    )
+    .unwrap();
+    s.room(&page).unwrap();
+    assert_eq!(guest_media(&s, &page, "../cover.png"), StatusCode::OK);
+    // The destination already has a private image with identical bytes.
+    s.create_folder("Private").unwrap();
+    fs::write(s.root.join("Private/cover.png"), &png).unwrap();
+    fs::rename(s.root.join("Projects/Album"), s.root.join("Private/Album")).unwrap();
+    s.discover_file_moves().unwrap();
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "Private/Album/page.md");
+    assert_eq!(
+        guest_media(&s, &page, "../cover.png"),
+        StatusCode::FORBIDDEN
+    );
+    // The approved cover itself stays approved where it is.
+    assert!(s.attachment_allowed(&moved, &s.root.join("Projects/cover.png")));
+    // A page moved alone next to such an image is no different.
+    let alone = s.create_document("Drafts/page.md").unwrap();
+    share_link(&s, &alone.id, "alone-link");
+    fs::write(s.root.join("Drafts/photo.png"), &png).unwrap();
+    fs::write(s.root.join("Drafts/page.md"), "![photo](photo.png)\n").unwrap();
+    s.room(&alone).unwrap();
+    fs::write(s.root.join("Private/photo.png"), &png).unwrap();
+    s.rename_document(&alone.id, "Private/page.md").unwrap();
+    let request = Media {
+        path: "photo.png".into(),
+        token: Some("alone-link".into()),
+    };
+    assert_eq!(
+        media_file(&s, &alone.id, &request, &HeaderMap::new())
+            .unwrap_err()
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(s.attachment_allowed(&s.doc(&alone.id).unwrap(), &s.root.join("Drafts/photo.png")));
+}
+
+#[test]
+fn an_image_edited_in_place_stays_approved_before_and_after_moves() {
+    let (_directory, s, page, _upload) = album();
+    let png = BASE64.decode(PNG).unwrap();
+    // An image editor saves by renaming a new file over the old one.
+    let save = |folder: &str| {
+        let temporary = s.root.join(folder).join("photo.png.tmp");
+        fs::write(&temporary, &png).unwrap();
+        fs::rename(&temporary, s.root.join(folder).join("photo.png")).unwrap();
+    };
+    save("Album");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    // The watcher runs a pass after that rename, which sees the new file.
+    s.discover_file_moves().unwrap();
+    fs::rename(s.root.join("Album"), s.root.join("Trip")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    save("Trip");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    // Without a pass, the owner's editor loading the image records it.
+    let mut owner = HeaderMap::new();
+    owner.insert(
+        header::AUTHORIZATION,
+        format!("Bearer {}", s.key).parse().unwrap(),
+    );
+    let request = Media {
+        path: "photo.png".into(),
+        token: None,
+    };
+    media_file(&s, &page.id, &request, &owner).unwrap();
+    fs::rename(s.root.join("Trip"), s.root.join("Final")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Final/page.md");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+}

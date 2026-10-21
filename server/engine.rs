@@ -68,27 +68,170 @@ struct StoredRoom {
 
 impl Store {
     /// Relative owner approvals must not resolve to a different private file
-    /// after a move. Retain their exact targets, not authority over the same
-    /// spelling in an unrelated destination folder. Source bytes stay intact.
-    pub(super) fn freeze_moved_media(
+    /// after a move. An approval stays relative only while its spelling names
+    /// the file it approved, as when a folder moves with its images. Else it
+    /// is pinned to that file at its exact old path, or ends once the file
+    /// has left it. An approval recorded without a file identity keeps its
+    /// old target. Called in the move's transaction; source bytes stay intact.
+    pub(super) fn reanchor_moved_media(
         &self,
         tx: &rusqlite::Transaction<'_>,
         document: &Document,
+        destination: &str,
     ) -> Result<()> {
         let references = tx
-            .prepare("SELECT reference FROM trusted_references WHERE doc=?")?
-            .query_map([&document.id], |r| r.get::<_, String>(0))?
+            .prepare("SELECT reference,identity FROM trusted_references WHERE doc=?")?
+            .query_map([&document.id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for reference in references {
-            if let Ok(path) = self.media_path(document, &reference) {
+        let moved = Document {
+            path: destination.into(),
+            ..document.clone()
+        };
+        for (reference, approved) in references {
+            let approves = |path: &Path| {
+                fs::metadata(path)
+                    .ok()
+                    .and_then(|metadata| namespace::Identity::of(&metadata))
+                    .is_some_and(|identity| Some(identity.as_str()) == approved.as_deref())
+            };
+            if self
+                .media_path(&moved, &reference)
+                .is_ok_and(|path| approves(&path))
+            {
+                continue;
+            }
+            let before = self.media_path(document, &reference).ok().or_else(|| {
+                approved.as_ref()?;
+                self.left_folder_media(&document.path, &reference)
+            });
+            if let Some(path) = before
+                && (approved.is_none() || approves(&path))
+            {
                 tx.execute(
                     "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
                     params![document.id, path.to_string_lossy()],
                 )?;
             }
+            tx.execute(
+                "DELETE FROM trusted_references WHERE doc=? AND reference=?",
+                params![document.id, reference],
+            )?;
         }
-        tx.execute("DELETE FROM trusted_references WHERE doc=?", [&document.id])?;
         Ok(())
+    }
+
+    /// Where a reference that leaves its document's folder with `../` named a
+    /// file before that folder moved away with the document. A document path
+    /// never contains a link, so each step left a folder by its name.
+    fn left_folder_media(&self, document: &str, reference: &str) -> Option<PathBuf> {
+        let mut folder = Path::new(document).parent()?.to_path_buf();
+        let mut rest = reference;
+        while let Some(tail) = rest.strip_prefix("../") {
+            if !folder.pop() {
+                return None;
+            }
+            rest = tail;
+        }
+        if rest == reference {
+            return None;
+        }
+        self.resolve_media(&folder, rest).ok()
+    }
+
+    /// While a document stays in its folder, a trusted reference approves
+    /// whatever its spelling resolves to there, including an image replaced
+    /// by an atomic save. Record those files, so a later move can tell
+    /// whether they moved with it. A reference that resolves to nothing
+    /// keeps the file it last named. `documents` are (id, row path) pairs.
+    pub(super) fn refresh_media_identities(&self, documents: &[(&str, &str)]) -> Result<()> {
+        if documents.is_empty() || !self.root_identity.matches(&self.root) {
+            return Ok(());
+        }
+        let folders: HashMap<&str, &str> = documents.iter().copied().collect();
+        let rows = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare("SELECT doc,reference,identity FROM trusted_references")?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let changed: Vec<(String, String, namespace::Identity)> = rows
+            .into_iter()
+            .filter_map(|(doc, reference, recorded)| {
+                let current = self.media_identity(folders.get(doc.as_str())?, &reference)?;
+                (recorded.as_deref() != Some(current.as_str())).then_some((doc, reference, current))
+            })
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for (doc, reference, identity) in &changed {
+            tx.execute(
+                "UPDATE trusted_references SET identity=? WHERE doc=? AND reference=?",
+                params![identity.as_str(), doc, reference],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The same refresh for one approved image the owner's editor loads, as
+    /// long as the document's own file is at its row path.
+    pub(super) fn refresh_served_media(
+        &self,
+        document: &Document,
+        reference: &str,
+        file: &fs::Metadata,
+    ) {
+        let Some(current) = namespace::Identity::of(file) else {
+            return;
+        };
+        const RECORDED: &str = "SELECT t.identity,f.identity FROM trusted_references t
+            LEFT JOIN document_identities f ON f.doc=t.doc WHERE t.doc=? AND t.reference=?";
+        let recorded = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(RECORDED, params![document.id, reference], |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .optional();
+        let Ok(Some((approved, Some(own)))) = recorded else {
+            return;
+        };
+        if approved.as_deref() == Some(current.as_str())
+            || self.found_elsewhere(&document.id).is_some()
+        {
+            return;
+        }
+        let in_place = self
+            .safe(&document.path, false)
+            .ok()
+            .and_then(|path| fs::symlink_metadata(path).ok())
+            .and_then(|metadata| namespace::Identity::of(&metadata))
+            .is_some_and(|identity| identity.as_str() == own);
+        if !in_place {
+            return;
+        }
+        if let Err(error) = self.db.lock().unwrap().execute(
+            "UPDATE trusted_references SET identity=? WHERE doc=? AND reference=?",
+            params![current.as_str(), document.id, reference],
+        ) {
+            tracing::debug!(document = document.id, "media identity pending: {error}");
+        }
     }
 
     fn check_identity(db: &Connection, id: &str) -> Result<()> {

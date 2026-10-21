@@ -375,6 +375,11 @@ impl Store {
         }
     }
     fn media_path(&self, d: &Document, rel: &str) -> Result<PathBuf> {
+        self.resolve_media(Path::new(&d.path).parent().unwrap(), rel)
+    }
+    /// The file a media reference names from a folder, inside the root and
+    /// outside `.trash`.
+    fn resolve_media(&self, folder: &Path, rel: &str) -> Result<PathBuf> {
         if rel.contains("://") || rel.starts_with('/') || rel.contains('\\') {
             return Err(bad("Only local attachments are supported."));
         }
@@ -384,8 +389,7 @@ impl Store {
         if decoded.starts_with('/') || decoded.contains('\\') {
             return Err(denied());
         }
-        let parent = Path::new(&d.path).parent().unwrap();
-        let path = self.root.join(parent).join(decoded.as_ref());
+        let path = self.root.join(folder).join(decoded.as_ref());
         let canonical = fs::canonicalize(path)
             .map_err(|_| ApiError(StatusCode::NOT_FOUND, "Attachment not found.".into()))?;
         if !canonical.starts_with(&self.root)
@@ -394,6 +398,13 @@ impl Store {
             return Err(denied());
         }
         Ok(canonical)
+    }
+    /// The identity of the file a media reference names from a document path.
+    fn media_identity(&self, document: &str, rel: &str) -> Option<namespace::Identity> {
+        let path = self
+            .resolve_media(Path::new(document).parent()?, rel)
+            .ok()?;
+        namespace::Identity::of(&fs::metadata(path).ok()?)
     }
     fn references(content: &str) -> HashSet<String> {
         pulldown_cmark::Parser::new_ext(
@@ -437,8 +448,12 @@ impl Store {
         d: &Document,
         references: impl Iterator<Item = &'a String>,
     ) -> Result<()> {
+        // A move later checks whether each approved file moved with it.
+        let approved: Vec<_> = references
+            .map(|reference| (reference, self.media_identity(&d.path, reference)))
+            .collect();
         let db = self.db.lock().unwrap();
-        for reference in references {
+        for (reference, identity) in approved {
             db.execute(
                 "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
                 params![d.id, reference],
@@ -446,8 +461,9 @@ impl Store {
             // Remember explicit owner references even before their file exists.
             // Loading a cached room never upgrades anonymous references to trusted ones.
             db.execute(
-                "INSERT OR IGNORE INTO trusted_references(doc,reference) VALUES(?,?)",
-                params![d.id, reference],
+                "INSERT INTO trusted_references(doc,reference,identity) VALUES(?,?,?)
+                 ON CONFLICT(doc,reference) DO UPDATE SET identity=COALESCE(excluded.identity,identity)",
+                params![d.id, reference, identity.as_ref().map(namespace::Identity::as_str)],
             )?;
         }
         Ok(())
@@ -1223,7 +1239,8 @@ fn media_file(
         }
     }
     use std::io::Read;
-    let len = fs::metadata(&path)?.len() as usize;
+    let metadata = fs::metadata(&path)?;
+    let len = metadata.len() as usize;
     if len == 0 || len > 20 * MB {
         return Err(bad("Attachment is empty or exceeds the 20 MB maximum."));
     }
@@ -1235,6 +1252,10 @@ fn media_file(
     }
     if kind.mime_type().starts_with("image/") && len > 5 * MB {
         return Err(bad("Image exceeds 5 MB."));
+    }
+    if owner {
+        // The owner's editor sees an approved image edited in place.
+        s.refresh_served_media(&d, &q.path, &metadata);
     }
     Ok((path, len, kind.mime_type()))
 }

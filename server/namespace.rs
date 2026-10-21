@@ -31,6 +31,9 @@ impl Identity {
             FileMove::birth(metadata)?
         )))
     }
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Record a document's evidence, or forget it when its file carries none.
@@ -517,6 +520,11 @@ impl Store {
                 .map(|document| document.id.as_str())
                 .collect();
             self.reconciliation.keep_found(|id| unknown.contains(id));
+            let observed: Vec<&Tracked<Identity>> = tracked
+                .iter()
+                .filter(|document| document.seen != Seen::Unknown)
+                .collect();
+            self.observed_in_place(&observed);
             return Ok(HashSet::new());
         }
         let (mut files, mut linked, complete) = self.walk();
@@ -579,6 +587,19 @@ impl Store {
             });
         }
         self.apply(pass, plan, &tracked, &reserved, complete)
+    }
+
+    /// Documents a pass saw at their own name, with their own file or one it
+    /// accepted there. Their approved media is matched to the files it now
+    /// resolves to.
+    fn observed_in_place(&self, documents: &[&Tracked<Identity>]) {
+        let folders: Vec<(&str, &str)> = documents
+            .iter()
+            .map(|document| (document.id.as_str(), document.path.as_str()))
+            .collect();
+        if let Err(error) = self.refresh_media_identities(&folders) {
+            tracing::debug!("media identities pending: {error}");
+        }
     }
 
     fn namespace(&self) -> Result<Namespace> {
@@ -704,6 +725,20 @@ impl Store {
         reserved: &HashSet<String>,
         complete: bool,
     ) -> Result<HashSet<String>> {
+        let unsettled: HashSet<&str> = plan
+            .missing
+            .iter()
+            .map(|missing| missing.id.as_str())
+            .chain(plan.undecided.iter().map(String::as_str))
+            .chain(plan.moves.iter().map(|change| change.id.as_str()))
+            .collect();
+        let observed: Vec<&Tracked<Identity>> = tracked
+            .iter()
+            .filter(|document| {
+                matches!(document.seen, Seen::File(_)) && !unsettled.contains(document.id.as_str())
+            })
+            .collect();
+        drop(unsettled);
         let Plan {
             mut moves,
             records,
@@ -819,6 +854,7 @@ impl Store {
             self.reconciliation.after(RETRY);
             return Ok(unplaced);
         }
+        self.observed_in_place(&observed);
         // A deferred document keeps its path, which blocks any move onto it.
         loop {
             let leaving: HashSet<&str> = moves
@@ -860,11 +896,12 @@ impl Store {
             .filter(|(id, _)| !retiring.iter().any(|missing| &missing.id == id))
             .collect();
         if !moves.is_empty() || !retiring.is_empty() || !records.is_empty() {
-            // Media approvals of a document leaving its folder resolve there.
+            // Media approvals of a document leaving its folder are checked
+            // against the files they resolved to there.
             let leaving_folder = moves
                 .iter()
                 .filter(|change| Path::new(&change.from).parent() != Path::new(&change.to).parent())
-                .map(|change| self.doc(&change.id))
+                .map(|change| Ok((self.doc(&change.id)?, change.to.as_str())))
                 .collect::<Result<Vec<_>>>()?;
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
@@ -894,8 +931,8 @@ impl Store {
                     return Err(bad("A document identity changed during discovery."));
                 }
             }
-            for document in &leaving_folder {
-                self.freeze_moved_media(&tx, document)?;
+            for (document, destination) in &leaving_folder {
+                self.reanchor_moved_media(&tx, document, destination)?;
             }
             for (id, evidence) in &records {
                 record_identity(&tx, id, evidence.as_ref())?;
@@ -1198,7 +1235,7 @@ impl Store {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         if Path::new(&movement.source).parent() != Path::new(&movement.destination).parent() {
-            self.freeze_moved_media(&tx, &old)?;
+            self.reanchor_moved_media(&tx, &old, &movement.destination)?;
         }
         let previous = Self::move_identity(&tx, movement)?;
         record_identity(&tx, &movement.document, Identity::of(&metadata).as_ref())?;
