@@ -220,11 +220,11 @@ impl Store {
         } else {
             let mut file = DiskFile::open_read(&self.safe(&d.path, false)?)?
                 .ok_or_else(|| ApiError(StatusCode::CONFLICT, "A desktop application is saving this file. Try opening it again when finished.".into()))?;
-            // Another document's file never seeds this document's first state.
-            if self.foreign_file(&d.id, &file.metadata()?)? {
+            // Only the file a pass matched to this document seeds its state.
+            if self.unmatched_file(&d.id, &file.metadata()?)? {
                 return Err(ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "This file still belongs to another document. Try again shortly.".into(),
+                    "This file is still being matched to its document. Try again shortly.".into(),
                 ));
             }
             let raw = file.read()?;
@@ -526,9 +526,9 @@ impl Store {
             r.waiting();
             return Ok(false);
         };
-        // Neither import nor overwrite another document's file. Accepted text
-        // waits in the room until a pass matches both files to their documents.
-        if self.foreign_file(&d.id, &file.metadata()?)? {
+        // Neither import nor overwrite a file no pass has matched to this
+        // document. Accepted text waits in the room until a pass decides.
+        if self.unmatched_file(&d.id, &file.metadata()?)? {
             r.waiting();
             return Ok(false);
         }

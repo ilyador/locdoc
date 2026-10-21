@@ -262,9 +262,9 @@ fn read_guarded_file(
     let mut file = opened.ok_or_else(|| conflict(
         "The desktop file is unavailable or still being saved. Finish that save before rebuilding.",
     ))?;
-    if store.foreign_file(&document.id, &file.metadata()?)? {
+    if store.unmatched_file(&document.id, &file.metadata()?)? {
         return Err(conflict(
-            "This file still belongs to another document. Retry once its move is discovered.",
+            "This file is still being matched to its document. Retry shortly.",
         ));
     }
     let source = file.read_bytes()?;

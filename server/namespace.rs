@@ -385,23 +385,28 @@ impl Store {
     }
 
     /// Only a pass assigns files to documents. Engine paths call this with
-    /// the file they opened, before importing from or projecting into it: a
-    /// file recorded for another active document stays untouched, and the
-    /// maintenance loop is asked for a pass. It never waits for document_files.
-    pub(super) fn foreign_file(&self, document: &str, file: &fs::Metadata) -> Result<bool> {
-        let Some(Identity(identity)) = Identity::of(file) else {
-            return Ok(false);
-        };
-        let foreign = self.db.lock().unwrap().query_row(
-            "SELECT EXISTS(SELECT 1 FROM document_identities f JOIN docs d ON d.id=f.doc
-             WHERE f.identity=? AND d.active=1 AND d.id!=?)",
-            params![identity, document],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if foreign {
+    /// the file they opened, before importing from or projecting into it. A
+    /// file other than the one recorded for this document stays untouched
+    /// until a pass matches it: another document's file after a swap, or a
+    /// new file at the name of a document whose own file moved. The
+    /// maintenance loop is asked for that pass; this never waits for
+    /// document_files.
+    pub(super) fn unmatched_file(&self, document: &str, file: &fs::Metadata) -> Result<bool> {
+        let recorded = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT identity FROM document_identities WHERE doc=?",
+                [document],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let unmatched = recorded.map(Identity) != Identity::of(file);
+        if unmatched {
             self.reconciliation.after(RETRY);
         }
-        Ok(foreign)
+        Ok(unmatched)
     }
 
     /// Find moves missed while offline or during watcher overflow, and record
@@ -929,6 +934,11 @@ impl Store {
         if !movement.contains(&dest)? {
             // A desktop save replaced the source after its inode was journaled.
             self.restore_replaced(&movement, &source, &dest)?;
+            // Match the replacement now so the document keeps saving to it.
+            // A failed pass leaves that to the maintenance loop.
+            if let Err(error) = self.reconcile(Pass::Discover) {
+                tracing::debug!(document = id, "discovery after a changed rename: {error}");
+            }
             return Err(changed_during_rename());
         }
         self.commit_move(&movement)?;

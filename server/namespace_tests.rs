@@ -1186,3 +1186,74 @@ fn an_interrupted_rename_settles_after_its_old_folder_became_a_link() {
     assert_eq!(moved.path, "New/page.md");
     assert_eq!(moved.token.as_deref(), Some("old-link"));
 }
+
+#[test]
+fn a_room_never_adopts_a_new_file_at_its_name_while_its_own_file_is_elsewhere() {
+    let (_directory, s) = store();
+    let a = s.create_document("p.md").unwrap();
+    share(&s, &a.id);
+    fs::write(s.root.join("p.md"), "Shared text of A\n").unwrap();
+    let room = s.room(&a).unwrap();
+    s.persist(&a, &mut room.lock().unwrap()).unwrap();
+    let frame = append_frame(&room, "Browser edit of A\n");
+    process_frame(&s, &a, &room, &frame, true, true, &mut Peer::default()).unwrap();
+    let accepted = room_text(&room.lock().unwrap());
+    // A desktop app moves A away and writes a new private file at its name.
+    fs::rename(s.root.join("p.md"), s.root.join("q.md")).unwrap();
+    fs::write(s.root.join("p.md"), "New private notes\n").unwrap();
+    // The engine sees the new file before any pass decides whose it is. It
+    // must not serve it through A's link or save A's edit into it.
+    assert!(!s.persist(&a, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(room_text(&room.lock().unwrap()), accepted);
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some(accepted.as_str())
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "New private notes\n"
+    );
+    s.discover_file_moves().unwrap();
+    let moved = s.doc(&a.id).unwrap();
+    assert_eq!(moved.path, "q.md");
+    assert!(s.persist(&moved, &mut room.lock().unwrap()).unwrap());
+    assert_eq!(fs::read_to_string(s.root.join("q.md")).unwrap(), accepted);
+    let notes = s.index_document("p.md").unwrap();
+    assert_ne!(notes.id, a.id);
+    assert_eq!(notes.permission, "private");
+}
+
+#[test]
+fn the_document_holding_evidence_recorded_twice_keeps_saving() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let holder = s.create_document("holder.md").unwrap();
+    let stale = s.create_document("Locked/stale.md").unwrap();
+    // Path-first discovery could record one file for two documents.
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE document_identities SET identity=
+             (SELECT identity FROM document_identities WHERE doc=?) WHERE doc=?",
+            [&holder.id, &stale.id],
+        )
+        .unwrap();
+    // The other document is unreadable, so no pass can settle the evidence.
+    let locked = s.root.join("Locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let saved = (|| -> Result<(bool, String)> {
+        s.discover_file_moves()?;
+        let room = s.room(&holder)?;
+        let frame = append_frame(&room, "Edit of the holder\n");
+        process_frame(&s, &holder, &room, &frame, true, true, &mut Peer::default())?;
+        let saved = s.persist(&holder, &mut room.lock().unwrap())?;
+        Ok((saved, fs::read_to_string(s.root.join("holder.md"))?))
+    })();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    let (saved, text) = saved.unwrap();
+    assert!(saved);
+    assert!(text.contains("Edit of the holder"));
+}
