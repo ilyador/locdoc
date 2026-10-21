@@ -709,6 +709,14 @@ impl Store {
                 "Some files changed while the restore pass looked at them. Run locdoc --restored again.".into(),
             ));
         }
+        // Retiring revokes links. A copy holding none of the documents is an
+        // empty or wrong backup, not a workspace whose every file was removed.
+        if !tracked.is_empty() && plan.missing.len() == tracked.len() {
+            return Ok(Some(format!(
+                "The restored documents folder holds none of the {} documents. Check that the backup copied the documents folder, then run locdoc --restored again.",
+                tracked.len()
+            )));
+        }
         // A matched document records its file now, even if its move waits.
         for (id, path) in content.iter() {
             plan.records.retain(|(record, _)| record != id);

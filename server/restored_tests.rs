@@ -209,6 +209,7 @@ fn a_file_changed_between_the_backup_steps_keeps_its_document_and_history() {
 fn a_document_missing_from_the_backup_retires_with_its_text_recoverable() {
     let (directory, s) = store();
     let a = written(&s, "gone.md", "Text only the database still has\n");
+    let kept = written(&s, "kept.md", "Kept text\n");
     share(&s, &a.id);
     let backup = directory.path().join("backup");
     back_up(&s, &backup, |root| {
@@ -217,6 +218,7 @@ fn a_document_missing_from_the_backup_retires_with_its_text_recoverable() {
     let (s, report) = restored(s, &backup);
     assert_eq!(report["completed"], true);
     assert_eq!(placement(&report, &a)["evidence"], "retired");
+    assert_eq!(placement(&report, &kept)["evidence"], "content");
     assert!(s.doc(&a.id).is_err());
     assert!(shared_text(&s, "old-link").is_none());
     let state: Vec<u8> =
@@ -499,4 +501,49 @@ fn a_document_whose_file_has_other_names_never_follows_a_copy() {
         report["unclaimedFiles"],
         json!(["b2.md", "b3.md", "copy of a.md", "copy of b.md"])
     );
+}
+
+#[test]
+fn a_backup_holding_none_of_the_documents_retires_nothing() {
+    let (directory, s) = store();
+    let a = written(&s, "p.md", "Shared text of A\n");
+    let b = written(&s, "Folder/q.md", "Text of B\n");
+    share(&s, &a.id);
+    let backup = directory.path().join("backup");
+    // The documents copy came out empty, apart from an unrelated file.
+    back_up(&s, &backup, |root| {
+        fs::remove_file(root.join("p.md")).unwrap();
+        fs::remove_file(root.join("Folder/q.md")).unwrap();
+        fs::write(root.join("other.md"), "Unrelated\n").unwrap();
+    });
+    let (root, data) = put_in_place(s, &backup);
+    let s = Store::open_restored(root.clone(), data.clone(), "http://localhost".into()).unwrap();
+    let report = restore(&s).unwrap();
+    assert_eq!(report["completed"], false);
+    assert!(
+        report["problem"]
+            .as_str()
+            .unwrap()
+            .contains("holds none of the 2 documents")
+    );
+    assert_eq!(placement(&report, &a)["evidence"], "undecided");
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "Folder/q.md");
+    assert_eq!(
+        token(&s, &a).as_deref(),
+        Some("old-link"),
+        "A keeps its link"
+    );
+    drop(s);
+    assert!(Store::open(root, data, "http://localhost".into()).is_err());
+}
+
+/// The link token a document's row still holds.
+fn token(s: &Store, document: &Document) -> Option<String> {
+    s.db.lock()
+        .unwrap()
+        .query_row("SELECT token FROM docs WHERE id=?", [&document.id], |row| {
+            row.get(0)
+        })
+        .unwrap()
 }
