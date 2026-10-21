@@ -104,6 +104,9 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
                     s.permissions.invalidate();
                 }
                 coordinator.sweep(&s, rescan);
+                if let Some(requested) = s.reconciliation.take() {
+                    missing_after = Some(missing_after.map_or(requested, |due| due.min(requested)));
+                }
                 if missing_after.is_some_and(|deadline| Instant::now() >= deadline) {
                     missing_after = match s.retire_missing_documents() {
                         Ok(()) => None,

@@ -175,6 +175,7 @@ struct Store {
     http: reqwest::Client,
     rates: Mutex<HashMap<String, (i64, u32)>>,
     document_files: Mutex<()>,
+    reconciliation: namespace::Requests,
 }
 // Blocking filesystem, SQLite and diff work never occupies Tokio's network
 // workers. Four bounded jobs prevent rewrite storms from exhausting resources.
@@ -320,13 +321,20 @@ impl Store {
                 .unwrap_or_else(|| "Owner".into()),
             rates: Mutex::new(HashMap::new()),
             document_files: Mutex::new(()),
+            reconciliation: namespace::Requests::default(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(25))
                 .build()
                 .unwrap(),
         });
-        store.recover_file_operations()?;
-        store.discover_file_moves()?;
+        // Serve documents even when files cannot be matched yet; the
+        // maintenance loop keeps reconciling them.
+        if let Err(error) = store.recover_file_operations() {
+            tracing::error!("file operation recovery failed: {error}");
+        }
+        if let Err(error) = store.discover_file_moves() {
+            tracing::error!("file discovery failed: {error}");
+        }
         Ok(store)
     }
     fn owner(&self, h: &HeaderMap) -> bool {
@@ -723,7 +731,17 @@ fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
             });
             scan(s, &p, entries)?;
         } else if documents::format(&rel).is_some() {
-            let d = s.index_document(&rel)?;
+            let d = match s.index_document(&rel) {
+                // A file still being matched to its document is listed once a
+                // pass decides; it must not hide the rest of the workspace.
+                Err(error)
+                    if error.0 == StatusCode::SERVICE_UNAVAILABLE
+                        && s.root_identity.matches(&s.root) =>
+                {
+                    continue;
+                }
+                result => result?,
+            };
             entries.push(Entry {
                 path: rel,
                 kind: "file",

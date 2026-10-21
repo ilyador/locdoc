@@ -129,6 +129,7 @@ pub(super) fn retire(db: &Connection, id: &str) -> Result<()> {
         retired_path=COALESCE(retired_path,path),retired_at=?,path=?,
         permission='private',token=NULL WHERE id=? AND active=1";
     db.execute(RETIRE, params![now(), format!(".retired/{id}"), id])?;
+    db.execute("DELETE FROM document_identities WHERE doc=?", [id])?;
     Ok(())
 }
 
@@ -341,7 +342,11 @@ impl Store {
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;
-            Self::remember_file_identity_in(&tx, &id, &file.metadata()?)?;
+            namespace::record_identity(
+                &tx,
+                &id,
+                namespace::Identity::of(&file.metadata()?).as_ref(),
+            )?;
             tx.commit()?;
             drop(db);
             self.permissions.invalidate();

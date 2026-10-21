@@ -1,14 +1,75 @@
-//! The only boundary that changes filenames or follows a file to its
-//! document. Discovery and renames preserve an identity; a file missing from
-//! the documents folder retires its identity.
+//! The only boundary that decides which file is which document, and the only
+//! one that changes filenames. One pass settles journaled Locdoc renames,
+//! observes the documents tree, classifies every document from evidence and
+//! applies all path and identity changes in one transaction. A recorded file
+//! identity outranks a path: a pathname alone never moves a document's links,
+//! history or text onto another document's file.
 use super::documents::{format, relative_path, retire};
 use super::*;
+use std::hash::Hash;
 use std::os::unix::fs::MetadataExt;
+use std::time::{Duration, Instant};
 
-/// SQLite and a directory cannot commit atomically. Keep the rename intent
-/// durable until both the directory entry and document identity have committed.
-/// File identity binds recovery to our file; birth time, where supported,
-/// additionally distinguishes an unrelated file that reuses the same inode.
+/// Retry after a busy room, a concurrent change or an engine request.
+const RETRY: Duration = Duration::from_secs(1);
+/// Retry after an unreadable folder kept a missing document from retiring.
+const INCOMPLETE_RETRY: Duration = Duration::from_secs(30);
+
+/// Evidence that a directory entry is one particular file: device, inode and
+/// birth time. An inode alone can be reused after deletion; hard links and
+/// files without a birth time carry no evidence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Identity(String);
+impl Identity {
+    pub(super) fn of(metadata: &fs::Metadata) -> Option<Self> {
+        (metadata.is_file() && metadata.nlink() == 1).then_some(())?;
+        Some(Self(format!(
+            "{}:{}:{}",
+            metadata.dev(),
+            metadata.ino(),
+            FileMove::birth(metadata)?
+        )))
+    }
+}
+
+/// Record a document's evidence, or forget it when its file carries none.
+pub(super) fn record_identity(
+    db: &Connection,
+    id: &str,
+    evidence: Option<&Identity>,
+) -> Result<()> {
+    match evidence {
+        Some(Identity(identity)) => db.execute(
+            "INSERT INTO document_identities(doc,identity) VALUES(?,?)
+             ON CONFLICT(doc) DO UPDATE SET identity=excluded.identity
+             WHERE identity!=excluded.identity",
+            params![id, identity],
+        )?,
+        None => db.execute("DELETE FROM document_identities WHERE doc=?", [id])?,
+    };
+    Ok(())
+}
+
+/// When the maintenance loop should run the next settled pass. Engine paths
+/// hold a room and so cannot wait for `document_files`; they ask instead.
+#[derive(Default)]
+pub(super) struct Requests(Mutex<Option<Instant>>);
+impl Requests {
+    pub(super) fn after(&self, delay: Duration) {
+        let at = Instant::now() + delay;
+        let mut next = self.0.lock().unwrap();
+        *next = Some(next.map_or(at, |next| next.min(at)));
+    }
+    pub(super) fn take(&self) -> Option<Instant> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+/// SQLite and a directory cannot commit atomically. Only a Locdoc rename has
+/// a filesystem step of its own, so only it keeps a durable intent until both
+/// the directory entry and document identity have committed. File identity
+/// binds recovery to our file; birth time, where supported, additionally
+/// distinguishes an unrelated file that reuses the same inode.
 struct FileMove {
     document: String,
     source: String,
@@ -54,21 +115,165 @@ impl FileMove {
 /// How a journaled rename settled.
 enum Outcome {
     Moved,
-    /// The intent is gone and the document keeps its row path; discovery
-    /// places it from file evidence.
+    /// The intent is gone and the document keeps its row path; a pass places
+    /// it from file evidence.
     Dropped,
 }
 
-// An inode alone can be reused after deletion. Only a regular, unaliased file
-// with a birth time is evidence for following an unannounced desktop move.
-fn file_identity(metadata: &fs::Metadata) -> Option<String> {
-    (metadata.is_file() && metadata.nlink() == 1).then_some(())?;
-    Some(format!(
-        "{}:{}:{}",
-        metadata.dev(),
-        metadata.ino(),
-        FileMove::birth(metadata)?
-    ))
+/// What one observation shows at a document's path.
+#[derive(Clone, Debug, PartialEq)]
+enum Seen<E> {
+    /// A regular file, with its evidence when it carries any.
+    File(Option<E>),
+    Absent,
+    /// Unreadable, or changed while the tree was walked.
+    Unknown,
+}
+
+/// An active document without a pending rename.
+struct Tracked<E> {
+    id: String,
+    path: String,
+    recorded: Option<E>,
+    seen: Seen<E>,
+}
+
+struct Move<E> {
+    id: String,
+    from: String,
+    to: String,
+    evidence: E,
+}
+
+/// A document whose own file is nowhere in the observation.
+struct Missing<E> {
+    id: String,
+    path: String,
+    seen: Seen<E>,
+}
+
+struct Plan<E> {
+    moves: Vec<Move<E>>,
+    /// New evidence for documents that keep their path.
+    records: Vec<(String, Option<E>)>,
+    missing: Vec<Missing<E>>,
+    /// Some document could not be decided from this observation.
+    undecided: bool,
+}
+
+/// Decide where every tracked document is from evidence alone, never from
+/// names or text. Recorded evidence found at one path places its document
+/// there, even over another document's row. A path keeps its document only
+/// when its file carries evidence no other document has recorded, or none:
+/// that is how atomic saves keep their identity. Evidence recorded for two
+/// documents, copies, hard links and files seen at two paths never transfer
+/// a document. `pending` is evidence of documents whose rename is pending.
+fn classify<E: Clone + Eq + Hash>(
+    tracked: &[Tracked<E>],
+    pending: &[(&str, &E)],
+    files: &HashMap<String, Option<E>>,
+) -> Plan<E> {
+    let mut recorded: HashMap<&E, Vec<&str>> = HashMap::new();
+    for document in tracked {
+        if let Some(evidence) = &document.recorded {
+            recorded.entry(evidence).or_default().push(&document.id);
+        }
+    }
+    for (id, evidence) in pending {
+        recorded.entry(*evidence).or_default().push(id);
+    }
+    // Older versions could record one file for two documents. Such evidence
+    // identifies neither; each is placed by its path instead.
+    let owner: HashMap<&E, &str> = recorded
+        .into_iter()
+        .filter_map(|(evidence, ids)| (ids.len() == 1).then(|| (evidence, ids[0])))
+        .collect();
+    let mut found: HashMap<&E, Vec<&str>> = HashMap::new();
+    for (path, evidence) in files {
+        if let Some(evidence) = evidence {
+            found.entry(evidence).or_default().push(path);
+        }
+    }
+    let mut plan = Plan {
+        moves: Vec::new(),
+        records: Vec::new(),
+        missing: Vec::new(),
+        undecided: false,
+    };
+    for document in tracked {
+        let own = document
+            .recorded
+            .as_ref()
+            .filter(|evidence| owner.get(evidence) == Some(&document.id.as_str()));
+        if document.recorded.is_some() && own.is_none() {
+            plan.records.push((document.id.clone(), None));
+        }
+        if let Some(evidence) = own {
+            match found.get(evidence).map(Vec::as_slice) {
+                Some([path]) if *path == document.path => continue,
+                Some([path]) => {
+                    plan.moves.push(Move {
+                        id: document.id.clone(),
+                        from: document.path.clone(),
+                        to: (*path).to_owned(),
+                        evidence: evidence.clone(),
+                    });
+                    continue;
+                }
+                // Seen at two paths: it moved while the tree was walked.
+                Some(_) => {
+                    plan.undecided = true;
+                    continue;
+                }
+                None => {}
+            }
+        }
+        match &document.seen {
+            Seen::File(Some(evidence))
+                if owner.get(evidence).is_some_and(|id| *id != document.id) =>
+            {
+                plan.missing.push(Missing {
+                    id: document.id.clone(),
+                    path: document.path.clone(),
+                    seen: document.seen.clone(),
+                });
+            }
+            Seen::File(evidence) => {
+                if evidence.as_ref() != own {
+                    plan.records.push((document.id.clone(), evidence.clone()));
+                }
+            }
+            Seen::Absent => plan.missing.push(Missing {
+                id: document.id.clone(),
+                path: document.path.clone(),
+                seen: Seen::Absent,
+            }),
+            Seen::Unknown => plan.undecided = true,
+        }
+    }
+    plan
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// Follow moves and record new evidence. Editors briefly remove or swap
+    /// files while saving, so missing documents wait for a settled pass.
+    Discover,
+    /// Also retire documents that a complete observation could not find.
+    Settled,
+}
+
+/// Active documents as the database records them.
+struct Namespace {
+    tracked: Vec<Tracked<Identity>>,
+    /// Documents whose rename is still pending, with their evidence.
+    pending: Vec<(String, Option<Identity>)>,
+    /// Paths a pending rename still owns. Nothing moves onto them.
+    reserved: HashSet<String>,
+}
+
+fn sooner(retry: &mut Option<Duration>, delay: Duration) {
+    *retry = Some(retry.map_or(delay, |retry| retry.min(delay)));
 }
 
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
@@ -97,6 +302,9 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
 }
 
 impl Store {
+    /// Look up or allocate the document for one file. Only a pass decides
+    /// whose file a changed or moved entry is; a file that no document has
+    /// recorded gets a fresh, private identity.
     pub(super) fn index_document(&self, input: &str) -> Result<Document> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
@@ -108,215 +316,456 @@ impl Store {
                 "Document not found.".into(),
             ));
         }
-        let metadata = fs::metadata(&full)?;
-        let indexed = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT id FROM docs WHERE path=? AND active=1",
-                [&path],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        if indexed.is_none() {
-            self.follow_file_move(&path, &metadata)?;
+        let mut evidence = Identity::of(&fs::symlink_metadata(&full)?);
+        if !self.assigned(&path, evidence.as_ref())? {
+            self.reconcile(Pass::Discover)?;
+            evidence = Identity::of(&fs::symlink_metadata(&full)?);
+            if !self.assigned(&path, evidence.as_ref())? {
+                // A busy room or a move in progress; a later pass decides.
+                self.reconciliation.after(RETRY);
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "This file is still being matched to its document. Try again shortly.".into(),
+                ));
+            }
         }
         let id = {
-            let db = self.db.lock().unwrap();
-            db.execute(
-                "INSERT OR IGNORE INTO docs(id,path) VALUES(?,?)",
-                params![uuid::Uuid::new_v4().to_string(), path],
-            )?;
-            db.query_row(
-                "SELECT id FROM docs WHERE path=? AND active=1",
-                [&path],
-                |r| r.get::<_, String>(0),
-            )?
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            let indexed = tx
+                .query_row(
+                    "SELECT id FROM docs WHERE path=? AND active=1",
+                    [&path],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let id = match indexed {
+                Some(id) => id,
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;
+                    record_identity(&tx, &id, evidence.as_ref())?;
+                    id
+                }
+            };
+            tx.commit()?;
+            id
         };
-        self.remember_file_identity(&id, &metadata)?;
         self.doc(&id)
     }
 
-    fn remember_file_identity(&self, id: &str, metadata: &fs::Metadata) -> Result<()> {
+    /// Whether the file at an indexed path carries its document's recorded
+    /// evidence, or a file at an unindexed path carries no document's.
+    fn assigned(&self, path: &str, evidence: Option<&Identity>) -> Result<bool> {
         let db = self.db.lock().unwrap();
-        Self::remember_file_identity_in(&db, id, metadata)
+        let indexed = db
+            .query_row(
+                "SELECT f.identity FROM docs d LEFT JOIN document_identities f ON f.doc=d.id
+                 WHERE d.path=? AND d.active=1",
+                [path],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(match (indexed, evidence) {
+            (Some(recorded), evidence) => {
+                recorded.as_deref() == evidence.map(|Identity(identity)| identity.as_str())
+            }
+            (None, None) => true,
+            (None, Some(Identity(identity))) => !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM document_identities f JOIN docs d ON d.id=f.doc
+                 WHERE f.identity=? AND d.active=1)",
+                [identity],
+                |row| row.get::<_, bool>(0),
+            )?,
+        })
     }
 
-    pub(super) fn remember_file_identity_in(
-        db: &Connection,
-        id: &str,
-        metadata: &fs::Metadata,
-    ) -> Result<()> {
-        if let Some(identity) = file_identity(metadata) {
-            db.execute(
-                "INSERT INTO document_identities(doc,identity) VALUES(?,?)
-                 ON CONFLICT(doc) DO UPDATE SET identity=excluded.identity
-                 WHERE identity!=excluded.identity",
-                params![id, identity],
-            )?;
-        } else {
-            db.execute("DELETE FROM document_identities WHERE doc=?", [id])?;
-        }
-        Ok(())
-    }
-
-    /// Called under document_files, before discovery allocates a new identity.
-    /// Copies, hard links, inaccessible sources and ambiguous matches never
-    /// acquire another document's links or history.
-    fn follow_file_move(&self, path: &str, metadata: &fs::Metadata) -> Result<()> {
-        let Some(identity) = file_identity(metadata) else {
-            return Ok(());
-        };
-        let candidates = self
-            .db
-            .lock()
-            .unwrap()
-            .prepare(
-                "SELECT d.id,d.path FROM docs d JOIN document_identities f ON f.doc=d.id
-             WHERE d.active=1 AND f.identity=? AND d.path!=?
-             AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=d.id)",
-            )?
-            .query_map(params![identity, path], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let missing = candidates
-            .into_iter()
-            .filter(|(_, source)| {
-                self.safe(source, false).is_ok_and(|source| {
-                    fs::symlink_metadata(source)
-                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                })
-            })
-            .collect::<Vec<_>>();
-        if missing.len() != 1 {
-            return Ok(());
-        }
-        let (id, source) = &missing[0];
-        let room = self.rooms.lock().unwrap().get(id).cloned();
-        let mut live = if let Some(room) = &room {
-            Some(room.try_lock().map_err(|_| {
-                ApiError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "The moved document is busy. Retry shortly.".into(),
-                )
-            })?)
-        } else {
-            None
-        };
-        if let Some(room) = live.as_mut() {
-            room.ensure_committed(self, &self.doc(id)?)?;
-        }
-        let movement = FileMove::new(id, source.clone(), path.into(), metadata);
-        // Recheck after admission: an editor may have recreated the old name.
-        if !fs::symlink_metadata(self.safe(source, false)?)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            || !movement.contains(&self.safe(path, false)?)?
-        {
-            return Err(bad(
-                "The moved file changed during discovery. Retry shortly.",
-            ));
-        }
-        self.journal_file_move(&movement)?;
-        // A destination replaced after journaling drops the intent; the next
-        // discovery decides from what the folder then holds.
-        self.settle_intent(&movement, false)?;
-        Ok(())
-    }
-
-    /// Refresh atomic-save identities and find moves missed while offline or
-    /// during watcher overflow. Only missing tracked files require a tree walk.
+    /// Find moves missed while offline or during watcher overflow, and record
+    /// atomic saves. Missing documents wait for the maintenance loop.
     pub(super) fn discover_file_moves(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
-        self.discover_file_moves_locked()
+        self.reconcile(Pass::Discover)
     }
 
     pub(super) fn discover_file_moves_locked(&self) -> Result<()> {
+        self.reconcile(Pass::Discover)
+    }
+
+    /// The maintenance loop's settled pass, which also retires missing files.
+    pub(super) fn retire_missing_documents(&self) -> Result<()> {
+        let _files = self.document_files.lock().unwrap();
+        self.reconcile(Pass::Settled)
+    }
+
+    /// One pass under document_files. A busy room or an undecidable file
+    /// defers only that document and asks the maintenance loop to retry.
+    fn reconcile(&self, pass: Pass) -> Result<()> {
+        if !self.root_identity.matches(&self.root) {
+            // A missing mount is never evidence about its documents.
+            return Ok(());
+        }
+        self.settle_intents(false)?;
+        let Namespace {
+            mut tracked,
+            pending,
+            reserved,
+        } = self.namespace()?;
+        // Walk only when a tracked path no longer shows its recorded evidence.
+        let mut changed = false;
+        for document in &mut tracked {
+            document.seen = self.inspect(&document.path);
+            changed |= document.seen != Seen::Unknown
+                && document.seen != Seen::File(document.recorded.clone());
+        }
+        if !changed {
+            return Ok(());
+        }
+        let (mut files, complete) = self.walk();
+        for document in &mut tracked {
+            let walked = files.get(&document.path).cloned();
+            document.seen = match (&document.seen, walked) {
+                (Seen::Unknown, _) => Seen::Unknown,
+                (_, Some(evidence)) => Seen::File(evidence),
+                (Seen::Absent, None) => Seen::Absent,
+                // An unlisted folder, or a move during the walk. Only a second
+                // look at the same file counts as seeing it.
+                (seen, None) => {
+                    if self.inspect(&document.path) == *seen {
+                        if let Seen::File(evidence) = seen {
+                            files.insert(document.path.clone(), evidence.clone());
+                        }
+                        seen.clone()
+                    } else {
+                        Seen::Unknown
+                    }
+                }
+            };
+        }
+        let held: Vec<(&str, &Identity)> = pending
+            .iter()
+            .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
+            .collect();
+        let plan = classify(&tracked, &held, &files);
+        self.apply(pass, plan, &tracked, &reserved, complete)
+    }
+
+    fn namespace(&self) -> Result<Namespace> {
+        const DOCUMENTS: &str = "SELECT d.id,d.path,f.identity,m.destination FROM docs d
+            LEFT JOIN document_identities f ON f.doc=d.id
+            LEFT JOIN document_moves m ON m.doc=d.id WHERE d.active=1";
         let rows = self
             .db
             .lock()
             .unwrap()
-            .prepare(
-                "SELECT d.id,d.path,f.identity FROM docs d
-             LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active=1
-             AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=d.id)",
-            )?
+            .prepare(DOCUMENTS)?
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let mut missing = HashSet::new();
-        let mut present = Vec::new();
-        for (id, path, identity) in rows {
-            let Ok(full) = self.safe(&path, false) else {
-                continue;
-            };
-            match fs::metadata(full) {
-                Ok(metadata) => present.push((id, metadata)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if let Some(identity) = identity {
-                        missing.insert(identity);
-                    }
+        let mut namespace = Namespace {
+            tracked: Vec::new(),
+            pending: Vec::new(),
+            reserved: HashSet::new(),
+        };
+        for (id, path, identity, destination) in rows {
+            let recorded = identity.map(Identity);
+            match destination {
+                Some(destination) => {
+                    namespace.reserved.extend([path, destination]);
+                    namespace.pending.push((id, recorded));
                 }
-                // Inaccessibility is never evidence for an external move.
-                Err(_) => {}
+                None => namespace.tracked.push(Tracked {
+                    id,
+                    path,
+                    recorded,
+                    seen: Seen::Unknown,
+                }),
             }
         }
-        {
-            let mut db = self.db.lock().unwrap();
-            let tx = db.transaction()?;
-            for (id, metadata) in present {
-                Self::remember_file_identity_in(&tx, &id, &metadata)?;
-            }
-            tx.commit()?;
+        Ok(namespace)
+    }
+
+    /// What a tracked path shows. Inaccessibility is never evidence of a move.
+    fn inspect(&self, path: &str) -> Seen<Identity> {
+        let Ok(full) = self.safe(path, false) else {
+            return Seen::Unknown;
+        };
+        match fs::symlink_metadata(full) {
+            Ok(metadata) if metadata.is_file() => Seen::File(Identity::of(&metadata)),
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Seen::Unknown,
+            _ => Seen::Absent,
         }
-        if missing.is_empty() {
-            return Ok(());
-        }
+    }
+
+    /// Walk the tree once, never following symlinks or entering dot folders.
+    /// An entry that vanishes is skipped; any other error makes the
+    /// observation incomplete rather than failing the pass.
+    fn walk(&self) -> (HashMap<String, Option<Identity>>, bool) {
+        let mut files = HashMap::new();
+        let mut complete = true;
         let mut folders = vec![self.root.clone()];
         while let Some(folder) = folders.pop() {
-            let children = match fs::read_dir(folder) {
+            let children = match walk_step(&folder).and_then(|()| fs::read_dir(&folder)) {
                 Ok(children) => children,
-                Err(_) => continue,
-            };
-            for child in children {
-                let child = child?;
-                if child.file_name().to_string_lossy().starts_with('.') {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    complete = false;
                     continue;
                 }
-                let metadata = fs::symlink_metadata(child.path())?;
-                if metadata.is_dir() {
-                    folders.push(child.path());
-                } else if file_identity(&metadata)
-                    .is_some_and(|identity| missing.contains(&identity))
-                {
-                    let path = child.path();
-                    let relative = path.strip_prefix(&self.root).unwrap().to_string_lossy();
-                    if format(&relative).is_some() {
-                        // Never reinterpret an existing destination document as
-                        // a move: ordinary atomic replacement preserves its ID.
-                        let exists = self
-                            .db
-                            .lock()
-                            .unwrap()
-                            .query_row(
-                                "SELECT 1 FROM docs WHERE path=? AND active=1",
-                                [&*relative],
-                                |_| Ok(()),
-                            )
-                            .optional()?
-                            .is_some();
-                        if !exists {
-                            self.follow_file_move(&relative, &metadata)?;
+            };
+            for child in children {
+                let Ok(child) = child else {
+                    complete = false;
+                    continue;
+                };
+                // Document paths are UTF-8 and never hidden.
+                let name = child.file_name();
+                if name.to_str().is_none_or(|name| name.starts_with('.')) {
+                    continue;
+                }
+                let path = child.path();
+                match walk_step(&path).and_then(|()| fs::symlink_metadata(&path)) {
+                    Ok(metadata) if metadata.is_dir() => folders.push(path),
+                    Ok(metadata) if metadata.is_file() => {
+                        if let Some(relative) =
+                            path.strip_prefix(&self.root).ok().and_then(Path::to_str)
+                            && format(relative).is_some()
+                        {
+                            files.insert(relative.to_owned(), Identity::of(&metadata));
                         }
                     }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => complete = false,
                 }
             }
+        }
+        (files, complete)
+    }
+
+    /// Apply a plan in one transaction. A busy room, a failed preparation or
+    /// a file that changed since it was observed defers that document, and
+    /// with it any move onto the path it keeps.
+    fn apply(
+        &self,
+        pass: Pass,
+        plan: Plan<Identity>,
+        tracked: &[Tracked<Identity>],
+        reserved: &HashSet<String>,
+        complete: bool,
+    ) -> Result<()> {
+        let Plan {
+            mut moves,
+            records,
+            missing,
+            undecided,
+        } = plan;
+        let mut retry = undecided.then_some(RETRY);
+        let mut retiring = Vec::new();
+        if !missing.is_empty() {
+            if !complete {
+                sooner(&mut retry, INCOMPLETE_RETRY);
+            } else if pass == Pass::Settled {
+                retiring = missing;
+            } else {
+                sooner(&mut retry, RETRY);
+            }
+        }
+        // Map before room, and never wait for a room: a busy one defers.
+        let rooms: Vec<(String, Arc<Mutex<Room>>)> = {
+            let cached = self.rooms.lock().unwrap();
+            moves
+                .iter()
+                .map(|change| &change.id)
+                .chain(retiring.iter().map(|missing| &missing.id))
+                .filter_map(|id| Some((id.clone(), cached.get(id)?.clone())))
+                .collect()
+        };
+        let mut live = HashMap::new();
+        let mut busy = HashSet::new();
+        for (id, room) in &rooms {
+            match room.try_lock() {
+                Ok(room) => {
+                    live.insert(id.as_str(), room);
+                }
+                Err(_) => {
+                    busy.insert(id.as_str());
+                }
+            }
+        }
+        let mut deferred = !busy.is_empty();
+        moves.retain(|change| !busy.contains(change.id.as_str()));
+        retiring.retain(|missing| !busy.contains(missing.id.as_str()));
+        let mut failure = None;
+        retiring.retain(|missing| {
+            let Some(room) = live.get_mut(missing.id.as_str()) else {
+                return true;
+            };
+            match self.preserve_for_retirement(&missing.id, room) {
+                Ok(()) => true,
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    deferred = true;
+                    false
+                }
+            }
+        });
+        // A followed move already happened; make it durable before committing
+        // it. There is no filesystem step left to journal.
+        let mut synced = HashSet::new();
+        moves.retain(|change| {
+            let durable = [&change.from, &change.to].into_iter().try_for_each(|path| {
+                let Ok(full) = self.safe(path, false) else {
+                    return Ok(());
+                };
+                let folder = full.parent().unwrap().to_path_buf();
+                if folder.is_dir() && !synced.contains(&folder) {
+                    disk::sync_directories(&folder, &self.root)?;
+                    synced.insert(folder);
+                }
+                Ok::<_, ApiError>(())
+            });
+            if let Err(error) = &durable {
+                tracing::warn!(document = change.id, "followed move pending: {error}");
+                deferred = true;
+            }
+            durable.is_ok()
+        });
+        // Recheck evidence right before committing it.
+        moves.retain(|change| {
+            let current = self.inspect(&change.to) == Seen::File(Some(change.evidence.clone()));
+            deferred |= !current;
+            current
+        });
+        retiring.retain(|missing| {
+            let current = self.inspect(&missing.path) == missing.seen;
+            deferred |= !current;
+            current
+        });
+        if deferred {
+            sooner(&mut retry, RETRY);
+        }
+        if !self.root_identity.matches(&self.root) {
+            self.reconciliation.after(RETRY);
+            return Ok(());
+        }
+        // A deferred document keeps its path, which blocks any move onto it.
+        loop {
+            let leaving: HashSet<&str> = moves
+                .iter()
+                .map(|change| change.id.as_str())
+                .chain(retiring.iter().map(|missing| missing.id.as_str()))
+                .collect();
+            let kept: HashSet<&str> = tracked
+                .iter()
+                .filter(|document| !leaving.contains(document.id.as_str()))
+                .map(|document| document.path.as_str())
+                .collect();
+            let mut targets: HashMap<&str, usize> = HashMap::new();
+            for change in &moves {
+                *targets.entry(change.to.as_str()).or_default() += 1;
+            }
+            let blocked: HashSet<String> = moves
+                .iter()
+                .filter(|change| {
+                    kept.contains(change.to.as_str())
+                        || reserved.contains(&change.to)
+                        || targets[change.to.as_str()] > 1
+                })
+                .map(|change| change.id.clone())
+                .collect();
+            if blocked.is_empty() {
+                break;
+            }
+            if moves
+                .iter()
+                .any(|change| blocked.contains(&change.id) && reserved.contains(&change.to))
+            {
+                sooner(&mut retry, RETRY);
+            }
+            moves.retain(|change| !blocked.contains(&change.id));
+        }
+        let records: Vec<_> = records
+            .into_iter()
+            .filter(|(id, _)| !retiring.iter().any(|missing| &missing.id == id))
+            .collect();
+        if !moves.is_empty() || !retiring.is_empty() || !records.is_empty() {
+            // Media approvals of a document leaving its folder resolve there.
+            let leaving_folder = moves
+                .iter()
+                .filter(|change| Path::new(&change.from).parent() != Path::new(&change.to).parent())
+                .map(|change| self.doc(&change.id))
+                .collect::<Result<Vec<_>>>()?;
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            for missing in &retiring {
+                retire(&tx, &missing.id)?;
+            }
+            // Placeholders let swaps and cycles exchange paths without
+            // violating their uniqueness mid-transaction.
+            for change in &moves {
+                tx.execute(
+                    "UPDATE docs SET path=? WHERE id=? AND active=1",
+                    params![format!(".moving/{}", change.id), change.id],
+                )?;
+            }
+            for change in &moves {
+                // A row an older version retired may still hold a real path.
+                tx.execute(
+                    "UPDATE docs SET retired_path=COALESCE(retired_path,path),
+                     path='.retired/'||id WHERE path=? AND active=0",
+                    [&change.to],
+                )?;
+                let updated = tx.execute(
+                    "UPDATE docs SET path=? WHERE id=? AND active=1",
+                    params![change.to, change.id],
+                )?;
+                if updated != 1 {
+                    return Err(bad("A document identity changed during discovery."));
+                }
+            }
+            for document in &leaving_folder {
+                self.freeze_moved_media(&tx, document)?;
+            }
+            for (id, evidence) in &records {
+                record_identity(&tx, id, evidence.as_ref())?;
+            }
+            tx.commit()?;
+            drop(db);
+            if !moves.is_empty() || !retiring.is_empty() {
+                self.permissions.invalidate();
+            }
+        }
+        // Cache operations acquire map -> room. Release every room before
+        // closing retired ones; stale commands reject the inactive identity.
+        drop(live);
+        for missing in &retiring {
+            self.close_document(&missing.id);
+        }
+        if let Some(delay) = retry {
+            self.reconciliation.after(delay);
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Keep a retiring room's final accepted text restorable, including edits
+    /// still waiting for their projection, before its identity retires.
+    fn preserve_for_retirement(&self, id: &str, room: &mut Room) -> Result<()> {
+        // A failed comment/restore transaction may still be waiting in the
+        // engine. Never evict that buffer merely because its file moved.
+        let document = self.doc(id)?;
+        room.ensure_committed(self, &document)?;
+        let source = room_text(room);
+        if room.engine.needs_projection()
+            || room.engine.interrupted()
+            || source != room.engine.source()
+        {
+            self.snapshot(&document, &source, true)?;
         }
         Ok(())
     }
@@ -346,7 +795,7 @@ impl Store {
     ) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         self.finish_pending_path(&self.doc(id)?.path)?;
-        self.discover_file_moves_locked()?;
+        self.reconcile(Pass::Discover)?;
         let d = self.doc(id)?;
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
@@ -374,6 +823,10 @@ impl Store {
             ));
         }
         let metadata = fs::symlink_metadata(&source)?;
+        // A deferred pass can leave another file at this path; move only ours.
+        if !self.assigned(&d.path, Identity::of(&metadata).as_ref())? {
+            return Err(changed_during_rename());
+        }
         let movement = FileMove::new(id, d.path, path, &metadata);
         let previous = {
             let mut db = self.db.lock().unwrap();
@@ -414,10 +867,7 @@ impl Store {
         if !movement.contains(&dest)? {
             // A desktop save replaced the source after its inode was journaled.
             self.restore_replaced(&movement, &source, &dest)?;
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "The file changed during the rename. Try again.".into(),
-            ));
+            return Err(changed_during_rename());
         }
         self.commit_move(&movement)?;
         drop(r);
@@ -530,6 +980,8 @@ impl Store {
             "DELETE FROM document_moves WHERE doc=?",
             [&movement.document],
         )?;
+        // The document may no longer be at its row path; a pass places it.
+        self.reconciliation.after(RETRY);
         Ok(Outcome::Dropped)
     }
 
@@ -562,14 +1014,14 @@ impl Store {
         }
         let mut old = self.doc(&movement.document)?;
         old.path = movement.source.clone();
-        let metadata = fs::metadata(&destination)?;
+        let metadata = fs::symlink_metadata(&destination)?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         if Path::new(&movement.source).parent() != Path::new(&movement.destination).parent() {
             self.freeze_moved_media(&tx, &old)?;
         }
         let previous = Self::move_identity(&tx, movement)?;
-        Self::remember_file_identity_in(&tx, &movement.document, &metadata)?;
+        record_identity(&tx, &movement.document, Identity::of(&metadata).as_ref())?;
         tx.execute(
             "DELETE FROM document_moves WHERE doc=?",
             [&movement.document],
@@ -615,70 +1067,40 @@ impl Store {
 
     pub(super) fn recover_file_operations(&self) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
-        for movement in self.pending_file_moves(None)? {
-            if let Err(error) = self.settle_intent(&movement, true) {
-                // One unreadable folder must not stop recovery of every other
-                // document; the maintenance loop retries the I/O error.
-                tracing::error!(
-                    document = movement.document,
-                    "Interrupted rename is still pending: {error}"
-                );
-            }
-        }
-        Ok(())
+        self.settle_intents(true)
     }
 
     pub(super) fn retry_file_operations(&self) -> Result<()> {
         let Ok(_files) = self.document_files.try_lock() else {
             return Ok(());
         };
+        self.settle_intents(false)
+    }
+
+    /// One unreadable folder must not stop recovery of every other document.
+    /// Startup reports a rename that is still pending at error level; later
+    /// passes retry quietly so a lasting I/O error cannot flood logs.
+    fn settle_intents(&self, startup: bool) -> Result<()> {
         for movement in self.pending_file_moves(None)? {
             if let Err(error) = self.settle_intent(&movement, true) {
-                // Startup reports pending operations at error level. A lasting
-                // I/O error must not flood logs each pass.
-                tracing::debug!(
-                    document = movement.document,
-                    "Rename still pending: {error}"
-                );
+                if startup {
+                    tracing::error!(
+                        document = movement.document,
+                        "Interrupted rename is still pending: {error}"
+                    );
+                } else {
+                    tracing::debug!(
+                        document = movement.document,
+                        "Rename still pending: {error}"
+                    );
+                }
             }
         }
         Ok(())
     }
 
-    pub(super) fn retire_missing_documents(&self) -> Result<()> {
-        let _files = self.document_files.lock().unwrap();
-        if !self.root_identity.matches(&self.root) {
-            return Ok(());
-        }
-        self.discover_file_moves_locked()?;
-        let rows = self
-            .db
-            .lock()
-            .unwrap()
-            .prepare(
-                "SELECT id,path FROM docs WHERE active=1
-                AND NOT EXISTS(SELECT 1 FROM document_moves WHERE doc=docs.id)",
-            )?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let missing = rows
-            .into_iter()
-            .filter_map(|(id, path)| {
-                let full = self.safe(&path, false).ok()?;
-                match fs::metadata(&full) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((id, full)),
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>();
-        for (id, full) in missing {
-            self.retire_missing_identity(&id, &full)?;
-        }
-        Ok(())
-    }
-
-    /// Shared by intentional path reuse and external-file retirement. Preserve
-    /// the final accepted room before revoking identity, with one lock order.
+    /// Intentional path reuse by creation or rename. Preserve the final
+    /// accepted room before revoking identity, with one lock order.
     pub(super) fn retire_missing_identity(&self, id: &str, path: &Path) -> Result<bool> {
         let room = self.rooms.lock().unwrap().get(id).cloned();
         let mut live = if let Some(room) = &room {
@@ -699,17 +1121,7 @@ impl Store {
             return Ok(false);
         }
         if let Some(room) = live.as_mut() {
-            // A failed comment/restore transaction may still be waiting in the
-            // engine. Never evict that buffer merely because its file moved.
-            let document = self.doc(id)?;
-            room.ensure_committed(self, &document)?;
-            let source = room_text(room);
-            if room.engine.needs_projection()
-                || room.engine.interrupted()
-                || source != room.engine.source()
-            {
-                self.snapshot(&document, &source, true)?;
-            }
+            self.preserve_for_retirement(id, room)?;
         }
         if !missing() {
             return Ok(false);
@@ -726,6 +1138,20 @@ impl Store {
         self.close_document(id);
         Ok(true)
     }
+}
+
+fn changed_during_rename() -> ApiError {
+    ApiError(
+        StatusCode::CONFLICT,
+        "The file changed during the rename. Try again.".into(),
+    )
+}
+
+/// Lets tests change the tree, or fail an operation, at each walk step.
+fn walk_step(_path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    tests::WALK_STEP.with_borrow_mut(|step| step.as_mut().map_or(Ok(()), |step| step(_path)))?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -2,6 +2,35 @@
 use super::*;
 use crate::documents::tests::{append_frame, share, store};
 
+type WalkStep = Box<dyn FnMut(&Path) -> std::io::Result<()>>;
+
+thread_local! {
+    /// Runs before the walk lists a folder or inspects an entry, so a test
+    /// can change the tree at that exact moment or fail the operation.
+    pub(super) static WALK_STEP: std::cell::RefCell<Option<WalkStep>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `body` with a walk hook installed on this thread.
+fn walking<T>(
+    step: impl FnMut(&Path) -> std::io::Result<()> + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    WALK_STEP.with_borrow_mut(|hook| *hook = Some(Box::new(step)));
+    let result = body();
+    WALK_STEP.with_borrow_mut(|hook| *hook = None);
+    result
+}
+
+/// Stop the server, change the folder, and start it again.
+fn stopped(s: App, change: impl FnOnce(&Path)) -> App {
+    let root = s.root.clone();
+    let data = s.data.clone();
+    drop(s);
+    change(&root);
+    Store::open(root, data, "http://localhost".into()).unwrap()
+}
+
 #[test]
 fn a_missing_or_replaced_root_never_retires_documents_or_recreates_the_folder() {
     let (dir, s) = store();
@@ -580,14 +609,18 @@ fn desktop_moves_keep_pending_accepted_text_and_never_require_a_text_replacement
 
 #[test]
 fn a_busy_external_move_retries_before_retiring_its_identity() {
+    // A busy room defers only its own document. The pass no longer fails;
+    // it asks the maintenance loop for a prompt retry instead.
     let (_dir, s) = store();
     let d = s.create_document("Drafts/page.md").unwrap();
     s.create_folder("Archive").unwrap();
     let room = s.room(&d).unwrap();
     let busy = room.lock().unwrap();
     fs::rename(s.root.join(&d.path), s.root.join("Archive/page.md")).unwrap();
-    assert!(s.retire_missing_documents().is_err());
-    assert!(s.doc(&d.id).is_ok());
+    s.reconciliation.take();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.doc(&d.id).unwrap().path, "Drafts/page.md");
+    assert!(s.reconciliation.take().is_some());
     drop(busy);
     s.retire_missing_documents().unwrap();
     assert_eq!(s.doc(&d.id).unwrap().path, "Archive/page.md");
@@ -640,7 +673,9 @@ fn moving_does_not_turn_relative_media_approval_into_access_to_another_private_i
 }
 
 #[test]
-fn a_rejected_external_move_stays_journaled_and_replays_without_allocating_a_second_id() {
+fn a_rejected_external_move_replays_from_evidence_without_allocating_a_second_id() {
+    // A followed move has no filesystem step of its own, so it no longer
+    // writes a journal entry that could block the document.
     let (_dir, s) = store();
     let d = s.create_document("Drafts/page.md").unwrap();
     s.create_folder("Archive").unwrap();
@@ -654,7 +689,7 @@ fn a_rejected_external_move_stays_journaled_and_replays_without_allocating_a_sec
         )
         .unwrap();
     assert!(s.index_document("Archive/page.md").is_err());
-    assert_eq!(s.pending_file_moves(None).unwrap().len(), 1);
+    assert_eq!(pending_moves(&s), 0);
     s.db.lock()
         .unwrap()
         .execute_batch("DROP TRIGGER reject_move")
@@ -662,4 +697,319 @@ fn a_rejected_external_move_stays_journaled_and_replays_without_allocating_a_sec
     let s = reopen(s);
     assert_eq!(s.index_document("Archive/page.md").unwrap().id, d.id);
     assert_eq!(s.doc(&d.id).unwrap().token.as_deref(), Some("old-link"));
+}
+
+/// What a visitor with this link reads, or None once it no longer opens.
+fn shared_text(s: &Store, token: &str) -> Option<String> {
+    let document = shared_document(s, token).ok()?;
+    let access = Access {
+        token: Some(token.into()),
+        ..Access::default()
+    };
+    let payload = document_payload(s, &HeaderMap::new(), &document, &access).ok()?;
+    Some(payload["content"].as_str()?.to_owned())
+}
+
+/// Shared A at p.md and private B at r.md, each with durable accepted text.
+fn swap_fixture() -> (tempfile::TempDir, App, Document, Document) {
+    let (directory, s) = store();
+    let a = s.create_document("p.md").unwrap();
+    let b = s.create_document("r.md").unwrap();
+    share(&s, &a.id);
+    fs::write(s.root.join("p.md"), "Shared text of A\n").unwrap();
+    fs::write(s.root.join("r.md"), "Private text of B\n").unwrap();
+    for document in [&a, &b] {
+        let room = s.room(document).unwrap();
+        s.persist(document, &mut room.lock().unwrap()).unwrap();
+    }
+    (directory, s, a, b)
+}
+
+fn swap(root: &Path) {
+    fs::rename(root.join("p.md"), root.join("q.md")).unwrap();
+    fs::rename(root.join("r.md"), root.join("p.md")).unwrap();
+}
+
+#[test]
+fn an_offline_swap_moves_each_document_with_its_own_file() {
+    // Path-first discovery let A adopt B's file at p.md, so A's public link
+    // served B's private text. A known file identity now outranks the path.
+    let (_directory, s, a, b) = swap_fixture();
+    let s = stopped(s, swap);
+    let moved = s.doc(&a.id).unwrap();
+    assert_eq!(moved.path, "q.md");
+    assert_eq!(moved.token.as_deref(), Some("old-link"));
+    let took = s.doc(&b.id).unwrap();
+    assert_eq!(took.path, "p.md");
+    assert_eq!(took.permission, "private");
+    assert!(took.token.is_none());
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    assert_eq!(s.index_document("p.md").unwrap().id, b.id);
+    assert_eq!(s.index_document("q.md").unwrap().id, a.id);
+    assert_eq!(
+        fs::read_to_string(s.root.join("q.md")).unwrap(),
+        "Shared text of A\n"
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
+}
+
+#[test]
+fn a_document_moved_out_of_the_root_retires_while_another_takes_its_path() {
+    let (directory, s, a, b) = swap_fixture();
+    let outside = directory.path().join("outside.md");
+    let s = stopped(s, |root| {
+        fs::rename(root.join("p.md"), &outside).unwrap();
+        fs::rename(root.join("r.md"), root.join("p.md")).unwrap();
+    });
+    // Startup only discovers. A waits for a settled pass, B for A's path.
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    assert_eq!(s.doc(&b.id).unwrap().path, "r.md");
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+    let took = s.doc(&b.id).unwrap();
+    assert_eq!(took.path, "p.md");
+    assert_eq!(took.permission, "private");
+    assert!(took.token.is_none());
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
+    assert_eq!(fs::read_to_string(outside).unwrap(), "Shared text of A\n");
+}
+
+#[test]
+fn a_swap_while_running_moves_each_document_with_its_own_file() {
+    let (_directory, s, a, b) = swap_fixture();
+    swap(&s.root);
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&a.id).unwrap().path, "q.md");
+    let took = s.doc(&b.id).unwrap();
+    assert_eq!(took.path, "p.md");
+    assert!(took.token.is_none());
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Shared text of A\n")
+    );
+    assert_eq!(
+        fs::read_to_string(s.root.join("p.md")).unwrap(),
+        "Private text of B\n"
+    );
+}
+
+#[test]
+fn a_rotation_of_three_files_keeps_every_document_with_its_file() {
+    let (_directory, s) = store();
+    let documents: Vec<_> = ["one.md", "two.md", "three.md"]
+        .into_iter()
+        .map(|name| {
+            let document = s.create_document(name).unwrap();
+            fs::write(s.root.join(name), format!("Text of {name}\n")).unwrap();
+            (name, document)
+        })
+        .collect();
+    fs::rename(s.root.join("one.md"), s.root.join("rotation.tmp")).unwrap();
+    fs::rename(s.root.join("three.md"), s.root.join("one.md")).unwrap();
+    fs::rename(s.root.join("two.md"), s.root.join("three.md")).unwrap();
+    fs::rename(s.root.join("rotation.tmp"), s.root.join("two.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    for ((name, document), expected) in documents.iter().zip(["two.md", "three.md", "one.md"]) {
+        let current = s.doc(&document.id).unwrap();
+        assert_eq!(current.path, expected);
+        assert_eq!(
+            fs::read_to_string(s.root.join(&current.path)).unwrap(),
+            format!("Text of {name}\n")
+        );
+    }
+}
+
+#[test]
+fn an_atomic_save_keeps_its_document_and_records_the_replacement() {
+    let (_directory, s) = store();
+    let document = s.create_document("page.md").unwrap();
+    share(&s, &document.id);
+    let generation = s.permissions.current();
+    let temporary = s.root.join("page.md.tmp");
+    fs::write(&temporary, "Saved by a desktop editor\n").unwrap();
+    fs::rename(&temporary, s.root.join("page.md")).unwrap();
+    s.retire_missing_documents().unwrap();
+    let kept = s.doc(&document.id).unwrap();
+    assert_eq!(kept.path, "page.md");
+    assert_eq!(kept.token.as_deref(), Some("old-link"));
+    let recorded: String =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT identity FROM document_identities WHERE doc=?",
+                [&document.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(
+        Some(Identity(recorded)),
+        Identity::of(&fs::symlink_metadata(s.root.join("page.md")).unwrap())
+    );
+    assert_eq!(s.index_document("page.md").unwrap().id, document.id);
+    assert_eq!(
+        s.permissions.current(),
+        generation,
+        "Recording a replacement file must not reconnect every socket"
+    );
+}
+
+#[test]
+fn evidence_an_older_version_recorded_twice_stays_with_the_file_holding_it() {
+    let (_directory, s) = store();
+    let holder = s.create_document("holder.md").unwrap();
+    let stale = s.create_document("stale.md").unwrap();
+    fs::remove_file(s.root.join("stale.md")).unwrap();
+    // Path-first discovery could record one file for two documents.
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE document_identities SET identity=
+             (SELECT identity FROM document_identities WHERE doc=?) WHERE doc=?",
+            [&holder.id, &stale.id],
+        )
+        .unwrap();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.doc(&holder.id).unwrap().path, "holder.md");
+    assert!(s.doc(&stale.id).is_err());
+    assert_eq!(s.index_document("holder.md").unwrap().id, holder.id);
+    fs::write(s.root.join("new.md"), "Unrelated\n").unwrap();
+    let new = s.index_document("new.md").unwrap();
+    assert_ne!(new.id, holder.id);
+    assert_eq!(new.permission, "private");
+}
+
+#[test]
+fn an_entry_vanishing_during_the_walk_cannot_stop_startup() {
+    let (_directory, s) = store();
+    let document = s.create_document("Drafts/page.md").unwrap();
+    s.create_folder("Archive").unwrap();
+    share(&s, &document.id);
+    let temporary = s.root.join("Archive/page.md.swp");
+    fs::write(&temporary, "Editor scratch file").unwrap();
+    let s = walking(
+        move |path| {
+            // The editor removes its file between listing and inspecting it.
+            if path == temporary {
+                fs::remove_file(path)?;
+            }
+            Ok(())
+        },
+        || {
+            stopped(s, |root| {
+                fs::rename(root.join("Drafts/page.md"), root.join("Archive/page.md")).unwrap();
+            })
+        },
+    );
+    let moved = s.doc(&document.id).unwrap();
+    assert_eq!(moved.path, "Archive/page.md");
+    assert_eq!(moved.token.as_deref(), Some("old-link"));
+}
+
+#[test]
+fn an_unreadable_folder_defers_retirement_until_it_can_be_read() {
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    let hidden = s.create_document("hidden.md").unwrap();
+    share(&s, &removed.id);
+    share_link(&s, &hidden.id, "hidden-link");
+    s.create_folder("Locked").unwrap();
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    fs::rename(s.root.join("hidden.md"), s.root.join("Locked/hidden.md")).unwrap();
+    let locked = s.root.join("Locked");
+    s.reconciliation.take();
+    walking(
+        move |path| {
+            if path == locked {
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            Ok(())
+        },
+        || s.retire_missing_documents(),
+    )
+    .unwrap();
+    // Either file could be in the unlisted folder, so neither retires.
+    assert_eq!(
+        s.doc(&removed.id).unwrap().token.as_deref(),
+        Some("old-link")
+    );
+    assert_eq!(s.doc(&hidden.id).unwrap().path, "hidden.md");
+    let retry = s.reconciliation.take().unwrap();
+    assert!(
+        retry > Instant::now() + Duration::from_secs(10),
+        "An incomplete walk must not rescan the tree every second"
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    let found = s.doc(&hidden.id).unwrap();
+    assert_eq!(found.path, "Locked/hidden.md");
+    assert_eq!(found.token.as_deref(), Some("hidden-link"));
+}
+
+fn share_link(s: &Store, id: &str, token: &str) {
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='view',token=? WHERE id=?",
+            [token, id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn startup_serves_documents_when_reconciliation_fails() {
+    let (_directory, s) = store();
+    let document = s.create_document("Drafts/page.md").unwrap();
+    s.create_folder("Archive").unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_reconciliation BEFORE UPDATE OF path ON docs
+             BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;",
+        )
+        .unwrap();
+    let s = stopped(s, |root| {
+        fs::rename(root.join("Drafts/page.md"), root.join("Archive/page.md")).unwrap();
+    });
+    assert_eq!(s.doc(&document.id).unwrap().path, "Drafts/page.md");
+    s.db.lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER reject_reconciliation")
+        .unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&document.id).unwrap().path, "Archive/page.md");
+}
+
+#[test]
+fn a_file_still_being_matched_does_not_hide_the_workspace_listing() {
+    let (directory, s, a, b) = swap_fixture();
+    let other = s.create_document("other.md").unwrap();
+    fs::rename(s.root.join("p.md"), directory.path().join("outside.md")).unwrap();
+    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    // Until a settled pass retires A, p.md belongs to neither document.
+    let mut entries = Vec::new();
+    scan(&s, &s.root, &mut entries).unwrap();
+    let listed: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| entry.id.clone())
+        .collect();
+    assert_eq!(listed, vec![other.id.clone()]);
+    s.retire_missing_documents().unwrap();
+    let mut entries = Vec::new();
+    scan(&s, &s.root, &mut entries).unwrap();
+    let listed: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| entry.id.clone())
+        .collect();
+    assert!(listed.contains(&b.id) && listed.contains(&other.id));
+    assert!(!listed.contains(&a.id));
 }
