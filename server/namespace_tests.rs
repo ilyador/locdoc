@@ -9,6 +9,16 @@ thread_local! {
     /// can change the tree at that exact moment or fail the operation.
     pub(super) static WALK_STEP: std::cell::RefCell<Option<WalkStep>> =
         const { std::cell::RefCell::new(None) };
+    /// Nanoseconds added to the passes' clock on this thread.
+    pub(super) static CLOCK: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `body` with this thread's passes reading the clock `seconds` from now.
+fn clock_offset<T>(seconds: i64, body: impl FnOnce() -> T) -> T {
+    CLOCK.set(seconds * 1_000_000_000);
+    let result = body();
+    CLOCK.set(0);
+    result
 }
 
 /// Run `body` with a walk hook installed on this thread.
@@ -1927,4 +1937,102 @@ fn an_image_edited_in_place_stays_approved_before_and_after_moves() {
     s.discover_file_moves().unwrap();
     assert_eq!(s.doc(&page.id).unwrap().path, "Final/page.md");
     assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+}
+
+/// A walk hook under which the root's Locked folder cannot be listed.
+fn locked(s: &Store) -> impl Fn(&Path) -> std::io::Result<()> + Clone + 'static {
+    let locked = s.root.join("Locked");
+    move |path| {
+        if path == locked {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_document_held_by_an_unreadable_folder_never_adopts_a_later_file_at_its_name() {
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    share(&s, &removed.id);
+    let room = s.room(&removed).unwrap();
+    s.persist(&removed, &mut room.lock().unwrap()).unwrap();
+    drop(room);
+    s.create_folder("Locked").unwrap();
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    // A pass sees its name empty; the unlisted folder keeps the document.
+    clock_offset(-10, || walking(locked(&s), || s.retire_missing_documents())).unwrap();
+    assert!(s.doc(&removed.id).is_ok());
+    // Long after the settle window, an unrelated private file takes the
+    // name. Path continuity used to hand it the old link.
+    fs::write(s.root.join("removed.md"), "New private notes\n").unwrap();
+    walking(locked(&s), || {
+        s.discover_file_moves().unwrap();
+        s.retire_missing_documents().unwrap();
+        assert_eq!(
+            s.index_document("removed.md").unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    });
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("# removed\n\n")
+    );
+    // The first complete walk retires it; the file is a new document.
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    assert!(shared_text(&s, "old-link").is_none());
+    let notes = s.index_document("removed.md").unwrap();
+    assert_ne!(notes.id, removed.id);
+    assert_eq!(notes.permission, "private");
+    assert_eq!(
+        fs::read_to_string(s.root.join("removed.md")).unwrap(),
+        "New private notes\n"
+    );
+}
+
+#[test]
+fn a_non_atomic_save_keeps_its_document_when_a_pass_saw_its_name_empty() {
+    let (_directory, s) = store();
+    let page = s.create_document("page.md").unwrap();
+    share(&s, &page.id);
+    s.create_folder("Locked").unwrap();
+    // The editor removes the file and writes a new one; a pass runs between.
+    fs::remove_file(s.root.join("page.md")).unwrap();
+    walking(locked(&s), || s.retire_missing_documents()).unwrap();
+    fs::write(s.root.join("page.md"), "Saved without a rename\n").unwrap();
+    // The next pass may come well after the settle window.
+    clock_offset(10, || walking(locked(&s), || s.retire_missing_documents())).unwrap();
+    s.retire_missing_documents().unwrap();
+    let kept = s.doc(&page.id).unwrap();
+    assert_eq!(kept.path, "page.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Saved without a rename\n")
+    );
+    assert_eq!(s.index_document("page.md").unwrap().id, page.id);
+}
+
+#[test]
+fn an_atomic_save_keeps_its_document_after_its_file_came_back() {
+    let (_directory, s) = store();
+    let page = s.create_document("page.md").unwrap();
+    share(&s, &page.id);
+    s.create_folder("Locked").unwrap();
+    // Its file is away while a pass looks, then returns unchanged.
+    fs::rename(s.root.join("page.md"), s.root.join("page.away")).unwrap();
+    clock_offset(-10, || walking(locked(&s), || s.retire_missing_documents())).unwrap();
+    fs::rename(s.root.join("page.away"), s.root.join("page.md")).unwrap();
+    walking(locked(&s), || s.discover_file_moves()).unwrap();
+    // A later atomic save replaces the inode with no gap in between.
+    let temporary = s.root.join("page.md.tmp");
+    fs::write(&temporary, "Saved by a rename\n").unwrap();
+    fs::rename(&temporary, s.root.join("page.md")).unwrap();
+    walking(locked(&s), || s.retire_missing_documents()).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "page.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Saved by a rename\n")
+    );
 }

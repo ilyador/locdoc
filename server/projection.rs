@@ -85,7 +85,7 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
     // queue plus invalidation fallback handles bulk checkouts without a backlog
     // proportional to filesystem traffic or blocking network runtime threads.
     std::thread::spawn(move || {
-        let settle = Duration::from_millis(1000);
+        let settle = namespace::SETTLE;
         let mut coordinator = Coordinator::default();
         let mut missing_after = Some(Instant::now() + settle);
         let mut next_sweep = Instant::now();

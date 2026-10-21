@@ -130,6 +130,7 @@ pub(super) fn retire(db: &Connection, id: &str) -> Result<()> {
         permission='private',token=NULL WHERE id=? AND active=1";
     db.execute(RETIRE, params![now(), format!(".retired/{id}"), id])?;
     db.execute("DELETE FROM document_identities WHERE doc=?", [id])?;
+    db.execute("DELETE FROM document_gaps WHERE doc=?", [id])?;
     Ok(())
 }
 

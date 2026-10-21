@@ -14,6 +14,20 @@ use std::time::{Duration, Instant};
 const RETRY: Duration = Duration::from_secs(1);
 /// Retry after an unreadable folder kept a missing document from retiring.
 const INCOMPLETE_RETRY: Duration = Duration::from_secs(30);
+/// How long an editor's save may leave a document's name empty. Passes wait
+/// this long after a removal; a file born later at an emptied name is not
+/// the document's own.
+pub(super) const SETTLE: Duration = Duration::from_secs(1);
+
+/// Wall-clock nanoseconds, the unit of file birth times.
+fn clock() -> i64 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.as_nanos() as i64);
+    #[cfg(test)]
+    let now = now + tests::CLOCK.get();
+    now
+}
 
 /// Evidence that a directory entry is one particular file: device, inode and
 /// birth time. An inode alone can be reused after deletion; files without a
@@ -34,6 +48,21 @@ impl Identity {
     pub(super) fn as_str(&self) -> &str {
         &self.0
     }
+    fn born(&self) -> Option<i64> {
+        self.0.rsplit(':').next()?.parse().ok()
+    }
+}
+
+/// Whether a file at a document's name, which a pass saw without the
+/// document's file at `since`, may still be the document's own: a non-atomic
+/// save writes it within the settle window. A file born later, or moved
+/// there from elsewhere once the window passed, is another file.
+fn continues(since: i64, now: i64, evidence: Option<&Identity>) -> bool {
+    let window = SETTLE.as_nanos() as i64;
+    now <= since + window
+        || evidence
+            .and_then(Identity::born)
+            .is_some_and(|born| (since - window..=since + window).contains(&born))
 }
 
 /// Record a document's evidence, or forget it when its file carries none.
@@ -177,6 +206,9 @@ struct Tracked<E> {
     path: String,
     recorded: Option<E>,
     seen: Seen<E>,
+    /// When a pass first saw its name without its own file, until a pass
+    /// sees the document at its name again.
+    gap: Option<i64>,
 }
 
 struct Move<E> {
@@ -209,14 +241,16 @@ struct Plan<E> {
 /// there, even over another document's row. A path keeps its document only
 /// when its file carries evidence that no other document has recorded and
 /// no other document's path shows, or none: that is how atomic saves keep
-/// their identity. Evidence recorded for two documents, copies, hard links
-/// and files seen at two paths never transfer a document. `pending` is
-/// evidence of documents whose rename is pending; `files` holds only files
-/// no other name links to.
+/// their identity. A document in `lapsed`, whose name was seen empty before
+/// the settle window, no longer keeps a different file there. Evidence
+/// recorded for two documents, copies, hard links and files seen at two
+/// paths never transfer a document. `pending` is evidence of documents whose
+/// rename is pending; `files` holds only files no other name links to.
 fn classify<E: Clone + Eq + Hash>(
     tracked: &[Tracked<E>],
     pending: &[(&str, &E)],
     files: &HashMap<String, Option<E>>,
+    lapsed: &HashSet<&str>,
 ) -> Plan<E> {
     let mut recorded: HashMap<&E, Vec<&str>> = HashMap::new();
     for document in tracked {
@@ -292,6 +326,16 @@ fn classify<E: Clone + Eq + Hash>(
                     evidence: own.cloned(),
                 });
             }
+            Seen::File(evidence)
+                if evidence.as_ref() != own && lapsed.contains(document.id.as_str()) =>
+            {
+                plan.missing.push(Missing {
+                    id: document.id.clone(),
+                    path: document.path.clone(),
+                    seen: document.seen.clone(),
+                    evidence: own.cloned(),
+                });
+            }
             Seen::File(evidence) => {
                 if evidence.as_ref() != own {
                     plan.records.push((document.id.clone(), evidence.clone()));
@@ -343,6 +387,12 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
             doc TEXT PRIMARY KEY,identity TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS document_physical_identity
             ON document_identities(identity);",
+    )?;
+    // Wall-clock nanoseconds when a pass first saw a document's name
+    // without its own file. It outlives restarts so that a later file at
+    // that name never continues the document.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS document_gaps(doc TEXT PRIMARY KEY,since INTEGER NOT NULL);",
     )?;
     let has_move_birth = db
         .prepare("PRAGMA table_info(document_moves)")?
@@ -499,6 +549,9 @@ impl Store {
             return Ok(HashSet::new());
         }
         self.settle_intents(false)?;
+        // Taken before observing, so a file created after any observation of
+        // this pass was born after it.
+        let started = clock();
         let Namespace {
             mut tracked,
             pending,
@@ -524,7 +577,7 @@ impl Store {
                 .iter()
                 .filter(|document| document.seen != Seen::Unknown)
                 .collect();
-            self.observed_in_place(&observed);
+            self.observed_in_place(&observed)?;
             return Ok(HashSet::new());
         }
         let (mut files, mut linked, complete) = self.walk();
@@ -559,7 +612,17 @@ impl Store {
             .iter()
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
             .collect();
-        let mut plan = classify(&tracked, &held, &files);
+        let lapsed: HashSet<&str> = tracked
+            .iter()
+            .filter(|document| match (&document.seen, document.gap) {
+                (Seen::File(evidence), Some(since)) => {
+                    *evidence != document.recorded && !continues(since, started, evidence.as_ref())
+                }
+                _ => false,
+            })
+            .map(|document| document.id.as_str())
+            .collect();
+        let mut plan = classify(&tracked, &held, &files, &lapsed);
         if pass == Pass::Settled
             && complete
             && plan
@@ -586,13 +649,26 @@ impl Store {
                 gone
             });
         }
-        self.apply(pass, plan, &tracked, &reserved, complete)
+        self.apply(pass, plan, &tracked, &reserved, complete, started)
     }
 
     /// Documents a pass saw at their own name, with their own file or one it
-    /// accepted there. Their approved media is matched to the files it now
-    /// resolves to.
-    fn observed_in_place(&self, documents: &[&Tracked<Identity>]) {
+    /// accepted there. Their gap ends, and their approved media is matched
+    /// to the files it now resolves to.
+    fn observed_in_place(&self, documents: &[&Tracked<Identity>]) -> Result<()> {
+        let returned: Vec<&str> = documents
+            .iter()
+            .filter(|document| document.gap.is_some())
+            .map(|document| document.id.as_str())
+            .collect();
+        if !returned.is_empty() {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            for id in returned {
+                tx.execute("DELETE FROM document_gaps WHERE doc=?", [id])?;
+            }
+            tx.commit()?;
+        }
         let folders: Vec<(&str, &str)> = documents
             .iter()
             .map(|document| (document.id.as_str(), document.path.as_str()))
@@ -600,12 +676,14 @@ impl Store {
         if let Err(error) = self.refresh_media_identities(&folders) {
             tracing::debug!("media identities pending: {error}");
         }
+        Ok(())
     }
 
     fn namespace(&self) -> Result<Namespace> {
-        const DOCUMENTS: &str = "SELECT d.id,d.path,f.identity,m.destination FROM docs d
+        const DOCUMENTS: &str = "SELECT d.id,d.path,f.identity,m.destination,g.since FROM docs d
             LEFT JOIN document_identities f ON f.doc=d.id
-            LEFT JOIN document_moves m ON m.doc=d.id WHERE d.active=1";
+            LEFT JOIN document_moves m ON m.doc=d.id
+            LEFT JOIN document_gaps g ON g.doc=d.id WHERE d.active=1";
         let rows = self
             .db
             .lock()
@@ -617,6 +695,7 @@ impl Store {
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -625,7 +704,7 @@ impl Store {
             pending: Vec::new(),
             reserved: HashSet::new(),
         };
-        for (id, path, identity, destination) in rows {
+        for (id, path, identity, destination, gap) in rows {
             let recorded = identity.map(Identity);
             match destination {
                 Some(destination) => {
@@ -637,6 +716,7 @@ impl Store {
                     path,
                     recorded,
                     seen: Seen::Unknown,
+                    gap,
                 }),
             }
         }
@@ -724,6 +804,7 @@ impl Store {
         tracked: &[Tracked<Identity>],
         reserved: &HashSet<String>,
         complete: bool,
+        started: i64,
     ) -> Result<HashSet<String>> {
         let unsettled: HashSet<&str> = plan
             .missing
@@ -737,6 +818,16 @@ impl Store {
             .filter(|document| {
                 matches!(document.seen, Seen::File(_)) && !unsettled.contains(document.id.as_str())
             })
+            .collect();
+        // A name seen without its own file opens a gap, kept until a pass
+        // sees the document at its name again or finds its file elsewhere.
+        let opened: Vec<String> = tracked
+            .iter()
+            .filter(|document| {
+                document.gap.is_none()
+                    && plan.missing.iter().any(|missing| missing.id == document.id)
+            })
+            .map(|document| document.id.clone())
             .collect();
         drop(unsettled);
         let Plan {
@@ -854,7 +945,7 @@ impl Store {
             self.reconciliation.after(RETRY);
             return Ok(unplaced);
         }
-        self.observed_in_place(&observed);
+        self.observed_in_place(&observed)?;
         // A deferred document keeps its path, which blocks any move onto it.
         loop {
             let leaving: HashSet<&str> = moves
@@ -895,7 +986,7 @@ impl Store {
             .into_iter()
             .filter(|(id, _)| !retiring.iter().any(|missing| &missing.id == id))
             .collect();
-        if !moves.is_empty() || !retiring.is_empty() || !records.is_empty() {
+        if !moves.is_empty() || !retiring.is_empty() || !records.is_empty() || !opened.is_empty() {
             // Media approvals of a document leaving its folder are checked
             // against the files they resolved to there.
             let leaving_folder = moves
@@ -905,6 +996,12 @@ impl Store {
                 .collect::<Result<Vec<_>>>()?;
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
+            for id in &opened {
+                tx.execute(
+                    "INSERT OR IGNORE INTO document_gaps(doc,since) VALUES(?,?)",
+                    params![id, started],
+                )?;
+            }
             for missing in &retiring {
                 retire(&tx, &missing.id)?;
             }
@@ -930,6 +1027,7 @@ impl Store {
                 if updated != 1 {
                     return Err(bad("A document identity changed during discovery."));
                 }
+                tx.execute("DELETE FROM document_gaps WHERE doc=?", [&change.id])?;
             }
             for (document, destination) in &leaving_folder {
                 self.reanchor_moved_media(&tx, document, destination)?;
@@ -1239,6 +1337,10 @@ impl Store {
         }
         let previous = Self::move_identity(&tx, movement)?;
         record_identity(&tx, &movement.document, Identity::of(&metadata).as_ref())?;
+        tx.execute(
+            "DELETE FROM document_gaps WHERE doc=?",
+            [&movement.document],
+        )?;
         tx.execute(
             "DELETE FROM document_moves WHERE doc=?",
             [&movement.document],
