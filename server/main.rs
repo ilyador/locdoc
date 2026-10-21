@@ -11,6 +11,7 @@ mod maintenance;
 mod mcp;
 mod mcp_access;
 mod mcp_auth;
+mod namespace;
 mod peers;
 #[cfg(test)]
 mod persistence_adversarial_tests;
@@ -284,6 +285,7 @@ impl Store {
    CREATE TABLE IF NOT EXISTS fonts(family TEXT PRIMARY KEY,css TEXT NOT NULL);")?;
         db.execute_batch("CREATE TABLE IF NOT EXISTS doc_updates(seq INTEGER PRIMARY KEY AUTOINCREMENT,doc TEXT NOT NULL,content BLOB NOT NULL); CREATE INDEX IF NOT EXISTS doc_updates_document ON doc_updates(doc,seq);")?;
         browser_auth::migrate(&db)?;
+        namespace::migrate(&db)?;
         documents::migrate(&db)?;
         folders::migrate(&db)?;
         mcp_access::migrate(&db)?;
