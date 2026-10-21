@@ -1547,3 +1547,32 @@ fn an_unreadable_folder_keeps_no_link_alive_for_a_file_no_walk_can_find() {
     assert_ne!(notes.id, removed.id);
     assert_eq!(notes.permission, "private");
 }
+
+#[test]
+fn a_second_name_in_a_shared_folder_never_opens_a_private_document() {
+    let (_directory, s) = store();
+    let private = s.create_document("Private/page.md").unwrap();
+    fs::write(s.root.join("Private/page.md"), "Private text\n").unwrap();
+    s.create_folder("Shared").unwrap();
+    let shared = folders::share_folder(
+        &s,
+        serde_json::from_value(json!({"path": "Shared", "permission": "edit"})).unwrap(),
+    )
+    .unwrap();
+    let token = shared["shareUrl"]
+        .as_str()
+        .unwrap()
+        .rsplit('/')
+        .next()
+        .unwrap();
+    fs::hard_link(
+        s.root.join("Private/page.md"),
+        s.root.join("Shared/page.md"),
+    )
+    .unwrap();
+    let grant = folders::grant(&s, token).unwrap();
+    // The second name is not listed as a document a visitor could open or edit.
+    assert!(folders::entries(&s, &grant).unwrap().is_empty());
+    assert!(folders::document(&s, &grant, Some(&private.id)).is_err());
+    assert_eq!(s.doc(&private.id).unwrap().path, "Private/page.md");
+}
