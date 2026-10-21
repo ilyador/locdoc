@@ -25,12 +25,14 @@ rollback      Point `current` at RELEASE (default: the previous release recorded
 restore       Restore SNAPSHOT, a folder holding state/ (locdoc.sqlite from
               SQLite's backup API, owner.key, root.identity, fonts) and docs/,
               such as an rsnapshot hourly.N folder. Checks the snapshot, stops
-              the service, moves the documents folder to DOCS.before-restore-TIME
-              and the state files into STATE/before-restore-TIME, copies the
-              snapshot in, runs current/locdoc --restored, starts the service and
-              runs the same checks. A failure before the start puts the moved
-              data back and keeps the restored copies as *failed-restore-TIME.
-              Nothing is deleted and the snapshot is never changed.
+              the service and copies the snapshot next to the live data. Then
+              moves the documents folder to DOCS.before-restore-TIME and the
+              state files into STATE/before-restore-TIME, puts the copies in
+              their place, runs current/locdoc --restored, starts the service
+              and runs the same checks. A failure or interruption before the
+              start puts the previous data back and keeps the restored copies
+              as *failed-restore-TIME. Nothing is deleted and the snapshot is
+              never changed.
 install-unit  Install deployment/locdoc-release.conf as the unit's release.conf
               drop-in. Without a current release, the running build is adopted
               as the first release. The running process is not restarted.
@@ -697,49 +699,60 @@ aside_paths() {
   printf '%s\n' "${aside_docs:+$aside_docs and }$aside_state"
 }
 
-# Move the live documents folder and state files aside and copy the snapshot
-# in. Each step is recorded, so put_back undoes exactly what happened.
+# Copy the snapshot next to the live data, then swap them: the live documents
+# folder and state files move aside and the copies take their place. The live
+# data is untouched until the copies are complete, and root.identity never
+# leaves the state folder, so a server started after this script was killed
+# runs on the live data or refuses the documents folder. Each step is recorded
+# before it is taken; put_back undoes whatever happened.
 replace_data() { # snapshot
-  local snap=$1 name staging
+  local snap=$1 name staged
   mkdir -p -- "$state"
   take_state_lock || die "another Locdoc process is using $state; stop it first"
   restore_stamp=$(date -u +%Y%m%dT%H%M%SZ)
   aside_state=$state/before-restore-$restore_stamp
+  staged=$state/.restoring-$restore_stamp
   [[ ! -e $docs.before-restore-$restore_stamp && ! -e $aside_state ]] ||
     die "data from a restore at $restore_stamp is already aside"
+  say "copying the snapshot next to the live data"
+  cp -a -- "$snap/docs" "$docs.restoring-$restore_stamp" || die "could not copy $snapshot/docs"
+  py fsync "$docs.restoring-$restore_stamp"
+  mkdir -- "$staged" || die "could not create $staged"
+  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
+    [[ ! -e $snap/state/$name ]] || cp -a -- "$snap/state/$name" "$staged/$name" ||
+      die "could not copy $snapshot/state/$name"
+  done
+  [[ $(sha256 "$staged/locdoc.sqlite") == "$snapshot_sha" ]] ||
+    die "$snapshot/state/locdoc.sqlite changed after its check"
+  # A backup without one gets the identity the restore pass records first,
+  # which matches no folder.
+  [[ -e $staged/root.identity ]] || printf '{"device":0,"inode":0}' >"$staged/root.identity"
+  py fsync "$staged"
+  say "moving the live data aside"
   if [[ -e $docs || -L $docs ]]; then
-    mv -T -- "$docs" "$docs.before-restore-$restore_stamp" || die "could not move $docs aside"
     aside_docs=$docs.before-restore-$restore_stamp
+    mv -T -- "$docs" "$aside_docs" || die "could not move $docs aside"
   fi
+  docs_placed=1
+  mv -T -- "$docs.restoring-$restore_stamp" "$docs" || die "could not move the copied documents to $docs"
+  fsync_dir "$(dirname -- "$docs")"
   mkdir -- "$aside_state" || die "could not create $aside_state"
   for name in "${state_files[@]}"; do
     [[ -e $state/$name || -L $state/$name ]] || continue
-    mv -T -- "$state/$name" "$aside_state/$name" || die "could not move $state/$name aside"
+    if [[ $name == root.identity ]]; then
+      # The copied one replaces it in place below.
+      cp -a -- "$state/$name" "$aside_state/$name" || die "could not copy $state/$name aside"
+    else
+      mv -T -- "$state/$name" "$aside_state/$name" || die "could not move $state/$name aside"
+    fi
   done
   state_aside=1
-  fsync_dir "$state"
-  fsync_dir "$(dirname -- "$docs")"
-  say "moved the live data aside; copying the snapshot in"
-  staging=$docs.restoring-$restore_stamp
-  cp -a -- "$snap/docs" "$staging" || die "could not copy $snapshot/docs"
-  py fsync "$staging"
-  mv -T -- "$staging" "$docs" || die "could not move the copied documents to $docs"
-  docs_placed=1
-  fsync_dir "$(dirname -- "$docs")"
-  staging=$state/.restoring-$restore_stamp
-  mkdir -- "$staging" || die "could not create $staging"
-  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
-    [[ ! -e $snap/state/$name ]] || cp -a -- "$snap/state/$name" "$staging/$name" ||
-      die "could not copy $snapshot/state/$name"
-  done
-  [[ $(sha256 "$staging/locdoc.sqlite") == "$snapshot_sha" ]] ||
-    die "$snapshot/state/locdoc.sqlite changed after its check"
-  py fsync "$staging"
-  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
-    [[ ! -e $staging/$name ]] || mv -T -- "$staging/$name" "$state/$name" ||
+  py fsync "$aside_state"
+  for name in locdoc.sqlite locdoc.sqlite-wal owner.key fonts root.identity; do
+    [[ ! -e $staged/$name ]] || mv -T -- "$staged/$name" "$state/$name" ||
       die "could not move the copied $name into $state"
   done
-  rmdir -- "$staging"
+  rmdir -- "$staged"
   fsync_dir "$state"
 }
 
@@ -761,41 +774,51 @@ restore_pass() {
     die "the restore pass did not complete; see $state/restore-report.json"
 }
 
-# Undo replace_data after a failure before the restored service started, then
-# start the service again. The restored copies stay next to the live data.
+# Undo replace_data after a failure or interrupt before the restored service
+# started, then start the service again. The restored copies stay next to the
+# live data.
 put_back() {
   local name failed=failed-restore-$restore_stamp kept_docs= kept_state=
   restoring=
   if [[ -z $restore_stamp ]]; then
-    : # Nothing was moved yet.
+    : # Nothing was copied or moved yet.
   elif ! take_state_lock; then
     say "another Locdoc process is using $state; the previous data stays in $(aside_paths)"
   else
     say "putting the previous data back"
-    if ((docs_placed)); then
-      mv -T -- "$docs" "$docs.$failed" && kept_docs=$docs.$failed
-    elif [[ -e $docs.restoring-$restore_stamp ]]; then
+    # The restored documents, in place or still staged, are kept.
+    if [[ -e $docs.restoring-$restore_stamp ]]; then
       mv -T -- "$docs.restoring-$restore_stamp" "$docs.$failed" && kept_docs=$docs.$failed
+    elif ((docs_placed)) && [[ -e $docs || -L $docs ]]; then
+      mv -T -- "$docs" "$docs.$failed" && kept_docs=$docs.$failed
     fi
-    if [[ -n $aside_docs ]] && [[ ! -e $docs && ! -L $docs ]] && mv -T -- "$aside_docs" "$docs"; then
+    if [[ -n $aside_docs && ! -e $aside_docs && ! -L $aside_docs ]]; then
+      aside_docs= # It never moved.
+    elif [[ -n $aside_docs ]] && [[ ! -e $docs && ! -L $docs ]] && mv -T -- "$aside_docs" "$docs"; then
       aside_docs=
     fi
+    mkdir -p -- "$state/$failed"
     if ((state_aside)); then
-      # Every state file left in place came from the snapshot or the pass.
-      mkdir -p -- "$state/$failed"
+      # Every state file in place came from the snapshot or the pass.
       for name in "${state_files[@]}"; do
         [[ ! -e $state/$name && ! -L $state/$name ]] || mv -T -- "$state/$name" "$state/$failed/$name"
       done
-      [[ ! -e $state/.restoring-$restore_stamp ]] ||
-        mv -T -- "$state/.restoring-$restore_stamp" "$state/$failed/copying"
-      rmdir -- "$state/$failed" 2>/dev/null || kept_state=$state/$failed
     fi
+    [[ ! -e $state/.restoring-$restore_stamp ]] ||
+      mv -T -- "$state/.restoring-$restore_stamp" "$state/$failed/copying"
+    rmdir -- "$state/$failed" 2>/dev/null || kept_state=$state/$failed
     if [[ -d $aside_state ]]; then
       for name in "${state_files[@]}"; do
         [[ -e $aside_state/$name || -L $aside_state/$name ]] || continue
-        [[ ! -e $state/$name && ! -L $state/$name ]] && mv -T -- "$aside_state/$name" "$state/$name"
+        if [[ ! -e $state/$name && ! -L $state/$name ]]; then
+          mv -T -- "$aside_state/$name" "$state/$name"
+        elif [[ $name == root.identity ]] && cmp -s -- "$aside_state/$name" "$state/$name"; then
+          rm -f -- "$aside_state/$name" # A copy of the one that never left.
+        fi
       done
       rmdir -- "$aside_state" 2>/dev/null && aside_state=
+    else
+      aside_state=
     fi
     fsync_dir "$state"
     fsync_dir "$(dirname -- "$docs")"

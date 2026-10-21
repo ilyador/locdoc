@@ -242,7 +242,8 @@ async function serve(state, docs) {
   try {
     for (const deadline = Date.now() + 20000; ; await delay(50)) {
       if (server.exitCode !== null) throw Error(`The server exited: ${logs}`);
-      if (Date.now() > deadline) throw Error(`The server did not start: ${logs}`);
+      if (Date.now() > deadline)
+        throw Error(`The server did not start: ${logs}`);
       try {
         if ((await fetch(`${base}/api/config`)).ok) break;
       } catch {}
@@ -364,7 +365,101 @@ async function restoreFixture(root) {
       env: { ...env, ...extra },
       encoding: "utf8",
     });
-  return { live, state, docs, snapshot, id, token, restore };
+  return {
+    live,
+    state,
+    docs,
+    snapshot,
+    id,
+    token,
+    restore,
+    env,
+    release: join(releases, name),
+  };
+}
+
+// cp and mv for restore tests, first on PATH. HOLD_TOOL holds the step whose
+// arguments include HOLD_MATCH until the test kills it; STEP_INTERRUPT
+// interrupts the script right after that many copies and moves.
+async function stepTools(root) {
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  for (const tool of ["cp", "mv"]) {
+    const real = spawnSync("bash", ["-c", `command -v ${tool}`], {
+      encoding: "utf8",
+    }).stdout.trim();
+    await writeFile(
+      join(bin, tool),
+      `#!/usr/bin/env bash
+if [[ \${HOLD_TOOL:-} == ${tool} && "$*" == *"$HOLD_MATCH"* ]]; then
+  : >"$HOLD_READY"
+  exec sleep 60
+fi
+${real} "$@" || exit
+[[ -n \${STEP_COUNT:-} ]] || exit 0
+count=$(($(cat "$STEP_COUNT" 2>/dev/null || echo 0) + 1))
+echo "$count" >"$STEP_COUNT"
+[[ $count != "$STEP_INTERRUPT" ]] || kill -INT "$PPID"
+`,
+      { mode: 0o700 },
+    );
+  }
+  return `${bin}:${process.env.PATH}`;
+}
+
+// Start a restore and kill it with all its children, as a power cut would,
+// once a step signals through HOLD_READY.
+async function killRestore(fixture, root, extra) {
+  const ready = join(root, "held");
+  const child = spawn(
+    "bash",
+    [script, "restore", fixture.snapshot, "--no-restart"],
+    {
+      env: { ...fixture.env, ...extra, HOLD_READY: ready },
+      stdio: "ignore",
+      detached: true,
+    },
+  );
+  try {
+    for (const deadline = Date.now() + 20000; ; await delay(50)) {
+      if (child.exitCode !== null) throw Error("The restore did not hold");
+      if (Date.now() > deadline) throw Error("The restore never held");
+      try {
+        await readFile(ready);
+        break;
+      } catch {}
+    }
+  } finally {
+    process.kill(-child.pid, "SIGKILL");
+    if (child.exitCode === null && child.signalCode === null)
+      await once(child, "exit");
+  }
+}
+
+// Normal startup on the given folders, which must refuse them at once.
+async function refusedStartup(state, docs) {
+  const started = spawnSync(binary, [], {
+    env: {
+      ...process.env,
+      LOCDOC_STATE: state,
+      LOCDOC_DOCS: docs,
+      LOCDOC_BIND: `127.0.0.1:${await freePort()}`,
+    },
+    encoding: "utf8",
+    timeout: 20000,
+  });
+  assert.equal(started.status, 1, `startup was refused: ${started.stderr}`);
+  return started.stderr;
+}
+
+// Remove the restored copies a failed restore keeps next to the live data.
+async function removeKeptCopies(fixture) {
+  for (const name of await names(fixture.live))
+    if (name.startsWith("docs.failed-restore-"))
+      await rm(join(fixture.live, name), { recursive: true });
+  for (const name of await names(fixture.state))
+    if (name.startsWith("failed-restore-"))
+      await rm(join(fixture.state, name), { recursive: true });
 }
 
 test("restore puts a snapshot in place, keeps the live data aside and follows a moved document", async () => {
@@ -460,6 +555,120 @@ test("a restore that fails before the service starts puts the live data back", a
   }
 });
 
+test("an interrupt after any copy or move of a restore puts the live data back", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    const live = fingerprint(fixture.live);
+    const snapshot = fingerprint(fixture.snapshot);
+    const PATH = await stepTools(root);
+    let completed = false;
+    for (let step = 1; step < 100 && !completed; step++) {
+      const run = fixture.restore(fixture.snapshot, {
+        PATH,
+        STEP_INTERRUPT: String(step),
+        STEP_COUNT: join(root, `steps-${step}`),
+      });
+      // Past the last step the restore completes.
+      completed = run.status === 0;
+      if (completed) break;
+      assert.equal(run.status, 130, `step ${step}: ${run.stderr}`);
+      assert.doesNotMatch(run.stderr, /could not put everything back/);
+      await removeKeptCopies(fixture);
+      assert.equal(fingerprint(fixture.live), live, `step ${step}`);
+      assert.equal(fingerprint(fixture.snapshot), snapshot, `step ${step}`);
+    }
+    assert.ok(completed, "an uninterrupted restore completes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a killed restore leaves the live workspace or a refused one, never a new one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const at = async (name) => {
+      const folder = join(root, name);
+      await mkdir(folder);
+      return {
+        folder,
+        fixture: await restoreFixture(folder),
+        PATH: await stepTools(folder),
+      };
+    };
+
+    // While the snapshot is copied, the live data is untouched.
+    const copying = await at("copying");
+    await killRestore(copying.fixture, copying.folder, {
+      PATH: copying.PATH,
+      HOLD_TOOL: "cp",
+      HOLD_MATCH: `${copying.fixture.docs}.restoring-`,
+    });
+    const server = await serve(copying.fixture.state, copying.fixture.docs);
+    try {
+      const opened = await (
+        await fetch(`${server.base}/api/open/${copying.fixture.token}`)
+      ).json();
+      assert.equal(opened.document.id, copying.fixture.id);
+      assert.equal(opened.document.content, "Shared text of A\n");
+    } finally {
+      await server.stop();
+    }
+
+    // With the live documents folder aside, startup refuses rather than
+    // creating an empty workspace.
+    const swapping = await at("swapping");
+    await killRestore(swapping.fixture, swapping.folder, {
+      PATH: swapping.PATH,
+      HOLD_TOOL: "mv",
+      HOLD_MATCH: `${swapping.fixture.docs}.restoring-`,
+    });
+    assert.match(
+      await refusedStartup(swapping.fixture.state, swapping.fixture.docs),
+      /unavailable or was replaced/,
+    );
+    assert.ok(!(await names(swapping.fixture.live)).includes("docs"));
+
+    // With the live state files aside, startup refuses rather than creating
+    // a new owner key and database.
+    const moving = await at("moving");
+    await killRestore(moving.fixture, moving.folder, {
+      PATH: moving.PATH,
+      HOLD_TOOL: "mv",
+      HOLD_MATCH: `${moving.fixture.state}/.restoring-`,
+    });
+    await refusedStartup(moving.fixture.state, moving.fixture.docs);
+    const left = await names(moving.fixture.state);
+    assert.ok(!left.includes("owner.key") && !left.includes("locdoc.sqlite"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a restore killed in its pass keeps startup refusing a backup without root.identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    // The state folder was lost, and the backup predates root.identity.
+    await rm(fixture.state, { recursive: true });
+    await rm(join(fixture.snapshot, "state/root.identity"));
+    // A restore pass that is killed as it starts.
+    await rm(join(fixture.release, "locdoc"));
+    await writeFile(
+      join(fixture.release, "locdoc"),
+      '#!/usr/bin/env bash\n: >"$HOLD_READY"\nexec sleep 60\n',
+      { mode: 0o700 },
+    );
+    await killRestore(fixture, root, {});
+    assert.match(
+      await refusedStartup(fixture.state, fixture.docs),
+      /restore pass has not completed/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("restore refuses a snapshot that fails its checks and a state folder in use", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
   let holder;
@@ -467,17 +676,17 @@ test("restore refuses a snapshot that fails its checks and a state folder in use
     const fixture = await restoreFixture(root);
     const live = fingerprint(fixture.live);
     const damaged = join(root, "damaged");
-    assert.equal(
-      spawnSync("cp", ["-a", fixture.snapshot, damaged]).status,
-      0,
-    );
+    assert.equal(spawnSync("cp", ["-a", fixture.snapshot, damaged]).status, 0);
     const database = join(damaged, "state/locdoc.sqlite");
     const bytes = await readFile(database);
     bytes.fill(0xff, 100, 4096);
     await writeFile(database, bytes);
     const corrupt = fixture.restore(damaged);
     assert.equal(corrupt.status, 1);
-    assert.match(corrupt.stderr, /locdoc\.sqlite (cannot be read|fails its check)/);
+    assert.match(
+      corrupt.stderr,
+      /locdoc\.sqlite (cannot be read|fails its check)/,
+    );
     await rm(join(damaged, "state/owner.key"));
     const keyless = fixture.restore(damaged);
     assert.equal(keyless.status, 1);
