@@ -108,6 +108,32 @@ const reads = (path: string) =>
   api.calls.filter((call) => call.method === "GET" && call.path === path).length;
 const files = ["Notes/", "Notes/Plan.md", "Script.fountain", "todo.txt"];
 
+test("renaming or moving the open document updates its tab title and breadcrumb at once", async () => {
+  await open(files, "notes-plan-md");
+  await waitFor(() => assert.ok(editor()));
+  assert.equal(document.title, "Plan · locdoc");
+  assert.deepEqual(crumbs(), { folder: "Notes", title: "Plan", extension: ".md" });
+  fireEvent.click(row("Notes"));
+  row("Notes/Plan.md").focus();
+  fireEvent.keyDown(row("Notes/Plan.md"), { key: "F2" });
+  const field = screen.getByRole("textbox", { name: "Rename Plan.md" });
+  fireEvent.change(field, { target: { value: "Roadmap" } });
+  // The refreshed listing is held: the change must not wait for it.
+  const listing = api.hold("GET /api/tree");
+  fireEvent.keyDown(field, { key: "Enter" });
+  await waitFor(() => assert.equal(document.title, "Roadmap · locdoc"));
+  assert.deepEqual(crumbs(), { folder: "Notes", title: "Roadmap", extension: ".md" });
+  assert.ok(editor(), "A rename in the same format keeps the editor");
+  await act(async () => listing());
+  row("Notes/Roadmap.md").focus();
+  fireEvent.keyDown(row("Notes/Roadmap.md"), { key: "F10", shiftKey: true });
+  fireEvent.click(screen.getByRole("menuitem", { name: /Move to/ }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Documents" }));
+  await waitFor(() => assert.equal(crumbs().folder, null));
+  assert.deepEqual(crumbs(), { folder: null, title: "Roadmap", extension: ".md" });
+  assert.equal(document.title, "Roadmap · locdoc");
+});
+
 test("an external rename updates the title and breadcrumb, and a new format reopens the editor", async () => {
   await open(files, "notes-plan-md");
   await waitFor(() => assert.ok(editor()));

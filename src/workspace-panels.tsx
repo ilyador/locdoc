@@ -1,9 +1,4 @@
-import {
-  useState,
-  type Dispatch,
-  type ReactNode,
-  type SetStateAction,
-} from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import {
   ArrowCounterClockwise,
   CaretRight,
@@ -18,17 +13,14 @@ import { CollaborationRecovery } from "./collaboration-recovery";
 import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { McpConnections } from "./mcp-authorization";
 import { RenameDocument } from "./rename-document";
-import { documentFormat, type DocumentFormat } from "./document-format";
+import { documentFormat } from "./document-format";
 import type { DocumentSession } from "./document-session";
 import type { Config, Document } from "./model";
 
-type CreateKind = "file" | "folder";
-
-export function panelTitle(panel: string | null, createKind: CreateKind) {
+export function panelTitle(panel: string | null) {
   return {
     share: "Share document",
     "folder-share": "Share folder",
-    create: createKind === "folder" ? "New folder" : "New document",
     login: "Open your workspace",
     settings: "Your workspace",
     document: "Document options",
@@ -74,110 +66,6 @@ export function DocumentSharePanel({
         <p className="field-help">Folder links grant access separately.</p>
       )}
     </>
-  );
-}
-
-// The create form outlives the dialog: its format choice persists, and its path
-// is cleared only when the form opens again or the entry is created.
-export function useCreateForm() {
-  const [path, setPath] = useState("");
-  const [format, setFormat] = useState<DocumentFormat>("markdown");
-  const [kind, setKind] = useState<CreateKind>("file");
-  return {
-    path,
-    setPath,
-    format,
-    setFormat,
-    kind,
-    reset: (next: CreateKind) => {
-      setKind(next);
-      setPath("");
-    },
-  };
-}
-
-export function CreateEntryForm({
-  form: { path, setPath, format, setFormat, kind },
-  busy,
-  onSubmit,
-  onCancel,
-}: {
-  form: ReturnType<typeof useCreateForm>;
-  busy: boolean;
-  onSubmit: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit();
-      }}
-    >
-      <p className="dialog-description">
-        {kind === "folder"
-          ? "Create a real folder in your document directory."
-          : "A plain text file, ready to write in any editor."}
-      </p>
-      {kind === "file" && (
-        <>
-          <label className="field-label" htmlFor="new-format">
-            File type
-          </label>
-          <select
-            id="new-format"
-            className="text-input"
-            value={
-              /\.(md|fountain)$/i.test(path) ? documentFormat(path) : format
-            }
-            onChange={(event) => {
-              const format = event.target.value as DocumentFormat;
-              setFormat(format);
-              setPath((value) =>
-                value
-                  ? value.replace(/\.(md|fountain)$/i, "") +
-                    (format === "fountain" ? ".fountain" : ".md")
-                  : value,
-              );
-            }}
-          >
-            <option value="markdown">Markdown (.md)</option>
-            <option value="fountain">Fountain screenplay (.fountain)</option>
-          </select>
-        </>
-      )}
-      <label className="field-label" htmlFor="new-path">
-        {kind === "folder" ? "Folder path" : "Document path"}
-      </label>
-      <input
-        id="new-path"
-        className="text-input"
-        autoFocus
-        placeholder={
-          kind === "folder"
-            ? "Projects / Research"
-            : format === "fountain"
-              ? "Projects/My screenplay.fountain"
-              : "Projects/My next idea.md"
-        }
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        required
-      />
-      <p className="field-help">Use / to place it inside a folder.</p>
-      <div className="dialog-actions">
-        <button type="button" className="button quiet" onClick={onCancel}>
-          Cancel
-        </button>
-        <button className="button primary" disabled={busy || !path.trim()}>
-          {busy
-            ? "Creating…"
-            : kind === "folder"
-              ? "Create folder"
-              : "Create document"}
-        </button>
-      </div>
-    </form>
   );
 }
 

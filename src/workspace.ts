@@ -5,6 +5,7 @@ import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
 import { api, ownerSession, send } from "./api";
 import { normalizePresence } from "./presence";
+import { useFileActions } from "./file-actions";
 import {
   sharedToken,
   directDocumentId,
@@ -166,6 +167,20 @@ export function useWorkspace() {
     },
     [],
   );
+  const files = useFileActions({
+    owner: !!config?.owner && !sharedToken,
+    root: config?.root || "",
+    entries,
+    patchEntries,
+    loadTree,
+    currentId: () => current.current,
+    navigate,
+    setExpanded,
+    view: sidebarView,
+    setView: setSidebarView,
+    setQuery,
+    setSidebar,
+  });
   useEffect(() => {
     const unavailable = (error: Error) => {
       setError(error.message);
@@ -276,6 +291,7 @@ export function useWorkspace() {
     setSidebarView,
     loadTree,
     patchEntries,
+    files,
   };
 }
 export type Workspace = ReturnType<typeof useWorkspace>;

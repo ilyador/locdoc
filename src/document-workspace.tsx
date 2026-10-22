@@ -19,25 +19,28 @@ import { useDocument } from "./use-document";
 import { AppearancePanel, documentFontFamily } from "./appearance";
 import { VersionHistory } from "./version-history";
 import { IconButton } from "./ui";
-import { documentFormat, documentName, documentPath } from "./document-format";
+import { documentFormat, documentName } from "./document-format";
 import { NamePrompt } from "./name-prompt";
 import { CommentConversation, useConversation } from "./document-conversation";
 import { DocumentFooter } from "./document-footer";
 import { DocumentFormatbar } from "./document-formatbar";
 import { DocumentTopbar } from "./document-topbar";
 import { uploadAttachment } from "./document-upload";
-import { Toast, useAction, useToast } from "./workspace-feedback";
 import {
-  CreateEntryForm,
+  FileActionToast,
+  Toast,
+  useAction,
+  useToast,
+} from "./workspace-feedback";
+import {
   DocumentOptions,
   DocumentSharePanel,
   OwnerLoginForm,
   WorkspaceSettings,
   downloadDocument,
   panelTitle,
-  useCreateForm,
 } from "./workspace-panels";
-import { baseName, entryFormat, relocateEntries } from "./file-names";
+import { baseName, entryFormat } from "./file-names";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import {
   EmptyWorkspace,
@@ -59,6 +62,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setSidebar,
     sidebarWidth,
     loadTree,
+    files,
   } = workspace;
   const {
     doc,
@@ -126,7 +130,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const { toast, tell, dismiss } = useToast();
   const { busy, action } = useAction(tell);
   const error = documentError || workspace.error;
-  const create = useCreateForm();
   const [apiKey, setApiKey] = useState("");
   const editor = useRef<EditorHandle>(null);
   const [linkSelection, setLinkSelection] = useState<Selection | null>(null);
@@ -217,23 +220,17 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         tell,
       }),
     );
-  const openCreate = (kind: "file" | "folder") => {
-    create.reset(kind);
-    setPanel("create");
-  };
-  const createFile = () =>
-    action(async () => {
-      let path = create.path.trim();
-      if (create.kind === "file") path = documentPath(path, create.format);
-      const result = await api<{ id?: string }>(
-        "/api/files",
-        send("POST", { path, kind: create.kind }),
-      );
-      setPanel(null);
-      create.setPath("");
-      await loadTree();
-      if (result.id) await openDocument(result.id);
-    });
+  const openCreate = (kind: "file" | "folder") => files.startCreate(kind);
+  const prepareNavigation = () =>
+    session?.drafts.flush() || Promise.resolve();
+  // A document created from the sidebar opens ready for writing.
+  useEffect(() => {
+    if (!session || !doc || !files.takeEditorFocus(doc.id)) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !active.closest(".sidebar"))
+      return;
+    requestAnimationFrame(() => editor.current?.focus());
+  }, [session]);
   const shareFolder = (path: string) => {
     setShareFolderPath(path);
     setPanel("folder-share");
@@ -308,6 +305,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           filename={filename}
           searchInput={searchInput}
           choose={choose}
+          prepare={prepareNavigation}
           onCreate={openCreate}
           onShareFolder={shareFolder}
           onSettings={() => setPanel("settings")}
@@ -470,7 +468,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           >
             <div className="dialog-content">
               <div className="dialog-heading">
-                <h2 id="panel-title">{panelTitle(panel, create.kind)}</h2>
+                <h2 id="panel-title">{panelTitle(panel)}</h2>
                 <IconButton label="Close dialog" onClick={() => setPanel(null)}>
                   <X size={18} />
                 </IconButton>
@@ -505,14 +503,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   path={shareFolderPath}
                   name={name}
                   onChanged={loadTree}
-                />
-              )}
-              {panel === "create" && (
-                <CreateEntryForm
-                  form={create}
-                  busy={busy}
-                  onSubmit={createFile}
-                  onCancel={() => setPanel(null)}
                 />
               )}
               {panel === "login" && (
@@ -565,11 +555,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   onHistory={() => setPanel("history")}
                   onRename={(path) => {
                     setDoc((doc) => (doc ? { ...doc, path } : doc));
-                    if (entry)
-                      workspace.patchEntries((items) =>
-                        relocateEntries(items, entry.path, path),
-                      );
-                    void loadTree();
+                    files.renamed(doc.id, path);
                     setPanel(null);
                   }}
                 />
@@ -598,7 +584,13 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             }}
           />
         )}
-        <Toast message={toast} onDismiss={dismiss} />
+        <div className="toast-region">
+          <Toast message={toast} onDismiss={dismiss} />
+          <FileActionToast files={files} />
+        </div>
+        <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+          <span key={files.announcement.seq}>{files.announcement.text}</span>
+        </div>
       </div>
     </IconContext.Provider>
   );

@@ -21,6 +21,10 @@
   --primary-hover: #c8dfef;
   --primary-text: #28475d;
   --selection: #d2e6f5;
+  --menu-shadow: 0 12px 32px #15213124, 0 2px 6px #15213114;
+  --warning-surface: #fff3df;
+  --warning-text: #84551e;
+  --warning-line: #b57830;
   --syntax-heading: #c13600;
   --syntax-teal: #117c72;
   --syntax-code: #637a00;
@@ -358,8 +362,18 @@ button:hover {
   overflow-y: auto;
   overscroll-behavior: contain;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.file-tree > nav,
+.file-tree-body {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
 }
 .tree-item {
+  --row-bg: var(--sidebar);
+  position: relative;
   width: 100%;
   height: 42px;
   display: flex;
@@ -370,6 +384,25 @@ button:hover {
   text-align: left;
   color: var(--secondary);
   white-space: nowrap;
+  padding-right: 8px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+.tree-item:hover {
+  --row-bg: var(--hover);
+  background: var(--hover);
+}
+.tree-item:focus {
+  outline: none;
+}
+.tree-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 .tree-item span {
   overflow: hidden;
@@ -380,6 +413,7 @@ button:hover {
   font-weight: var(--weight-semibold);
 }
 .tree-item.active {
+  --row-bg: var(--accent-soft);
   background: var(--accent-soft);
   color: var(--accent);
   font-weight: var(--weight-semibold);
@@ -2189,12 +2223,28 @@ button:hover {
 .rename-form {
   margin: 20px 0;
 }
-.toast {
+.toast-region {
   position: absolute;
   bottom: calc(var(--footer-height) + 12px);
   left: 50%;
   transform: translateX(-50%);
+  width: max-content;
   max-width: calc(100% - 28px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 100;
+  pointer-events: none;
+}
+.toast-slot {
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+}
+.toast {
+  pointer-events: auto;
+  max-width: 100%;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -2204,7 +2254,6 @@ button:hover {
   border-radius: 7px;
   box-shadow: 0 7px 30px #18253620;
   font-size: var(--ui-body-size);
-  z-index: 100;
   animation: dialog-in 0.18s ease-out;
 }
 .toast > svg {
@@ -2243,6 +2292,10 @@ button:hover {
   --primary-hover: #d7eaf5;
   --primary-text: #243d50;
   --selection: #3e566d;
+  --menu-shadow: 0 12px 32px #0000008c, 0 2px 6px #00000059;
+  --warning-surface: #48361b;
+  --warning-text: #f2ce8f;
+  --warning-line: #d69a4a;
   --syntax-heading: #ef9c78;
   --syntax-teal: #6cc5b8;
   --syntax-code: #b4c96a;
@@ -2465,8 +2518,10 @@ button:hover {
   .top-actions .comments-toggle {
     padding: 0 7px;
   }
-  .toast {
+  .toast-region {
     bottom: 45px;
+  }
+  .toast {
     font-size: var(--ui-control-size);
   }
   .shared-sidebar {
@@ -2773,25 +2828,6 @@ button:hover {
   margin-top: 3px;
 }
 
-/* Keep folder sharing in the same quiet row, with a separate touch target. */
-.folder-row {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-.folder-row > .tree-item {
-  flex: 1;
-  min-width: 0;
-}
-.folder-row > .icon-button {
-  flex-shrink: 0;
-}
-.folder-row:focus-within,
-.folder-row:hover {
-  background: var(--hover);
-  border-radius: 5px;
-}
-
 .doc-label {
   display: flex;
   align-items: baseline;
@@ -2866,3 +2902,340 @@ button:hover {
 .removed-recovery-row > button {
   flex-shrink: 0;
 }
+
+/* File actions: VS Code's Explorer in Locdoc's quiet sidebar language. */
+.tree-item .tree-actions {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  overflow: visible;
+  padding-left: 2px;
+  background: var(--row-bg);
+  border-radius: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.tree-item .tree-actions::before {
+  content: "";
+  position: absolute;
+  right: 100%;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  background: linear-gradient(to right, transparent, var(--row-bg));
+  pointer-events: none;
+}
+.tree-item:hover .tree-actions,
+.tree-item:focus-visible .tree-actions,
+.tree-item.menu-open .tree-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.tree-action.icon-button {
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+}
+.tree-action.icon-button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.tree-item.active .tree-action.icon-button {
+  color: var(--accent);
+}
+/* With a fine pointer, row actions take the timestamp's place, as in mail. */
+@media (pointer: fine) and (min-width: 761px) {
+  .tree-item:hover > .doc-meta,
+  .tree-item:focus-visible > .doc-meta,
+  .tree-item.menu-open > .doc-meta {
+    visibility: hidden;
+  }
+}
+/* Touch has no hover: the row "more" button is always there, in flow. */
+@media (pointer: coarse), (max-width: 760px) {
+  .tree-item .tree-actions {
+    position: static;
+    transform: none;
+    margin-left: auto;
+    padding-left: 0;
+    background: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .tree-item .tree-actions::before {
+    display: none;
+  }
+  .doc-meta + .tree-actions {
+    margin-left: 2px;
+  }
+  .tree-action.icon-button {
+    width: 32px;
+    height: 32px;
+  }
+  .date-list .tree-item > .tree-actions {
+    align-self: center;
+    margin-block: -6px;
+  }
+}
+.tree-item.dragging {
+  opacity: 0.45;
+}
+.tree-item.drop-target {
+  --row-bg: var(--accent-soft);
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tree-item.in-drop-target {
+  --row-bg: color-mix(in srgb, var(--accent-soft) 55%, var(--sidebar));
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+.file-tree-body.drop-root {
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.tree-item[aria-busy="true"] {
+  cursor: progress;
+  animation: tree-busy 1.1s ease-in-out infinite alternate;
+}
+@keyframes tree-busy {
+  from {
+    opacity: 0.75;
+  }
+  to {
+    opacity: 0.4;
+  }
+}
+
+/* The inline name field takes the row's place and grows for its message. */
+.file-tree .tree-item.editing,
+.file-tree .tree-create {
+  height: auto;
+  min-height: 38px;
+  padding: 0;
+  cursor: default;
+  background: none;
+  user-select: auto;
+  -webkit-user-select: auto;
+}
+.tree-create {
+  list-style: none;
+}
+.tree-edit {
+  width: 100%;
+  padding-block: 4px;
+  padding-right: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tree-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tree-edit-row > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.tree-edit input {
+  flex: 1;
+  min-width: 0;
+  user-select: text;
+  -webkit-user-select: text;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--ui-body-size);
+  font-weight: var(--weight-regular);
+  caret-color: var(--accent);
+}
+.tree-edit input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+.tree-edit input[readonly] {
+  color: var(--muted);
+}
+.tree-edit[data-invalid] input {
+  border-color: var(--warning-line);
+}
+.tree-edit[data-invalid] input:focus {
+  outline-color: var(--warning-line);
+}
+.tree-edit-message {
+  margin: 0 0 2px 24px;
+  font-size: var(--ui-caption-size);
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.tree-edit-message.is-error {
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--warning-surface);
+  color: var(--warning-text);
+}
+.tree-edit-message.is-saving {
+  animation: tree-busy 1.1s ease-in-out infinite alternate;
+}
+@media (max-width: 760px), (pointer: coarse) {
+  .tree-edit input {
+    height: 36px;
+    font-size: 1rem;
+  }
+}
+
+/* A native-feeling context menu: flat items, muted icons and shortcuts. */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: var(--menu-shadow);
+  font-family: var(--ui-font);
+  font-size: var(--ui-control-size);
+  line-height: 1.3;
+  animation: menu-in 0.12s cubic-bezier(0.23, 1, 0.32, 1);
+  transform-origin: top left;
+}
+.context-menu:focus {
+  outline: none;
+}
+.context-menu-items {
+  max-height: min(420px, calc(100dvh - 96px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.context-menu [role="menuitem"] {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 5px;
+  color: var(--text);
+  font-size: var(--ui-control-size);
+  text-align: left;
+  white-space: nowrap;
+  transition: none;
+}
+.context-menu [role="menuitem"] > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.context-menu [role="menuitem"]:hover,
+.context-menu [role="menuitem"]:focus {
+  background: var(--hover);
+  outline: none;
+}
+.context-menu [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.context-menu [aria-disabled="true"] {
+  color: var(--muted);
+  cursor: default;
+}
+.context-menu [aria-disabled="true"] > svg {
+  opacity: 0.6;
+}
+.context-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.context-menu-detail {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+}
+.context-menu kbd {
+  margin-left: auto;
+  padding-left: 24px;
+  font-family: var(--ui-font);
+  font-size: var(--ui-caption-size);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.context-menu-detail + kbd {
+  margin-left: 0;
+}
+.context-menu [data-nested] > svg:last-child {
+  margin-left: auto;
+}
+.context-menu [role="separator"] {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+.context-menu-back .context-menu-label {
+  font-weight: var(--weight-medium);
+}
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (pointer: coarse) {
+  .context-menu [role="menuitem"] {
+    min-height: 44px;
+    font-size: var(--ui-body-size);
+  }
+  .context-menu kbd {
+    display: none;
+  }
+}
+
+/* Undo and other file results share the existing dark toast. */
+.toast-message {
+  min-width: 0;
+}
+.toast.is-error > svg {
+  color: #f2ce8f;
+}
+.toast-action {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 5px;
+  background: #ffffff1f;
+  color: #fff;
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.toast-action:hover {
+  background: #ffffff33;
+}
+.toast-action:focus-visible,
+.toast .icon-button:focus-visible {
+  outline: 2px solid #c3deef;
+  outline-offset: 2px;
+}
+

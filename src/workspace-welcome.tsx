@@ -65,7 +65,7 @@ export function EmptyWorkspace({
           ? "Documents added here will appear automatically."
           : sharedToken
             ? "Ask the owner for a current sharing link."
-            : "Create a document or open a Markdown or Fountain file from the sidebar. Your words stay on your computer."}
+            : "Create a document or open a Markdown, Fountain or text file from the sidebar. Your words stay on your computer."}
       </p>
       {config.owner && (
         <button className="button primary" onClick={onCreate}>

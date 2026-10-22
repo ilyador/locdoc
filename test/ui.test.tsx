@@ -18,6 +18,7 @@ import {
 
 let render, renderHook, act, fireEvent, screen, waitFor, cleanup;
 let WorkspaceView,
+  useFileActions,
   VersionHistory,
   CommentThread,
   CommentComposer,
@@ -144,6 +145,7 @@ before(async () => {
   ({ render, renderHook, act, fireEvent, screen, waitFor, cleanup } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
+  ({ useFileActions } = await import("../src/file-actions.ts"));
   ({ VersionHistory } = await import("../src/version-history.tsx"));
   ({ CommentThread, CommentComposer } = await import("../src/comments.tsx"));
   ({ RenameDocument } = await import("../src/rename-document.tsx"));
@@ -234,29 +236,46 @@ after(() => {
 function WorkspaceFixture() {
   const appearance = useAppearance();
   const [id, setId] = useState("a");
+  const entries = Object.values(docs).map((doc: any) => ({
+    path: doc.path,
+    id: doc.id,
+    kind: "file",
+    shared: true,
+  }));
+  const navigate = async (from, next, prepare) => {
+    await prepare();
+    setId((current) => (current === from ? next : current));
+    return true;
+  };
+  const files = useFileActions({
+    owner: true,
+    root: "/tmp/fixture",
+    entries,
+    patchEntries() {},
+    async loadTree() {},
+    currentId: () => id,
+    navigate,
+    setExpanded() {},
+    view: "date",
+    setView() {},
+    setQuery() {},
+    setSidebar() {},
+  });
   return (
     <WorkspaceView
       workspace={
         {
           appearance,
           id,
-          async navigate(from, next, prepare) {
-            await prepare();
-            setId((current) => (current === from ? next : current));
-            return true;
-          },
+          navigate,
+          files,
           config: {
             owner: true,
             guest: "test",
             root: "/tmp/fixture",
             publicUrl: "http://localhost",
           },
-          entries: Object.values(docs).map((doc: any) => ({
-            path: doc.path,
-            id: doc.id,
-            kind: "file",
-            shared: true,
-          })),
+          entries,
           initialDocument: null,
           error: "",
           name: "Reviewer",
@@ -349,7 +368,7 @@ test("the visible footer delays remote save progress but immediately shows compl
   );
 });
 async function chooseB() {
-  fireEvent.click(screen.getByRole("button", { name: "b .md", exact: true }));
+  fireEvent.click(screen.getByRole("treeitem", { name: "b .md", exact: true }));
   await waitFor(() => assert.equal(document.title, "b · locdoc"));
   await waitFor(() =>
     assert.ok(
@@ -914,36 +933,6 @@ test("a failed reply preserves the text for retry", async () => {
       "Keep this reply",
     ),
   );
-});
-test("the create form keeps its path until success and remembers the file type", async () => {
-  await openWorkspace();
-  failCreate = true;
-  fireEvent.click(screen.getAllByRole("button", { name: "New document" })[0]);
-  const path = screen.getByLabelText("Document path");
-  fireEvent.change(path, { target: { value: "Notes/Plan.md" } });
-  fireEvent.change(screen.getByLabelText("File type"), {
-    target: { value: "fountain" },
-  });
-  assert.equal(path.value, "Notes/Plan.fountain");
-  fireEvent.click(screen.getByRole("button", { name: "Create document" }));
-  await screen.findByText("Disk full");
-  assert.equal(
-    screen.getByLabelText("Document path").value,
-    "Notes/Plan.fountain",
-  );
-  failCreate = false;
-  fireEvent.click(screen.getByRole("button", { name: "Create document" }));
-  await waitFor(() => assert.ok(!screen.queryByLabelText("Document path")));
-  assert.deepEqual(
-    requests.filter((r) => r.path === "/api/files").map((r) => r.body.path),
-    ["Notes/Plan.fountain", "Notes/Plan.fountain"],
-  );
-  fireEvent.click(screen.getAllByRole("button", { name: "New folder" })[0]);
-  assert.equal(screen.getByLabelText("Folder path").value, "");
-  fireEvent.click(screen.getByLabelText("Close dialog"));
-  fireEvent.click(screen.getAllByRole("button", { name: "New document" })[0]);
-  assert.equal(screen.getByLabelText("Document path").value, "");
-  assert.equal(screen.getByLabelText("File type").value, "fountain");
 });
 test("an upload rejects oversized media and updates only the document that started it", async () => {
   const { uploadAttachment } = await import("../src/document-upload.ts");
