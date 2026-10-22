@@ -621,6 +621,14 @@ test("the workspace offers plain text no formatting, media or link tools", async
     assert.equal(dialog.querySelectorAll(".formatting-menu").length, 0);
     assert.equal(dialog.querySelectorAll(".attachment-info").length, 0);
     assert.ok(dialog.textContent!.includes("Download plain text"));
+    assert.ok(
+      dialog.textContent!.includes("Change the folder path to move."),
+      "plain text can still be renamed or moved here",
+    );
+    assert.ok(
+      !dialog.textContent!.includes("attachment links"),
+      "plain text has no attachment links that a move could break",
+    );
     fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
     const loads = requests.filter(
       (request) => request.path === "/api/docs/plain",

@@ -1000,6 +1000,11 @@ test("rename owns a fresh input independent of the create form", () => {
   const input = screen.getByLabelText("Rename or move document");
   fireEvent.change(input, { target: { value: "" } });
   assert.equal(input.value, "");
+  assert.match(
+    document.querySelector(".rename-form .field-help")!.textContent!,
+    /Relative attachment links may need updating\./,
+    "a Markdown move warns about its relative attachment links",
+  );
 });
 
 test("opening the root restores the selected document URL without adding a history entry", async () => {

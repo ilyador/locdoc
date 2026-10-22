@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, send } from "./api";
+import { documentFormat } from "./document-format";
 
 export function RenameDocument({
   path: initialPath,
@@ -48,7 +49,10 @@ export function RenameDocument({
         </button>
       </div>
       <p className="field-help">
-        Change the folder path to move. Relative attachment links may need updating.
+        Change the folder path to move.
+        {/* Only Markdown embeds attachments by relative path. */}
+        {documentFormat(initialPath) === "markdown" &&
+          " Relative attachment links may need updating."}
       </p>
       {error && <p role="alert">{error}</p>}
     </form>
