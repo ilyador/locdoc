@@ -232,7 +232,7 @@ impl Preview {
         // Include the layout revision and structure: a list and a paragraph can
         // have identical metadata while requiring different preview images.
         hash(&format!(
-            "card-4\0{}\0{}\0{}\0{:?}",
+            "card-5\0{}\0{}\0{}\0{:?}",
             self.title, self.description, self.filename, self.blocks
         ))
     }
@@ -341,9 +341,21 @@ pub(super) fn escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+// Hebrew points and cantillation sit on their letter and take no width, also
+// where the face lacks them and usvg draws the line in a face that has them.
+fn hebrew_point(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0591..=0x05BD | 0x05BF | 0x05C1 | 0x05C2 | 0x05C4 | 0x05C5 | 0x05C7
+    )
+}
+
 fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize) -> Vec<String> {
     let face = ttf_parser::Face::parse(font, 0).unwrap();
     let advance = |c| {
+        if hebrew_point(c) {
+            return 0.;
+        }
         face.glyph_index(c)
             .and_then(|g| face.glyph_hor_advance(g))
             .map_or(size, |v| v as f32 * size / face.units_per_em() as f32)
@@ -528,6 +540,7 @@ pub(super) async fn image(value: Preview) -> Result<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     #[test]
     fn fountain_cards_use_the_title_and_exclude_contact_notes_and_boneyards() {
         let value = Preview::new(
@@ -657,6 +670,93 @@ mod tests {
         assert_eq!(paragraph.description, list.description);
         assert_ne!(paragraph.fingerprint(), list.fingerprint());
         assert_ne!(render(&paragraph).unwrap(), render(&list).unwrap());
+    }
+
+    // A text element as usvg lays it out: the characters its glyphs draw from
+    // left to right, with □ for a missing glyph, and the faces they come from.
+    struct Drawn {
+        text: String,
+        faces: BTreeSet<String>,
+    }
+
+    fn face(name: &str) -> BTreeSet<String> {
+        BTreeSet::from([name.to_string()])
+    }
+
+    fn drawn(value: &Preview) -> Vec<Drawn> {
+        let options = usvg::Options {
+            fontdb: FONTS.clone(),
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_str(&svg(value), &options).unwrap();
+        let mut elements = Vec::new();
+        for node in tree.root().children() {
+            let usvg::Node::Text(element) = node else {
+                continue;
+            };
+            let mut glyphs = element
+                .layouted()
+                .iter()
+                .flat_map(|span| &span.positioned_glyphs)
+                .collect::<Vec<_>>();
+            glyphs.sort_by(|a, b| a.transform().tx.total_cmp(&b.transform().tx));
+            elements.push(Drawn {
+                text: glyphs
+                    .iter()
+                    .map(|glyph| match glyph.id.0 {
+                        0 => "□".into(),
+                        _ => glyph.text.clone(),
+                    })
+                    .collect(),
+                faces: glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let face = tree.fontdb().face(glyph.font).unwrap();
+                        format!("{} {}", face.families[0].0, face.weight.0)
+                    })
+                    .collect(),
+            });
+        }
+        elements
+    }
+
+    #[test]
+    fn hebrew_titles_and_names_draw_real_letters_in_their_paired_faces() {
+        let letters = ('\u{05D0}'..='\u{05EA}').collect::<String>();
+        let value = Preview::new(
+            &format!("# שלום עולם\n\n{letters} ו־₪100 English\n\n## כותרת משנה"),
+            "תכנון 2024.md",
+        );
+        let elements = drawn(&value);
+        assert!(elements.iter().all(|element| !element.text.contains('□')));
+        let [_, name, title, paragraph, heading] = &elements[..] else {
+            panic!("{} text elements", elements.len());
+        };
+        // The title, the excerpt and the name draw Hebrew in the face the app
+        // pairs with their family: Cascadia Mono, then IBM Plex Sans Hebrew.
+        assert_eq!(title.faces, face("Locdoc Social Mono 600"));
+        assert!(letters.chars().all(|c| paragraph.text.contains(c)));
+        assert!(paragraph.text.contains('₪') && paragraph.text.contains("English"));
+        assert_eq!(paragraph.faces, face("Locdoc Social Mono 400"));
+        assert_eq!(heading.faces, face("Locdoc Social Mono 600"));
+        assert!(name.text.contains('ת') && name.text.contains(".md"));
+        assert_eq!(name.faces, face("Locdoc Social Sans 400"));
+        // Points Cascadia Mono lacks leave the line to IBM Plex Sans Hebrew.
+        let pointed = drawn(&Preview::new("# בְּרֵאשִׁית בָּרָא", "note.md"));
+        assert!(!pointed[2].text.contains('□'), "{}", pointed[2].text);
+    }
+
+    #[test]
+    fn pointed_hebrew_wraps_where_the_same_letters_do() {
+        let plain = "שלום וברכה לכל החברים ".repeat(6);
+        let pointed = "שָׁלוֹם וּבְרָכָה לְכָל הַחֲבֵרִים ".repeat(6);
+        let letters = |line: &String| line.chars().filter(|&c| !hebrew_point(c)).collect();
+        let lines = wrap(&pointed, SEMIBOLD, 82., 1056., 9);
+        assert!(lines.len() > 1);
+        assert_eq!(
+            lines.iter().map(letters).collect::<Vec<String>>(),
+            wrap(&plain, SEMIBOLD, 82., 1056., 9)
+        );
     }
 
     #[tokio::test]
