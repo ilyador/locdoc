@@ -1102,6 +1102,59 @@ test("the latest navigation wins while drafts finish storing", async () => {
   assert.equal(result.current.id, "c");
 });
 
+test("a tree listing older than a local change or a newer listing cannot replace it", async () => {
+  const fetchBefore = globalThis.fetch;
+  const listings: ((response: Response) => void)[] = [];
+  globalThis.fetch = async (input) =>
+    String(input) === "/api/config"
+      ? response({ owner: true, root: "/tmp/fixture", guest: "test" })
+      : String(input) === "/api/tree"
+        ? new Promise<Response>((resolve) => listings.push(resolve))
+        : response({});
+  const tree = (path: string) =>
+    response({ entries: [{ id: "a", path, kind: "file", shared: false }] });
+  const hook = renderHook(() => useWorkspace());
+  try {
+    await waitFor(() => assert.equal(listings.length, 1));
+    await act(async () => listings.shift()!(tree("a.md")));
+    await waitFor(() => assert.equal(hook.result.current.entries[0]?.path, "a.md"));
+    // A listing starts, then a file action changes the tree before it answers.
+    let stale;
+    act(() => {
+      stale = hook.result.current.loadTree();
+    });
+    act(() =>
+      hook.result.current.patchEntries((entries) =>
+        entries.map((entry) => ({ ...entry, path: "renamed.md" })),
+      ),
+    );
+    await act(async () => {
+      listings.shift()!(tree("a.md"));
+      await stale;
+    });
+    assert.equal(hook.result.current.entries[0].path, "renamed.md");
+    // An older listing that answers last cannot replace a newer one.
+    let older, newer;
+    act(() => {
+      older = hook.result.current.loadTree();
+      newer = hook.result.current.loadTree();
+    });
+    const [first, second] = listings.splice(0);
+    await act(async () => {
+      second(tree("newer.md"));
+      await newer;
+    });
+    await act(async () => {
+      first(tree("older.md"));
+      await older;
+    });
+    assert.equal(hook.result.current.entries[0].path, "newer.md");
+  } finally {
+    hook.unmount();
+    globalThis.fetch = fetchBefore;
+  }
+});
+
 test("an old document's completed action cannot redirect later navigation", async () => {
   localStorage.setItem("locdoc.document", "a");
   const { result } = renderHook(() => useWorkspace());

@@ -132,21 +132,40 @@ export function useWorkspace() {
     },
     [],
   );
+  // A listing that started before a file action finished, or before a newer
+  // listing was applied, may hold the old tree. It must not undo that change.
+  const treeRequest = useRef(0);
+  const treeApplied = useRef(0);
+  const treeChanged = useRef(0);
   const loadTree = useCallback(async () => {
+    const request = ++treeRequest.current;
+    const changed = treeChanged.current;
     try {
       const { entries } = await api<{ entries: Entry[] }>(
         sharedToken && folderView.current
           ? `/api/tree?token=${encodeURIComponent(sharedToken)}`
           : "/api/tree",
       );
+      if (request < treeApplied.current || changed !== treeChanged.current)
+        return;
+      treeApplied.current = request;
       setEntries(entries);
       setError("");
       if (!current.current)
         setId(entries.find((e) => e.kind === "file")?.id || null);
     } catch (error) {
+      if (request < treeApplied.current || changed !== treeChanged.current)
+        return;
       setError((error as Error).message);
     }
   }, []);
+  const patchEntries = useCallback(
+    (update: (entries: Entry[]) => Entry[]) => {
+      treeChanged.current++;
+      setEntries(update);
+    },
+    [],
+  );
   useEffect(() => {
     const unavailable = (error: Error) => {
       setError(error.message);
@@ -256,6 +275,7 @@ export function useWorkspace() {
     sidebarView,
     setSidebarView,
     loadTree,
+    patchEntries,
   };
 }
 export type Workspace = ReturnType<typeof useWorkspace>;
