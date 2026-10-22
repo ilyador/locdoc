@@ -54,9 +54,16 @@ export function ContextMenu({
   onClose: (reason: CloseReason) => void;
 }) {
   const menu = useRef<HTMLDivElement>(null);
-  const [stack, setStack] = useState<{ title: string; items: MenuEntry[] }[]>(
-    [],
-  );
+  // Each nested list remembers the label of the item that opened it.
+  const [stack, setStack] = useState<
+    { title: string; label: string; items: MenuEntry[] }[]
+  >([]);
+  // Leaving a nested list returns focus to the item that opened it.
+  const opener = useRef<string | null>(null);
+  const leave = () => {
+    opener.current = stack.at(-1)?.label ?? null;
+    setStack((value) => value.slice(0, -1));
+  };
   const level = stack.at(-1);
   const visible = level ? level.items : items;
   const [position, setPosition] = useState({ left: at.x, top: at.y });
@@ -82,8 +89,17 @@ export function ContextMenu({
     setPosition({ left: Math.max(margin, left), top: Math.max(margin, top) });
   }, [at.x, at.y, at.align, stack.length]);
   useLayoutEffect(() => {
+    const label = opener.current;
+    opener.current = null;
+    const back = label
+      ? buttons().find(
+          (button) =>
+            button.querySelector(".context-menu-label")?.textContent === label,
+        )
+      : undefined;
+    if (back) back.focus({ preventScroll: true });
     // Lists start on their first enabled entry; a nested one skips Back.
-    if (focusFirst || stack.length)
+    else if (focusFirst || stack.length)
       buttons()
         .slice(stack.length ? 1 : 0)
         .find((item) => !item.hasAttribute("aria-disabled"))
@@ -116,7 +132,11 @@ export function ContextMenu({
     if (item.items) {
       setStack((value) => [
         ...value,
-        { title: item.title || item.label, items: item.items!() },
+        {
+          title: item.title || item.label,
+          label: item.label,
+          items: item.items!(),
+        },
       ]);
       return;
     }
@@ -139,7 +159,7 @@ export function ContextMenu({
     else if (event.key === "End") move(-1);
     else if (event.key === "Escape" || (event.key === "ArrowLeft" && level)) {
       event.preventDefault();
-      if (level) setStack((value) => value.slice(0, -1));
+      if (level) leave();
       else if (event.key === "Escape") closing.current("escape");
     } else if (event.key === "Tab") {
       event.preventDefault();
@@ -197,7 +217,7 @@ export function ContextMenu({
             role="menuitem"
             className="context-menu-back"
             tabIndex={-1}
-            onClick={() => setStack((value) => value.slice(0, -1))}
+            onClick={leave}
             onPointerMove={(event) =>
               event.currentTarget.focus({ preventScroll: true })
             }

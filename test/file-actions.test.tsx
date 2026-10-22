@@ -697,7 +697,21 @@ test("Move to lists folders, skips the folder itself and moves by keyboard", asy
   );
   key(document.activeElement!, "ArrowLeft");
   const actions = screen.getByRole("menu", { name: "Actions for Sub" });
-  within(actions).getByRole("menuitem", { name: /Move to/ }).focus();
+  assert.ok(
+    document.activeElement ===
+      within(actions).getByRole("menuitem", { name: /Move to/ }),
+    "Leaving a nested list returns to the item that opened it",
+  );
+  key(document.activeElement!, "ArrowRight");
+  key(document.activeElement!, "Escape");
+  assert.ok(
+    document.activeElement ===
+      within(screen.getByRole("menu", { name: "Actions for Sub" })).getByRole(
+        "menuitem",
+        { name: /Move to/ },
+      ),
+    "Escape also leaves a nested list for the item that opened it",
+  );
   key(document.activeElement!, "ArrowRight");
   assert.ok(screen.getByRole("menu", { name: "Move Sub to" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Archive" }));
