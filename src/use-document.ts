@@ -12,8 +12,19 @@ import { api, ApiError, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
 import { documentSession, type DocumentSession } from "./document-session";
 import { normalizePresence } from "./presence";
-import { sharedToken, type Document as Doc } from "./model";
+import { trashItem } from "./file-actions";
+import { sharedToken, type Document as Doc, type TrashItem } from "./model";
 type Projection = "synced" | "pending" | "blocked" | "conflict";
+
+// A trashed document answers 410 with its trash item.
+const trashedItem = (error: ApiError, id: string, path = ""): TrashItem =>
+  trashItem((error.body as { trash?: unknown } | undefined)?.trash) || {
+    id: "",
+    kind: "document",
+    path: path || id,
+    deleted: 0,
+    documents: 1,
+  };
 
 export function useDocument(
   id: string | null,
@@ -27,8 +38,10 @@ export function useDocument(
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<DraftRecovery[]>([]);
   const [storageWarning, setStorageWarning] = useState("");
+  const [trashed, setTrashed] = useState<TrashItem | null>(null);
   const [reload, setReload] = useState(0);
   const recoveryJournal = useRef<DraftJournal | null>(null);
+  const verify = useRef<(() => void) | null>(null);
   const accessQuery = sharedToken
     ? `?token=${encodeURIComponent(sharedToken)}`
     : "";
@@ -40,7 +53,9 @@ export function useDocument(
     setDoc(null);
     setSession(null);
     setError("");
+    setTrashed(null);
     setStatus("Connecting");
+    verify.current = null;
     if (!sharedToken) {
       try {
         localStorage.setItem("locdoc.document", id);
@@ -92,6 +107,7 @@ export function useDocument(
               : "synced";
         let receiptId = "";
         let resetting = false;
+        let inTrash = false;
         let transientWarning = "";
         let retryTimer: ReturnType<typeof setTimeout> | undefined;
         let retryDelay = 500;
@@ -117,8 +133,9 @@ export function useDocument(
               notifiedWarning = warning;
               setStorageWarning(warning);
             }
-            const status =
-              projection === "conflict"
+            const status = inTrash
+              ? "In Recently deleted"
+              : projection === "conflict"
                 ? "Recovery needed"
                 : drafts.pending
                   ? provider.wsconnected
@@ -175,6 +192,23 @@ export function useDocument(
           return true;
         });
         setDoc(projection === "conflict" ? { ...d, edit: false } : d);
+        // The text stays readable; local drafts stay journaled for a restore.
+        const moveToTrash = (error: ApiError) => {
+          if (!active || resetting || inTrash) return;
+          inTrash = true;
+          clearTimeout(retryTimer);
+          provider.disconnect();
+          drafts.disconnected();
+          setDoc((value) => (value ? { ...value, edit: false } : value));
+          setTrashed(trashedItem(error, d.id, d.path));
+          updateStatus();
+        };
+        verify.current = () => {
+          if (!active || inTrash) return;
+          api<Doc>(`/api/docs/${id}${accessQuery}`).catch((e) => {
+            if (e instanceof ApiError && e.status === 410) moveToTrash(e);
+          });
+        };
         const rejectDraft = (message: string) => {
           if (!active || resetting || projection === "conflict") return;
           resetting = true;
@@ -264,7 +298,7 @@ export function useDocument(
           }
         });
         provider.on("connection-close", () => {
-          if (resetting) return;
+          if (resetting || inTrash) return;
           if (projection === "blocked") projection = "pending";
           drafts.disconnected();
           if (active && !transientWarning)
@@ -281,13 +315,9 @@ export function useDocument(
                 }
               })
               .catch((e) => {
-                if (
-                  active &&
-                  e instanceof ApiError &&
-                  [403, 404].includes(e.status)
-                ) {
-                  rejectDraft(e.message);
-                }
+                if (!active || !(e instanceof ApiError)) return;
+                if (e.status === 410) moveToTrash(e);
+                else if ([403, 404].includes(e.status)) rejectDraft(e.message);
               });
         });
         let notifiedPeople: { name: string; color: string }[] = [];
@@ -316,7 +346,10 @@ export function useDocument(
         provider.connect();
       })
       .catch((e) => {
-        if (active) {
+        if (active && e instanceof ApiError && e.status === 410) {
+          setTrashed(trashedItem(e, id));
+          setStatus("In Recently deleted");
+        } else if (active) {
           setError(e.message);
           setStatus("Unable to open document");
           // Keep the selected document and error stable. Automatically choosing
@@ -347,7 +380,10 @@ export function useDocument(
     recovery,
     clearRecovery,
     storageWarning,
-    // Open the document again, as after a change of format.
+    trashed,
+    // Open the document again, as after a restore or a change of format.
     reload: () => setReload((value) => value + 1),
+    // Ask whether the open document went to the trash.
+    checkTrashed: () => verify.current?.(),
   };
 }

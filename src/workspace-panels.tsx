@@ -15,7 +15,9 @@ import { McpConnections } from "./mcp-authorization";
 import { RenameDocument } from "./rename-document";
 import { documentFormat } from "./document-format";
 import type { DocumentSession } from "./document-session";
+import type { FileActions } from "./file-actions";
 import type { Config, Document } from "./model";
+import { RecentlyDeleted } from "./trash";
 
 export function panelTitle(panel: string | null) {
   return {
@@ -143,6 +145,7 @@ export function WorkspaceSettings({
   endpoint,
   name,
   setName,
+  files,
   toggleAppearance,
   lock,
 }: {
@@ -153,6 +156,7 @@ export function WorkspaceSettings({
   endpoint: (suffix?: string) => string;
   name: string;
   setName: (name: string) => void;
+  files: FileActions;
   toggleAppearance: () => void;
   lock: () => void;
 }) {
@@ -192,6 +196,7 @@ export function WorkspaceSettings({
           reconnect={() => session?.provider.connect()}
         />
       )}
+      {config?.owner && <RecentlyDeleted files={files} />}
       {config?.owner && <RemovedDocumentRecovery />}
       {config?.owner && <McpConnections publicUrl={config.publicUrl} />}
       {config?.owner && (

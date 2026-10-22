@@ -3239,3 +3239,86 @@ button:hover {
   outline-offset: 2px;
 }
 
+/* Trash: a quiet notice over readable text, and the Recently deleted list. */
+.trash-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px 8px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--subtle);
+  color: var(--secondary);
+  font-size: var(--ui-meta-size);
+  line-height: 1.4;
+}
+.trash-notice > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.trash-notice > span {
+  flex: 1;
+  min-width: 0;
+}
+.trash-notice .button,
+.trash-row .button {
+  flex-shrink: 0;
+  gap: 6px;
+}
+.trashed-document .button {
+  gap: 8px;
+}
+.trash-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+.trash-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+.trash-row:first-child {
+  border-top: 0;
+}
+.trash-row > svg {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
+  color: var(--muted);
+}
+.trash-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.trash-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.trash-name small {
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  overflow-wrap: anywhere;
+}
+.trash-error {
+  margin-top: 4px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: var(--warning-surface);
+  color: var(--warning-text);
+  font-size: var(--ui-caption-size);
+}
+@media (max-width: 760px) {
+  .trash-notice {
+    padding: 8px 13px;
+    font-size: var(--ui-caption-size);
+  }
+}

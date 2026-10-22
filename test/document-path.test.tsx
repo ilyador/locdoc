@@ -158,3 +158,56 @@ test("Fountain and text documents open with their names, without extensions, as 
   assert.equal(document.title, "Script · locdoc");
   assert.deepEqual(crumbs(), { folder: null, title: "Script", extension: ".fountain" });
 });
+
+test("a trashed document opens to Recently deleted, and Restore brings it back", async () => {
+  api = fileApi(files);
+  await api.fetch("/api/docs/notes-plan-md", { method: "DELETE" });
+  globalThis.fetch = api.fetch as typeof fetch;
+  localStorage.setItem("locdoc.sidebarView", "folders");
+  localStorage.setItem("locdoc.document", "notes-plan-md");
+  render(<App />);
+  await waitFor(() =>
+    assert.ok(
+      screen.getByRole("heading", { name: "This document is in Recently deleted." }),
+    ),
+  );
+  assert.ok(screen.queryByRole("alert") === null, "A trashed document is not an error");
+  assert.equal(document.title, "Plan · locdoc");
+  assert.deepEqual(crumbs(), { folder: "Notes", title: "Plan", extension: ".md" });
+  fireEvent.click(screen.getByRole("button", { name: "Restore document" }));
+  await waitFor(() => assert.ok(editor()));
+  assert.ok(
+    api.calls.some((call) => call.path === "/api/trash/trash-1/restore"),
+    "Restore uses the trash item from the 410 response",
+  );
+  assert.equal(editor()!.getAttribute("contenteditable"), "true");
+});
+
+test("deleting the open document keeps its text readable until Undo reopens it", async () => {
+  await open(files, "notes-plan-md");
+  await waitFor(() => assert.ok(editor()));
+  fireEvent.click(row("Notes"));
+  row("Notes/Plan.md").focus();
+  fireEvent.keyDown(row("Notes/Plan.md"), { key: "Delete" });
+  await waitFor(() =>
+    assert.match(
+      document.querySelector(".trash-notice")?.textContent || "",
+      /This document is in Recently deleted\./,
+    ),
+  );
+  assert.equal(editor()!.getAttribute("contenteditable"), "false");
+  assert.match(editor()!.textContent!, /Plan text/);
+  assert.match(
+    document.querySelector(".toast-slot")!.textContent!,
+    /Plan\.md moved to Recently deleted\./,
+  );
+  assert.ok(row("Notes/Plan.md") === null, "The tree no longer lists it");
+  fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+  await waitFor(() =>
+    assert.ok(document.querySelector(".trash-notice") === null, "Restored"),
+  );
+  await waitFor(() =>
+    assert.equal(editor()?.getAttribute("contenteditable"), "true"),
+  );
+  assert.ok(row("Notes/Plan.md"));
+});

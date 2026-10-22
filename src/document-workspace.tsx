@@ -40,7 +40,8 @@ import {
   downloadDocument,
   panelTitle,
 } from "./workspace-panels";
-import { baseName, entryFormat } from "./file-names";
+import { baseName, entryFormat, within } from "./file-names";
+import { TrashedDocument, TrashedNotice } from "./trash";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import {
   EmptyWorkspace,
@@ -75,7 +76,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     clearRecovery,
     storageWarning,
     setError,
+    trashed,
     reload,
+    checkTrashed,
   } = useDocument(
     id,
     !!config && (config.owner || !!sharedToken),
@@ -92,7 +95,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       ? entry.path
       : baseName(entry.path)
     : null;
-  const path = listed ?? doc?.path ?? null;
+  const path = listed ?? doc?.path ?? trashed?.path ?? null;
   useEffect(() => {
     if (path) document.title = `${documentName(path)} · locdoc`;
   }, [path]);
@@ -115,6 +118,24 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
       ),
     );
   }, [entry?.path, doc?.path]);
+  // Restoring brings the document back into the tree; open it again then.
+  const trashedTree = useRef<typeof entries | null>(null);
+  useEffect(() => {
+    if (!trashed) {
+      trashedTree.current = null;
+      return;
+    }
+    if (!trashedTree.current) trashedTree.current = entries;
+    else if (entries !== trashedTree.current && entry) reload();
+  }, [trashed, entries, entry]);
+  // Deleting the open document, or a folder holding it, from this sidebar.
+  const trashEvent = files.trashed;
+  const handledTrash = useRef(trashEvent?.seq ?? 0);
+  useEffect(() => {
+    if (!trashEvent || trashEvent.seq === handledTrash.current) return;
+    handledTrash.current = trashEvent.seq;
+    if (doc && within(doc.path, trashEvent.item.path)) checkTrashed();
+  }, [trashEvent?.seq]);
   const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
   const {
     font,
@@ -327,6 +348,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               {storageWarning}
             </div>
           )}
+          {trashed && doc && <TrashedNotice files={files} item={trashed} />}
           <DraftRecoveryNotice
             records={recovery}
             dismiss={clearRecovery}
@@ -368,10 +390,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 }}
               />
             )}
-            {!config ||
-            (!doc &&
-              !error &&
-              Boolean((sharedToken && !config.folder) || id)) ? (
+            {trashed && !doc ? (
+              <TrashedDocument files={files} item={trashed} />
+            ) : !config ||
+              (!doc &&
+                !error &&
+                Boolean((sharedToken && !config.folder) || id)) ? (
               <OpeningDocument />
             ) : !config.owner && !sharedToken ? (
               <OwnerWelcome onOpen={() => setPanel("login")} />
@@ -522,6 +546,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   endpoint={endpoint}
                   name={name}
                   setName={setName}
+                  files={files}
                   toggleAppearance={toggleAppearance}
                   lock={() =>
                     action(async () => {

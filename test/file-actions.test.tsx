@@ -5,7 +5,7 @@ import React from "react";
 import { fileApi } from "./fixtures/file-api.ts";
 
 let render, fireEvent, screen, waitFor, cleanup, act, within;
-let useWorkspace, DocumentSidebar, FileActionToast;
+let useWorkspace, DocumentSidebar, FileActionToast, RecentlyDeleted;
 let api: ReturnType<typeof fileApi>;
 let workspace;
 const copied: string[] = [];
@@ -54,6 +54,7 @@ before(async () => {
   ({ useWorkspace } = await import("../src/workspace.ts"));
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ FileActionToast } = await import("../src/workspace-feedback.tsx"));
+  ({ RecentlyDeleted } = await import("../src/trash.tsx"));
 });
 afterEach(() => {
   cleanup();
@@ -97,6 +98,7 @@ function Sidebar() {
       />
       <FileActionToast files={workspace.files} />
       <p data-testid="announcement">{workspace.files.announcement.text}</p>
+      {workspace.config?.owner && <RecentlyDeleted files={workspace.files} />}
     </>
   );
 }
@@ -660,4 +662,32 @@ test("By date offers only document actions: rename, duplicate, copy paths and de
   act(() => workspace.files.startCreate("folder"));
   assert.equal(workspace.sidebarView, "folders");
   assert.ok(screen.getByRole("textbox", { name: "New folder name" }));
+});
+
+test("Recently deleted lists the trash newest first, restores, and keeps a conflict visible", async () => {
+  await open(workspaceFiles);
+  row("a.md").focus();
+  key(row("a.md"), "Delete");
+  await waitFor(() => assert.ok(row("a.md") === null, "The row is gone"));
+  key(row("b.txt"), "Delete");
+  await waitFor(() => assert.ok(row("b.txt") === null, "The row is gone"));
+  await act(async () => {
+    await api.fetch("/api/files", {
+      method: "POST",
+      body: JSON.stringify({ path: "a.md", kind: "file" }),
+    });
+  });
+  fireEvent.click(screen.getByText("Recently deleted"));
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "Restore b.txt" })));
+  const names = Array.from(document.querySelectorAll(".trash-name strong"), (n) => n.textContent);
+  assert.deepEqual(names, ["b.txt", "a.md"]);
+  fireEvent.click(screen.getByRole("button", { name: "Restore a.md" }));
+  await waitFor(() =>
+    assert.match(screen.getByRole("alert").textContent!, /a\.md is taken/),
+  );
+  assert.ok(screen.getByRole("button", { name: "Restore a.md" }), "The conflict keeps its row");
+  fireEvent.click(screen.getByRole("button", { name: "Restore b.txt" }));
+  await waitFor(() => assert.ok(screen.queryByRole("button", { name: "Restore b.txt" }) === null, "No such element"));
+  await waitFor(() => assert.ok(row("b.txt")));
+  assert.match(document.querySelector(".recently-deleted [role=status]")!.textContent!, /Restored to b\.txt/);
 });

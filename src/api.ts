@@ -1,8 +1,11 @@
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  // The parsed error response, for callers that need more than its message.
+  readonly body: unknown;
+  constructor(message: string, status: number, body?: unknown) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 const SESSION_KEY = "locdoc.ownerSession";
@@ -52,12 +55,16 @@ export async function api<T = unknown>(
     .json()
     .catch(() => ({ error: "The server returned an unexpected response." }));
   // OAuth endpoints answer {error: code, error_description: message}.
+  // A trashed document answers 410 with the code "trashed" and its trash item.
   if (!response.ok)
     throw new ApiError(
-      body.error_description ||
-        body.error ||
-        `Request failed (${response.status}).`,
+      response.status === 410 && body.error === "trashed"
+        ? "This document is in Recently deleted."
+        : body.error_description ||
+            body.error ||
+            `Request failed (${response.status}).`,
       response.status,
+      body,
     );
   if ((path === "/api/login" || path === "/api/redeem") && body.session)
     rememberSession(body.session);
