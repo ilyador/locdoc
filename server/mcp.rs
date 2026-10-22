@@ -472,6 +472,21 @@ fn status(room: &Room) -> Value {
         "waiting_for_desktop":room.engine.waiting(),"recovery_needed":room.conflicted()})
 }
 
+/// Run `f` with a document's room locked.
+fn in_room<T>(s: &Store, d: &Document, f: impl FnOnce(&mut Room) -> Result<T>) -> Result<T> {
+    let room = s.room(d)?;
+    let mut r = room.lock().unwrap();
+    f(&mut r)
+}
+
+/// `in_room` once the room has synced with its file, for tools that read it.
+fn synced<T>(s: &Store, d: &Document, f: impl FnOnce(&mut Room) -> Result<T>) -> Result<T> {
+    in_room(s, d, |r| {
+        r.reconcile(s, d)?;
+        f(r)
+    })
+}
+
 fn edit_source(s: &Store, d: &Document, r: &mut Room, b: Editing) -> Result<Value> {
     check_revision(&b.expected_revision)?;
     let source = text::canonical(&b.source);
@@ -480,7 +495,6 @@ fn edit_source(s: &Store, d: &Document, r: &mut Room, b: Editing) -> Result<Valu
     }
     r.reconcile(s, d)?;
     let before = room_text(r);
-    let revision = hash(&source);
     // A lost response can be retried without a second mutation. In particular,
     // never rebase a replacement over source changed by another collaborator.
     if hash(&before) != b.expected_revision && before != source {
@@ -489,21 +503,7 @@ fn edit_source(s: &Store, d: &Document, r: &mut Room, b: Editing) -> Result<Valu
             "Document changed. Read it again before editing.".into(),
         ));
     }
-    if before != source {
-        let before_usage = s.usage(d, &before);
-        let after_usage = s.usage(d, &source);
-        if after_usage > DOC_LIMIT && after_usage > before_usage {
-            return Err(bad("Document exceeds its 50 MB attachment limit."));
-        }
-        r.edit(s, d, |room| {
-            apply_text(room.awareness.doc(), &before, &source);
-            Vec::new()
-        })?;
-    }
-    let mut result = status(r);
-    result["id"] = json!(d.id);
-    result["revision"] = json!(revision);
-    Ok(result)
+    apply_source(s, d, r, &before, &source)
 }
 
 fn replace_source(s: &Store, d: &Document, r: &mut Room, b: Replacing) -> Result<Value> {
@@ -540,18 +540,36 @@ fn replace_source(s: &Store, d: &Document, r: &mut Room, b: Replacing) -> Result
     if before.len() - old.len() + new.len() > 5 * MB {
         return Err(bad("Document exceeds 5 MB."));
     }
-    let mut source = before;
+    // Room text has no carriage returns, so the result stays canonical.
+    let mut source = before.clone();
     source.replace_range(at..at + old.len(), &new);
-    edit_source(
-        s,
-        d,
-        r,
-        Editing {
-            doc_id: b.doc_id,
-            expected_revision: b.expected_revision,
-            source,
-        },
-    )
+    apply_source(s, d, r, &before, &source)
+}
+
+/// Accept `source` over the synced room text `before`, within the
+/// document's attachment limit.
+fn apply_source(
+    s: &Store,
+    d: &Document,
+    r: &mut Room,
+    before: &str,
+    source: &str,
+) -> Result<Value> {
+    if before != source {
+        let before_usage = s.usage(d, before);
+        let after_usage = s.usage(d, source);
+        if after_usage > DOC_LIMIT && after_usage > before_usage {
+            return Err(bad("Document exceeds its 50 MB attachment limit."));
+        }
+        r.edit(s, d, |room| {
+            apply_text(room.awareness.doc(), before, source);
+            Vec::new()
+        })?;
+    }
+    let mut result = status(r);
+    result["id"] = json!(d.id);
+    result["revision"] = json!(hash(source));
+    Ok(result)
 }
 
 // One admission gate for every document tool. Scope and owner opt-in are
@@ -677,10 +695,7 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
                 let authority = grant.clone();
                 let found =
                     document_job(s.clone(), authority, id.clone(), required, move |s, d| {
-                        let room = s.room(d)?;
-                        let mut r = room.lock().unwrap();
-                        r.reconcile(s, d)?;
-                        let source = room_text(&r);
+                        let source = synced(s, d, |r| Ok(room_text(r)))?;
                         let folded = source.to_lowercase();
                         Ok(folded.find(&needle).map(|at| {
                             // Unicode lowercase can expand one source character.
@@ -732,14 +747,13 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
         "read_document" => {
             let b: Reading = arguments(input)?;
             document_job(s, grant, b.doc_id.clone(), required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                r.reconcile(s, d)?;
-                let mut value = chunk(&room_text(&r), b.offset, b.limit)?;
-                value["id"] = json!(d.id);
-                value["path"] = json!(d.path);
-                value["save"] = status(&r);
-                Ok(value)
+                synced(s, d, |r| {
+                    let mut value = chunk(&room_text(r), b.offset, b.limit)?;
+                    value["id"] = json!(d.id);
+                    value["path"] = json!(d.path);
+                    value["save"] = status(r);
+                    Ok(value)
+                })
             })
             .await
         }
@@ -770,18 +784,14 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
         "edit_document" => {
             let b: Editing = arguments(input)?;
             document_job(s, grant, b.doc_id.clone(), required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                edit_source(s, d, &mut r, b)
+                in_room(s, d, |r| edit_source(s, d, r, b))
             })
             .await
         }
         "replace_text" => {
             let b: Replacing = arguments(input)?;
             document_job(s, grant, b.doc_id.clone(), required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                replace_source(s, d, &mut r, b)
+                in_room(s, d, |r| replace_source(s, d, r, b))
             })
             .await
         }
@@ -830,9 +840,7 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             let b: DocumentId = arguments(input)?;
             let may_edit = grant.require("locdoc:write").is_ok();
             document_job(s, grant, b.doc_id, required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                comments::list_payload(s, d, &mut r, may_edit, None)
+                in_room(s, d, |r| comments::list_payload(s, d, r, may_edit, None))
             })
             .await
         }
@@ -845,9 +853,9 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             }))?;
             let actor = grant.id.clone();
             document_job(s, grant, b.doc_id, required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                comments::add_from_connector(s, d, &mut r, actor, body, &b.expected_revision)
+                in_room(s, d, |r| {
+                    comments::add_from_connector(s, d, r, actor, body, &b.expected_revision)
+                })
             })
             .await
         }
@@ -861,9 +869,9 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             }))?;
             let actor = grant.id.clone();
             document_job(s, grant, b.doc_id, required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                comments::edit_payload(s, d, &mut r, b.comment_id, body, &actor, (false, true))
+                in_room(s, d, |r| {
+                    comments::edit_payload(s, d, r, b.comment_id, body, &actor, (false, true))
+                })
             })
             .await
         }
@@ -872,9 +880,9 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             let body = arguments(json!({"resolved":b.resolved}))?;
             let actor = grant.id.clone();
             document_job(s, grant, b.doc_id, required, move |s, d| {
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                comments::edit_payload(s, d, &mut r, b.comment_id, body, &actor, (false, true))
+                in_room(s, d, |r| {
+                    comments::edit_payload(s, d, r, b.comment_id, body, &actor, (false, true))
+                })
             })
             .await
         }
@@ -901,10 +909,10 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             check_revision(&b.expected_revision)?;
             document_job(s, grant, b.doc_id, required, move |s, d| {
                 let content = version_content(s, &d.id, &b.version_id)?;
-                let room = s.room(d)?;
-                let mut r = room.lock().unwrap();
-                r.restore_if_current(s, d, &content, &b.expected_revision)?;
-                Ok(json!({"ok": true, "revision": hash(&room_text(&r)), "save": status(&r)}))
+                in_room(s, d, |r| {
+                    r.restore_if_current(s, d, &content, &b.expected_revision)?;
+                    Ok(json!({"ok": true, "revision": hash(&room_text(r)), "save": status(r)}))
+                })
             })
             .await
         }
@@ -1215,6 +1223,37 @@ mod tests {
             .is_err()
         );
         assert_eq!(room_text(&s.room(&d).unwrap().lock().unwrap()), expected);
+    }
+
+    #[tokio::test]
+    async fn a_replacement_matches_a_desktop_save_and_reports_like_an_edit() {
+        let (_dir, s, d) = fixture();
+        fs::write(s.root.join(&d.path), "Desktop text here.\n").unwrap();
+        let result = execute(
+            s.clone(),
+            access(&["locdoc:write"]),
+            "replace_text",
+            json!({"doc_id":d.id,"expected_revision":hash("Desktop text here.\n"),
+                "old_text":"here","new_text":"there"}),
+        )
+        .await
+        .unwrap();
+        let expected = "Desktop text there.\n";
+        assert_eq!(result["id"], json!(d.id));
+        assert_eq!(result["revision"], json!(hash(expected)));
+        assert_eq!(result["accepted"], json!(true));
+        assert_eq!(room_text(&s.room(&d).unwrap().lock().unwrap()), expected);
+        let read = execute(
+            s.clone(),
+            access(&["locdoc:read"]),
+            "read_document",
+            json!({"doc_id": d.id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(read["revision"], result["revision"]);
+        assert_eq!(read["save"]["disk_pending"], result["disk_pending"]);
+        assert_eq!(fs::read_to_string(s.root.join(&d.path)).unwrap(), expected);
     }
 
     #[tokio::test]
