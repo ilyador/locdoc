@@ -587,3 +587,22 @@ fn normal_startup_refuses_an_unfinished_restore_of_a_backup_without_root_identit
         Some("Shared text of A\n")
     );
 }
+
+#[test]
+fn a_document_whose_folder_became_a_file_never_blocks_the_restore() {
+    let (directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let a = written(&s, "Notes/a.md", "Text of A\n");
+    share(&s, &a.id);
+    let backup = directory.path().join("backup");
+    // A file now has the folder's name: no file can be at A's path.
+    back_up(&s, &backup, |root| {
+        fs::remove_dir_all(root.join("Notes")).unwrap();
+        fs::write(root.join("Notes"), "Not a folder\n").unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &a)["evidence"], "retired");
+    assert_eq!(placement(&report, &kept)["evidence"], "content");
+    assert!(shared_text(&s, "old-link").is_none());
+}

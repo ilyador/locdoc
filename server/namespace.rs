@@ -943,7 +943,16 @@ impl Store {
             Ok(metadata) if metadata.is_file() => {
                 (Seen::File(Identity::of(&metadata)), metadata.nlink() > 1)
             }
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => (Seen::Unknown, false),
+            // A file in place of one of the path's folders is as conclusive
+            // as nothing there.
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                (Seen::Unknown, false)
+            }
             _ => (Seen::Absent, false),
         }
     }

@@ -2215,3 +2215,14 @@ fn listings_never_walk_the_tree_while_an_unreadable_folder_holds_a_document() {
     assert!(s.doc(&a.id).is_err());
     assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
 }
+
+#[test]
+fn a_document_whose_folder_became_a_file_retires() {
+    let (_dir, s) = store();
+    let doc = s.create_document("Notes/note.md").unwrap();
+    share(&s, &doc.id);
+    fs::remove_dir_all(s.root.join("Notes")).unwrap();
+    fs::write(s.root.join("Notes"), "Not a folder\n").unwrap();
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&doc.id).is_err(), "no file can be at its path");
+}
