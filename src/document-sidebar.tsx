@@ -1,6 +1,12 @@
-import { useId, useState, type ReactNode } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Entry } from "./model";
-import type { SidebarView } from "./workspace";
+import type { SidebarScroll, SidebarView } from "./workspace";
 import { documentTitle } from "./document-links";
 import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
@@ -18,6 +24,7 @@ export function DocumentSidebar({
   query,
   view,
   setView,
+  scroll,
   expanded,
   toggleFolder,
   choose,
@@ -32,6 +39,9 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
+  // Where the list was scrolled, kept by the workspace while this sidebar
+  // mounts again for each document.
+  scroll?: SidebarScroll;
   expanded: Set<string>;
   toggleFolder: (path: string) => void;
   choose: (entry: Entry) => void;
@@ -44,6 +54,22 @@ export function DocumentSidebar({
   prepare?: () => Promise<void>;
 }) {
   const tabId = useId();
+  const panel = useRef<HTMLDivElement>(null);
+  // The view the list shows, whose position it keeps.
+  const shown = useRef(view);
+  useLayoutEffect(() => {
+    shown.current = view;
+  }, [view]);
+  // Each document's workspace mounts this sidebar again. The list takes its
+  // position back before it paints and keeps it as it goes, so opening a
+  // document leaves the list where it was.
+  useLayoutEffect(() => {
+    const list = panel.current!;
+    if (scroll) list.scrollTop = scroll[shown.current];
+    return () => {
+      if (scroll) scroll[shown.current] = list.scrollTop;
+    };
+  }, []);
   // Search reveals matches inside closed folders without changing the normal tree.
   const [search, setSearch] = useState({ query, collapsed: new Set<string>() });
   if (search.query !== query) setSearch({ query, collapsed: new Set() });
@@ -176,6 +202,7 @@ export function DocumentSidebar({
         </div>
       )}
       <div
+        ref={panel}
         className={`file-tree ${view === "date" ? "date-list" : "folder-tree"}`}
         role="tabpanel"
         id={`${tabId}-panel`}

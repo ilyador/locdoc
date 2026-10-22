@@ -50,6 +50,7 @@ export function WorkspaceSidebar({
     setExpanded,
     sidebarView,
     setSidebarView,
+    sidebarScroll,
   } = workspace;
   const toggleFolder = (path: string) =>
     setExpanded((prev) => {
@@ -109,6 +110,7 @@ export function WorkspaceSidebar({
             query={query}
             view={sidebarView}
             setView={setSidebarView}
+            scroll={sidebarScroll}
             expanded={expanded}
             toggleFolder={toggleFolder}
             choose={choose}

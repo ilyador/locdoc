@@ -15,6 +15,8 @@ import {
 } from "./model";
 
 export type SidebarView = "date" | "folders";
+// How far each sidebar view's list is scrolled, in pixels.
+export type SidebarScroll = Record<SidebarView, number>;
 
 declare global {
   interface Window {
@@ -141,6 +143,9 @@ export function useWorkspace() {
       // Both views remain available without storage.
     }
   }, [sidebarView]);
+  // The sidebar mounts again with each document's workspace, and its list
+  // takes its scroll position back from here.
+  const sidebarScroll = useRef<SidebarScroll>({ date: 0, folders: 0 }).current;
   const current = useRef(id);
   const folderView = useRef(false);
   current.current = id;
@@ -336,6 +341,7 @@ export function useWorkspace() {
     setExpanded,
     sidebarView,
     setSidebarView,
+    sidebarScroll,
     loadTree,
     patchEntries,
     files,
