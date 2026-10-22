@@ -257,20 +257,21 @@ test("each listed reason reads as it is, and only an unapproved image offers Sho
   assert.deepEqual(rows, [
     "../../outside.png|Outside your documents folder||icon",
     ".dot/secret.png|In a hidden file or folder||thumbnail",
-    "state/cover.png|In Locdoc's state folder||thumbnail",
+    "state/cover.png|In Locdoc's state folder||icon",
     "big.png|Over the 5 MB image or 20 MB video limit||icon",
     "notes.png|Not an image or video Locdoc can show||icon",
     "pics\\win.png|Not a file path Locdoc can open||icon",
     "gone.png|File not found||icon",
     "photo.png|Not approved for link visitors|Show to link visitors|thumbnail",
   ]);
-  // Only files the owner can see are requested as thumbnails.
+  // Only files the owner can see are requested as thumbnails. Locdoc
+  // serves its state folder to nobody.
   assert.deepEqual(
     Array.from(
       document.querySelectorAll<HTMLImageElement>("img.hidden-media-thumb"),
       (image) => new URL(image.src).searchParams.get("path"),
     ),
-    [".dot/secret.png", "state/cover.png", "photo.png"],
+    [".dot/secret.png", "photo.png"],
   );
   assert.equal(screen.queryByRole("button", { name: "Show all" }), null);
 });

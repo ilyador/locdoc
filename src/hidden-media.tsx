@@ -17,6 +17,7 @@ const reason = (code: string) =>
 const unavailable = new Set([
   "missing",
   "outside",
+  "state",
   "too-large",
   "unsupported",
   "invalid",
