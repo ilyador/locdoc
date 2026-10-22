@@ -332,6 +332,55 @@ test("replace edits visible text only and is offered only while editing is allow
   }
 });
 
+test("a command that uses up the last match leaves focus in its own row", async () => {
+  const fixture = mount("foo and foo");
+  try {
+    fixture.key(fixture.view.contentDOM, "f", { ctrlKey: true });
+    fixture.type(fixture.find(), "foo");
+    await settle();
+    // The replace row's disclosure is remembered for the tab.
+    if (fixture.control(".find-replace").hidden)
+      fixture.click(".find-disclosure");
+    const replaceField = fixture.control<HTMLInputElement>(
+      'input[name="replace"]',
+    );
+    fixture.type(replaceField, "bar");
+    const all = fixture.control<HTMLButtonElement>(".find-replace-all");
+    act(() => {
+      all.focus();
+      all.click();
+    });
+    assert.equal(fixture.text.toString(), "bar and bar");
+    await waitFor(() => assert.equal(fixture.count(), "No matches"));
+    assert.equal(all.disabled, true, "nothing is left to replace");
+    assert.ok(
+      document.activeElement === replaceField,
+      "Replace all hands focus to the replace field, not the page",
+    );
+
+    fixture.type(fixture.find(), "bar");
+    await settle();
+    const next = fixture.control<HTMLButtonElement>(
+      '[aria-label="Next match (Enter)"]',
+    );
+    act(() => next.focus());
+    // A collaborator's edit removes the last match under a focused command.
+    act(() =>
+      fixture.view.dispatch({
+        changes: { from: 0, to: fixture.view.state.doc.length, insert: "baz" },
+      }),
+    );
+    await waitFor(() => assert.equal(fixture.count(), "No matches"));
+    assert.equal(next.disabled, true);
+    assert.ok(
+      document.activeElement === fixture.find(),
+      "a find command hands focus to the find field",
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
 test("Alt-g adds the next visible occurrence, Sublime-style, even when read-only", async () => {
   const source =
     "word other word [[comment(ana): word]] wordy word\nwords word";

@@ -605,6 +605,14 @@ class FindPanel implements Panel {
     this.count.textContent = label;
     this.count.hidden = !label;
     this.dom.classList.toggle("no-matches", !!query.search && !total);
+    // A command that used up the last match must not drop keyboard focus to
+    // the page as it disables itself: its row's field keeps it.
+    const focused = this.dom.ownerDocument.activeElement;
+    if (!total && this.commands.some((command) => command === focused))
+      (this.replaceRow.contains(focused)
+        ? this.replaceField
+        : this.searchField
+      ).focus();
     for (const command of this.commands) command.disabled = !total;
   }
 }
