@@ -66,20 +66,18 @@ const EXTENSION_KEY = "locdoc.newDocumentExtension";
 const TOAST_TIME = { done: 4000, error: 6000, undo: 10000 };
 const ROOT_NAME = "Documents";
 
+// A trash item as the server sends it: `deleted` in seconds, like every
+// Locdoc time, and `documents` the number of documents it holds.
 export function trashItem(value: unknown): TrashItem | null {
   if (!value || typeof value !== "object") return null;
   const item = value as Record<string, unknown>;
   if (typeof item.id !== "string" || typeof item.path !== "string") return null;
-  const deleted = Number(item.deleted) || 0;
   return {
     id: item.id,
     kind: item.kind === "folder" ? "folder" : "document",
     path: item.path,
-    // Every other Locdoc time is in seconds; accept milliseconds as well.
-    deleted: deleted > 1e12 ? Math.floor(deleted / 1000) : deleted,
-    documents: Array.isArray(item.documents)
-      ? item.documents.length
-      : Number(item.documents) || 0,
+    deleted: Number(item.deleted) || 0,
+    documents: Number(item.documents) || 0,
   };
 }
 
