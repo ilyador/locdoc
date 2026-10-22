@@ -1046,9 +1046,9 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
     share(&s, &page.id);
     fs::create_dir_all(s.data.join("fonts")).unwrap();
     s.create_folder("Elsewhere").unwrap();
-    // The sidebar lists the state folder like any other folder, but moving
-    // or deleting it would take the live database and owner key away.
-    assert!(listed(&s).iter().any(|path| path == "state"));
+    // The sidebar never lists the state folder, and moving or deleting it
+    // by its path would take the live database and owner key away.
+    assert!(!listed(&s).iter().any(|path| path == "state"));
     let attempts = [
         ("delete state", s.trash_folder("state").map(|_| ())),
         (
@@ -1113,6 +1113,135 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
     s.rename_folder("Drafts", "Kept").unwrap();
     assert_eq!(s.doc(&kept.id).unwrap().path, "Kept/page.md");
     s.trash_folder("Kept").unwrap();
+}
+
+#[test]
+fn a_state_folder_kept_inside_the_documents_folder_is_no_part_of_the_namespace() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("docs");
+    // An earlier layout kept a document at a path the state folder now has,
+    // and deleted it.
+    let earlier = Store::open(
+        root.clone(),
+        directory.path().join("earlier"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    let legacy = earlier.create_document("state/legacy.md").unwrap();
+    let item = earlier.trash_document(&legacy.id).unwrap();
+    drop(earlier);
+    fs::remove_dir(root.join("state")).unwrap();
+    fs::rename(directory.path().join("earlier"), root.join("state")).unwrap();
+    let s = Store::open(root.clone(), root.join("state"), "http://localhost".into()).unwrap();
+    let page = s.create_document("page.md").unwrap();
+    share(&s, &page.id);
+    s.create_folder("Elsewhere").unwrap();
+    fs::create_dir_all(s.data.join("fonts")).unwrap();
+    fs::write(s.data.join("fonts/cover.png"), "Not for documents").unwrap();
+    fs::write(s.data.join("notes.md"), "Not a document\n").unwrap();
+    // Nothing is created, renamed, duplicated, moved or restored into it.
+    let attempts = [
+        ("new folder", s.create_folder("state/Notes")),
+        (
+            "new document",
+            s.create_document("state/new.md").map(|_| ()),
+        ),
+        (
+            "new document in a new folder",
+            s.create_document("state/Sub/new.md").map(|_| ()),
+        ),
+        ("rename", s.rename_document(&page.id, "state/page.md")),
+        (
+            "duplicate",
+            s.duplicate_document(&page, "state/copy.md", "Copy\n", "lf")
+                .map(|_| ()),
+        ),
+        (
+            "move a folder in",
+            s.rename_folder("Elsewhere", "state/Elsewhere").map(|_| ()),
+        ),
+        ("restore", s.restore_trash(&item).map(|_| ())),
+    ];
+    for (what, result) in attempts {
+        assert_eq!(
+            result.map_err(|error| error.0),
+            Err(StatusCode::BAD_REQUEST),
+            "{what}"
+        );
+    }
+    for path in ["Notes", "new.md", "Sub", "page.md", "copy.md", "legacy.md"] {
+        assert!(!s.data.join(path).exists(), "{path}");
+    }
+    assert_eq!(s.doc(&page.id).unwrap().path, "page.md");
+    assert_eq!(trash_items(&s).len(), 1);
+    // Listings, discovery, folder links, MCP and media never enter it.
+    assert!(
+        listed(&s)
+            .iter()
+            .all(|path| path != "state" && !path.starts_with("state/"))
+    );
+    assert_eq!(
+        s.index_document("state/notes.md").unwrap_err().0,
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        folders::share_folder(
+            &s,
+            serde_json::from_value(json!({"path": "state", "permission": "view"})).unwrap(),
+        )
+        .is_err()
+    );
+    assert!(mcp_access::folder_access(&s, "state").is_err());
+    assert!(s.media_path(&page, "state/fonts/cover.png").is_err());
+    // A document file moved into it leaves with its link, as one moved
+    // into a hidden folder does.
+    fs::rename(s.root.join("page.md"), s.data.join("page.md")).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&page.id).is_err());
+    assert!(s.index_document("state/page.md").is_err());
+}
+
+#[test]
+fn a_documents_folder_kept_inside_the_state_folder_takes_documents_as_usual() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let s = Store::open(state.join("docs"), state, "http://localhost".into()).unwrap();
+    s.create_folder("Notes").unwrap();
+    let page = s.create_document("Notes/page.md").unwrap();
+    share(&s, &page.id);
+    fs::write(s.root.join("Notes/cover.png"), "An image").unwrap();
+    s.rename_document(&page.id, "Notes/renamed.md").unwrap();
+    let page = s.doc(&page.id).unwrap();
+    let copy = s
+        .duplicate_document(&page, "Notes/copy.md", "Copy\n", "lf")
+        .unwrap();
+    let item = s.trash_document(&copy.id).unwrap();
+    assert_eq!(s.restore_trash(&item).unwrap().0, "Notes/copy.md");
+    fs::write(s.root.join("Notes/desktop.md"), "Desktop notes\n").unwrap();
+    assert!(s.index_document("Notes/desktop.md").is_ok());
+    let paths = listed(&s);
+    for path in [
+        "Notes",
+        "Notes/renamed.md",
+        "Notes/copy.md",
+        "Notes/desktop.md",
+    ] {
+        assert!(paths.iter().any(|listed| listed == path), "{path}");
+    }
+    assert!(folder_link(&s, "Notes").len() > 10);
+    allow_mcp_folder(&s, "Notes");
+    assert!(mcp_access::folder_access(&s, "Notes").unwrap().mcp_allowed);
+    assert!(s.media_path(&page, "cover.png").is_ok());
+    // Desktop moves are followed as anywhere else.
+    fs::rename(
+        s.root.join("Notes/renamed.md"),
+        s.root.join("Notes/moved.md"),
+    )
+    .unwrap();
+    s.retire_missing_documents().unwrap();
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "Notes/moved.md");
+    assert_eq!(moved.token.as_deref(), Some("old-link"));
 }
 
 #[test]

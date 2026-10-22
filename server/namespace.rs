@@ -691,7 +691,9 @@ impl Store {
         self.finish_pending_path(&path)?;
         let full = self.safe(&path, false)?;
         let not_found = || ApiError(StatusCode::NOT_FOUND, "Document not found.".into());
-        if format(&path).is_none() || !full.is_file() {
+        // A file in a state folder kept inside the documents folder is
+        // never found, as one in the trash is not.
+        if format(&path).is_none() || !full.is_file() || self.in_state(&full) {
             return Err(not_found());
         }
         let observe = || match fs::symlink_metadata(&full) {
@@ -1296,11 +1298,11 @@ impl Store {
         }
     }
 
-    /// Walk the tree once, never following symlinks or entering dot folders.
-    /// An entry that vanishes is skipped; a folder that cannot be listed in
-    /// full is reported rather than failing the pass, except the root's
-    /// lost+found, which fsck owns. Also returns the files that other names
-    /// link to.
+    /// Walk the tree once, never following symlinks or entering dot folders
+    /// or the state folder. An entry that vanishes is skipped; a folder that
+    /// cannot be listed in full is reported rather than failing the pass,
+    /// except the root's lost+found, which fsck owns. Also returns the files
+    /// that other names link to.
     fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, Unlisted) {
         let mut files = HashMap::new();
         let mut linked = HashSet::new();
@@ -1331,6 +1333,7 @@ impl Store {
                 }
                 let path = child.path();
                 match walk_step(&path).and_then(|()| fs::symlink_metadata(&path)) {
+                    Ok(metadata) if metadata.is_dir() && self.in_state(&path) => {}
                     Ok(metadata) if metadata.is_dir() => folders.push(path),
                     Ok(metadata) if metadata.is_file() => {
                         if let Some(relative) =
@@ -1834,6 +1837,7 @@ impl Store {
             return Err(bad(FORMATS));
         }
         let dest = self.safe(&path, false)?;
+        self.not_into_state(&dest)?;
         if !dest.parent().is_some_and(Path::is_dir) {
             return Err(bad("Choose an existing destination folder."));
         }
@@ -2497,6 +2501,7 @@ impl Store {
             }
         };
         let destination = self.safe(&original, false)?;
+        self.not_into_state(&destination)?;
         if fs::symlink_metadata(&destination).is_ok() {
             return Err(ApiError(
                 StatusCode::CONFLICT,
