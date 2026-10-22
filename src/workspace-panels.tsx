@@ -165,10 +165,12 @@ function DisplayName({
   const [error, setError] = useState("");
   const draft = typed ?? name;
   const chosen = normalizePresence({ name: draft })?.name;
+  const blocked = pending || !chosen || chosen === name;
   return (
     <form
       onSubmit={async (event) => {
         event.preventDefault();
+        if (blocked) return;
         setPending(true);
         setError("");
         try {
@@ -184,19 +186,18 @@ function DisplayName({
       <label className="field-label" htmlFor="your-name">
         Your display name
       </label>
+      {/* Never disabled: a disabled field or button would drop keyboard
+          focus out of the dialog while the name saves, or once it has. */}
       <div className="inline-form">
         <input
           id="your-name"
           className="text-input"
           maxLength={60}
           value={draft}
-          disabled={pending}
+          readOnly={pending}
           onChange={(e) => setTyped(e.target.value)}
         />
-        <button
-          className="button quiet"
-          disabled={pending || !chosen || chosen === name}
-        >
+        <button className="button quiet" aria-disabled={blocked || undefined}>
           {pending ? "Saving…" : "Save"}
         </button>
       </div>

@@ -3217,7 +3217,11 @@ test("a saved owner name reaches the server, presence and new comments at once; 
     ) as HTMLInputElement;
     const save = screen.getByRole("button", { name: "Save" });
     assert.equal(field.value, "alex");
-    assert.equal(save.disabled, true, "nothing to save yet");
+    assert.equal(
+      save.getAttribute("aria-disabled"),
+      "true",
+      "nothing to save yet",
+    );
     fireEvent.change(field, { target: { value: "  Ilya  " } });
     fireEvent.click(save);
     await screen.findByText("Storage is busy.");
@@ -3400,6 +3404,38 @@ test("an open display name field shows a name chosen elsewhere until something i
     assert.equal(field.value, "Alex Sixth");
     assert.ok(blocked());
     assert.deepEqual(workspace.saves, ["Alex Fourth"]);
+  } finally {
+    page.unmount();
+    workspace.restore();
+  }
+});
+
+test("saving the display name keeps keyboard focus in Your workspace", async () => {
+  const { workspace, page } = nameWorkspace("Alex");
+  try {
+    const { profile, field, save, blocked } = await openDisplayName(
+      page,
+      "Alex",
+    );
+    // A browser moves focus out of the dialog, to the page, from a field or
+    // button that becomes disabled.
+    const focusable = () => !field.disabled && !save.disabled;
+    fireEvent.change(field, { target: { value: "Ilya" } });
+    field.focus();
+    fireEvent.submit(field.form!);
+    await waitFor(() => assert.equal(workspace.held.length, 1));
+    assert.equal(save.textContent, "Saving…");
+    assert.ok(focusable(), "focus can stay while the name saves");
+    assert.ok(field.readOnly && blocked(), "nothing to change meanwhile");
+    assert.ok(document.activeElement === field, "focus stays in the field");
+    fireEvent.submit(field.form!);
+    await workspace.release();
+    await waitFor(() => assert.equal(profile().textContent, "Ilya"));
+    assert.ok(focusable(), "focus can stay once the name is saved");
+    assert.ok(blocked() && !field.readOnly);
+    assert.ok(document.activeElement === field, "focus is still in the field");
+    fireEvent.submit(field.form!);
+    assert.deepEqual(workspace.saves, ["Ilya"], "Enter saves nothing more");
   } finally {
     page.unmount();
     workspace.restore();
