@@ -3309,6 +3309,103 @@ test("an owner tab coming back shows a name chosen elsewhere, unless a newer sav
   }
 });
 
+// An owner workspace whose name /api/config reports, saved by PATCH
+// /api/profile once `release` lets each save finish.
+function nameWorkspace(first: string) {
+  const fetchBefore = globalThis.fetch;
+  const workspace = {
+    owner: first,
+    saves: [] as string[],
+    held: [] as (() => void)[],
+    restore: () => {
+      globalThis.fetch = fetchBefore;
+    },
+    release: () =>
+      act(async () => workspace.held.splice(0).forEach((done) => done())),
+    // Another tab saves a name, and this one comes back into view.
+    comeBack: (name: string) =>
+      act(async () => {
+        workspace.owner = name;
+        window.dispatchEvent(new window.Event("focus"));
+      }),
+  };
+  globalThis.fetch = async (input, init = {}) => {
+    const path = new URL(String(input), location.href).pathname;
+    if (path === "/api/config")
+      return response({
+        owner: true,
+        ownerName: workspace.owner,
+        root: "/tmp/docs",
+        guest: "owner",
+        publicUrl: location.origin,
+      });
+    if (path === "/api/tree") return response({ entries: [] });
+    if (path === "/api/profile") {
+      const { name } = JSON.parse(String(init.body));
+      workspace.saves.push(name);
+      await new Promise<void>((resolve) => workspace.held.push(resolve));
+      workspace.owner = name;
+      return response({ name });
+    }
+    return fetchBefore(input, init);
+  };
+  function Live() {
+    return <WorkspaceView workspace={useWorkspace()} />;
+  }
+  return { workspace, page: render(<Live />) };
+}
+
+async function openDisplayName(page: ReturnType<typeof render>, name: string) {
+  const profile = () => page.container.querySelector(".profile strong")!;
+  await waitFor(() => assert.equal(profile().textContent, name));
+  fireEvent.click(page.container.querySelector(".profile")!);
+  const field = screen.getByLabelText("Your display name") as HTMLInputElement;
+  const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  return {
+    profile,
+    field,
+    save,
+    // Whether Save does nothing, whichever way it says so.
+    blocked: () =>
+      save.disabled || save.getAttribute("aria-disabled") === "true",
+  };
+}
+
+test("an open display name field shows a name chosen elsewhere until something is typed", async () => {
+  const { workspace, page } = nameWorkspace("Alex Second");
+  try {
+    const { profile, field, blocked } = await openDisplayName(
+      page,
+      "Alex Second",
+    );
+    assert.ok(blocked(), "nothing to save yet");
+    await workspace.comeBack("Alex Third");
+    await waitFor(() => assert.equal(profile().textContent, "Alex Third"));
+    assert.equal(field.value, "Alex Third", "the field shows the new name");
+    assert.ok(blocked(), "Save would put the old name back");
+    // What is typed here stays when another name arrives.
+    fireEvent.change(field, { target: { value: "Alex Fourth" } });
+    await workspace.comeBack("Alex Fifth");
+    await waitFor(() => assert.equal(profile().textContent, "Alex Fifth"));
+    assert.equal(field.value, "Alex Fourth");
+    assert.ok(!blocked());
+    fireEvent.submit(field.form!);
+    await waitFor(() => assert.equal(workspace.held.length, 1));
+    await workspace.release();
+    await waitFor(() => assert.equal(profile().textContent, "Alex Fourth"));
+    assert.ok(blocked());
+    // Once saved, the field follows the name again.
+    await workspace.comeBack("Alex Sixth");
+    await waitFor(() => assert.equal(profile().textContent, "Alex Sixth"));
+    assert.equal(field.value, "Alex Sixth");
+    assert.ok(blocked());
+    assert.deepEqual(workspace.saves, ["Alex Fourth"]);
+  } finally {
+    page.unmount();
+    workspace.restore();
+  }
+});
+
 test("a guest's name saved in Settings stays in this browser and follows the presence rules", async () => {
   const fetchBefore = globalThis.fetch;
   const stored = localStorage.getItem("locdoc.guestName");

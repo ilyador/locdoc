@@ -151,7 +151,8 @@ async function disconnectSession(session: DocumentSession | null) {
   });
 }
 
-// The field keeps what was typed until the name is saved.
+// The field shows the current name, which another tab or device may change,
+// until something is typed, and keeps what was typed until it is saved.
 function DisplayName({
   name,
   save,
@@ -159,9 +160,10 @@ function DisplayName({
   name: string;
   save: (name: string) => Promise<string>;
 }) {
-  const [draft, setDraft] = useState(name);
+  const [typed, setTyped] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const draft = typed ?? name;
   const chosen = normalizePresence({ name: draft })?.name;
   return (
     <form
@@ -170,7 +172,8 @@ function DisplayName({
         setPending(true);
         setError("");
         try {
-          setDraft(await save(draft));
+          await save(draft);
+          setTyped(null);
         } catch (error) {
           setError((error as Error).message);
         } finally {
@@ -188,7 +191,7 @@ function DisplayName({
           maxLength={60}
           value={draft}
           disabled={pending}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => setTyped(e.target.value)}
         />
         <button
           className="button quiet"
