@@ -1255,6 +1255,64 @@ impl Room {
             .validation
             .references_as(self.awareness.doc(), documents::has_media(&document.path))
     }
+    /// The owner's approval of current media references for link visitors,
+    /// as a desktop edit adding them would approve them: trusted from the
+    /// document's folder and active while the source names them. Each must
+    /// be a current reference whose file `media::publishable` accepts.
+    /// Returns the approved references and the refused ones with why.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn share_media(
+        &mut self,
+        store: &Store,
+        document: &Document,
+        requested: &[String],
+    ) -> Result<(Vec<String>, Vec<(String, &'static str)>)> {
+        let references = self.references(store, document)?;
+        let mut seen = HashSet::new();
+        let mut approved = Vec::new();
+        let mut refused = Vec::new();
+        for reference in requested {
+            if !seen.insert(reference) {
+                continue;
+            }
+            if !references.contains(reference) {
+                refused.push((reference.clone(), "unreferenced"));
+                continue;
+            }
+            match media::publishable(store, document, reference) {
+                Ok(identity) => approved.push((reference.clone(), identity)),
+                Err(reason) => refused.push((reference.clone(), reason)),
+            }
+        }
+        if !approved.is_empty() {
+            let mut db = store.db.lock().unwrap();
+            let tx = db.transaction()?;
+            Store::check_identity(&tx, &document.id)?;
+            for (reference, identity) in &approved {
+                tx.execute(
+                    "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
+                    params![document.id, reference],
+                )?;
+                tx.execute(
+                    "INSERT INTO trusted_references(doc,reference,identity) VALUES(?,?,?)
+                     ON CONFLICT(doc,reference) DO UPDATE SET identity=COALESCE(excluded.identity,identity)",
+                    params![
+                        document.id,
+                        reference,
+                        identity.as_ref().map(namespace::Identity::as_str)
+                    ],
+                )?;
+            }
+            tx.commit()?;
+        }
+        Ok((
+            approved
+                .into_iter()
+                .map(|(reference, _)| reference)
+                .collect(),
+            refused,
+        ))
+    }
     pub(super) fn detach(&mut self, peer: &Peer) {
         self.engine.state.receipts.remove(&peer.id);
         if let Some(client) = peer.presence.client() {

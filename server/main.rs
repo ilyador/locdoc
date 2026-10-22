@@ -999,6 +999,8 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         payload["mcpAllowed"] = json!(access.mcp_allowed);
         payload["mcpDirect"] = json!(access.mcp_direct);
         payload["mcpInherited"] = json!(access.mcp_inherited);
+        let references = room.references(s, d)?;
+        payload["hiddenMedia"] = json!(media::hidden_media(s, d, &references));
     }
     Ok(payload)
 }
