@@ -17,7 +17,11 @@ import { Awareness } from "y-protocols/awareness";
 import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
 import { livePreview } from "../src/markdown-preview";
-import { InlineMediaWidget, MediaWidget } from "../src/markdown-widgets";
+import {
+  InlineMediaWidget,
+  MediaWidget,
+  explainMedia,
+} from "../src/markdown-widgets";
 import { isLocalMediaPath, wholeLineImage } from "../src/markdown-media";
 import type { Comment } from "../src/model";
 
@@ -498,6 +502,99 @@ test("media the server refuses shows its alt text instead of a broken image", ()
     );
   } finally {
     fixture.close();
+  }
+});
+
+test("the owner's editor says why the server refuses media, a visitor's never asks", async () => {
+  const source =
+    "![Chart](big.png)\n\nSee ![](gone.png) and ![clip](huge.mp4)\n\n![odd](odd.png)\n\n![later](fine.png)";
+  // The media endpoint's refusals, as it answers the owner.
+  const reasons: Record<string, string> = {
+    "big.png": "too-large",
+    "gone.png": "missing",
+    "huge.mp4": "too-large",
+    "odd.png": "<b>new</b>",
+  };
+  const asked: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), "http://localhost").searchParams.get(
+      "path",
+    )!;
+    asked.push(path);
+    return path === "fine.png"
+      ? new Response("image bytes", { status: 200 })
+      : new Response(
+          JSON.stringify({ error: "Refused", reason: reasons[path] }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+  }) as typeof fetch;
+  const placeholders = async (owner: boolean) => {
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: parsed(
+        EditorState.create({
+          doc: source,
+          extensions: [
+            language,
+            sourceCommentLayer,
+            preview,
+            EditorState.readOnly.of(true),
+            explainMedia.of(owner),
+          ],
+        }),
+      ),
+    });
+    try {
+      for (const media of Array.from(
+        view.dom.querySelectorAll<HTMLElement>("img, video"),
+      ))
+        media.dispatchEvent(new dom.window.Event("error"));
+      for (let turn = 0; turn < 5; turn++)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      return Array.from(
+        view.dom.querySelectorAll<HTMLElement>(".media-missing"),
+        (holder) =>
+          [
+            holder.getAttribute("aria-label"),
+            holder.title,
+            holder.textContent,
+          ].join("|"),
+      );
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  };
+  try {
+    assert.deepEqual(await placeholders(false), [
+      "Chart (image unavailable)|Image unavailable|Chart",
+      "Image unavailable|Image unavailable|Image unavailable",
+      "clip (video unavailable)|Video unavailable|clip",
+      "odd (image unavailable)|Image unavailable|odd",
+      "later (image unavailable)|Image unavailable|later",
+    ]);
+    assert.deepEqual(asked, [], "a link visitor's view never asks why");
+    const limit = "Over the 5 MB image or 20 MB video limit";
+    assert.deepEqual(await placeholders(true), [
+      `Chart (image unavailable: ${limit})|Image unavailable: ${limit}|Chart · ${limit}`,
+      "Image unavailable: File not found|Image unavailable: File not found|File not found",
+      `clip (video unavailable: ${limit})|Video unavailable: ${limit}|clip · ${limit}`,
+      // An unknown reason, or none, leaves the plain placeholder.
+      "odd (image unavailable)|Image unavailable|odd",
+      "later (image unavailable)|Image unavailable|later",
+    ]);
+    assert.deepEqual(asked.sort(), [
+      "big.png",
+      "fine.png",
+      "gone.png",
+      "huge.mp4",
+      "odd.png",
+    ]);
+  } finally {
+    globalThis.fetch = original;
   }
 });
 

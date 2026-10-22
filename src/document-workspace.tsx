@@ -433,6 +433,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         id={doc.id}
                         scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
                         token={doc.mediaToken || sharedToken}
+                        owner={doc.owner}
                         path={doc.path}
                         entries={entries}
                         onLink={setLinkTarget}

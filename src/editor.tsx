@@ -48,6 +48,7 @@ import {
   lineEndingError,
 } from "./line-endings";
 import { documentPreview } from "./markdown-preview";
+import { explainMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
 import type { Comment, Entry } from "./model";
 
@@ -59,6 +60,8 @@ export const MarkdownEditor = forwardRef<
     editable: boolean;
     id: string;
     token?: string;
+    // The owner's editor says why the server refuses media.
+    owner?: boolean;
     onChange?: (text: string) => void;
     onIntegrityError?: (message: string) => void;
     onComment: () => void;
@@ -81,6 +84,7 @@ export const MarkdownEditor = forwardRef<
     editable,
     id,
     token,
+    owner,
     onChange,
     onIntegrityError,
     onComment,
@@ -229,7 +233,10 @@ export const MarkdownEditor = forwardRef<
           findExtension(),
           layer.extension,
           access.current.of(editorAccess(editable)),
-          preview.current.of(documentPreview(id, token, path, entries)),
+          preview.current.of([
+            documentPreview(id, token, path, entries),
+            explainMedia.of(!!owner),
+          ]),
           yCollab(text, provider.awareness, { undoManager: undo }),
           keymap.of([
             {
@@ -333,11 +340,12 @@ export const MarkdownEditor = forwardRef<
     documentFormat(path) === "markdown" ? entries : undefined;
   useEffect(() => {
     view.current?.dispatch({
-      effects: preview.current.reconfigure(
+      effects: preview.current.reconfigure([
         documentPreview(id, token, path, previewEntries),
-      ),
+        explainMedia.of(!!owner),
+      ]),
     });
-  }, [id, token, path, previewEntries]);
+  }, [id, token, path, previewEntries, owner]);
   useEffect(() => {
     view.current?.dispatch({
       effects: access.current.reconfigure(editorAccess(editable)),

@@ -1,3 +1,4 @@
+import { Facet } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
 import { parseMarkdownTable } from "./markdown-table";
 
@@ -85,19 +86,19 @@ export const mediaReasons: Record<string, string> = {
   unreferenced: "No longer in this document",
 };
 
+// Present in the owner's editor, where media the server refuses even to its
+// owner says why. Link visitors see only its alt text.
+export const explainMedia = Facet.define<boolean, boolean>({
+  combine: (values) => values.some(Boolean),
+});
+
 // What stands in for media the server will not serve here, such as an image
 // the owner has not shown to link visitors or a missing file: its alt text in
 // quiet interface type instead of the browser's broken-image box.
 function unavailableMedia(alt: string, video: boolean) {
-  const kind = video ? "Video" : "Image";
   const holder = document.createElement("span");
   holder.className = "media-missing";
   holder.setAttribute("role", "img");
-  holder.setAttribute(
-    "aria-label",
-    alt ? `${alt} (${kind.toLowerCase()} unavailable)` : `${kind} unavailable`,
-  );
-  holder.title = `${kind} unavailable`;
   const namespace = "http://www.w3.org/2000/svg";
   const icon = document.createElementNS(namespace, "svg");
   icon.setAttribute("viewBox", "0 0 256 256");
@@ -107,14 +108,53 @@ function unavailableMedia(alt: string, video: boolean) {
   path.setAttribute("d", BROKEN_MEDIA);
   path.setAttribute("fill", "currentColor");
   icon.append(path);
-  const text = document.createElement("span");
-  text.textContent = alt || `${kind} unavailable`;
-  holder.append(icon, text);
+  holder.append(icon, document.createElement("span"));
+  describeUnavailable(holder, alt, video);
   return holder;
+}
+// Its alt text and, once the server has said why, the reason it refuses it.
+function describeUnavailable(
+  holder: HTMLElement,
+  alt: string,
+  video: boolean,
+  why = "",
+) {
+  const kind = video ? "Video" : "Image";
+  const unavailable = `${kind} unavailable${why ? `: ${why}` : ""}`;
+  holder.setAttribute(
+    "aria-label",
+    alt
+      ? `${alt} (${kind.toLowerCase()} unavailable${why ? `: ${why}` : ""})`
+      : unavailable,
+  );
+  holder.title = unavailable;
+  holder.lastElementChild!.textContent =
+    alt && why ? `${alt} · ${why}` : alt || why || unavailable;
+}
+
+// Why the server refuses media to its owner, as its error names it, or ""
+// when it gives none or now serves the file.
+async function refusal(src: string) {
+  const request = new AbortController();
+  try {
+    const response = await fetch(src, { signal: request.signal });
+    if (response.ok) return "";
+    const { reason } = (await response.json()) as { reason?: unknown };
+    return typeof reason === "string" ? reason : "";
+  } catch {
+    return "";
+  } finally {
+    request.abort();
+  }
 }
 
 // Source text reaches the DOM only through properties, never as markup.
-function mediaElement(src: string, alt: string, title: string) {
+function mediaElement(
+  src: string,
+  alt: string,
+  title: string,
+  explain: boolean,
+): HTMLElement {
   const video = isVideo(src);
   const el = document.createElement(video ? "video" : "img");
   if (el instanceof HTMLVideoElement) {
@@ -129,7 +169,15 @@ function mediaElement(src: string, alt: string, title: string) {
   if (title) el.title = title;
   el.addEventListener(
     "error",
-    () => el.replaceWith(unavailableMedia(alt, video)),
+    () => {
+      const holder = unavailableMedia(alt, video);
+      el.replaceWith(holder);
+      if (explain)
+        void refusal(src).then((reason) => {
+          if (Object.hasOwn(mediaReasons, reason))
+            describeUnavailable(holder, alt, video, mediaReasons[reason]);
+        });
+    },
     { once: true },
   );
   el.src = src;
@@ -154,7 +202,14 @@ export class MediaWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = document.createElement("figure");
     wrap.className = "embed";
-    wrap.appendChild(mediaElement(this.src, this.alt, this.title));
+    wrap.appendChild(
+      mediaElement(
+        this.src,
+        this.alt,
+        this.title,
+        view.state.facet(explainMedia),
+      ),
+    );
     const edit = document.createElement("button");
     edit.textContent = "Edit Markdown";
     edit.className = "embed-edit";
@@ -191,7 +246,12 @@ export class InlineMediaWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = document.createElement("span");
     wrap.className = "embed-inline";
-    const media = mediaElement(this.src, this.alt, this.title);
+    const media = mediaElement(
+      this.src,
+      this.alt,
+      this.title,
+      view.state.facet(explainMedia),
+    );
     wrap.appendChild(media);
     if (!(media instanceof HTMLVideoElement))
       wrap.onclick = (event) => {
