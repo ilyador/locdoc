@@ -353,7 +353,9 @@ fn unresolved(s: &Store, d: &Document, reference: &str) -> &'static str {
         .join(Path::new(&d.path).parent().unwrap())
         .join(decoded.as_ref());
     match fs::canonicalize(&path) {
-        // Inside the documents folder only a trash folder is refused.
+        // Inside the documents folder only a state folder kept there and a
+        // trash folder are refused.
+        Ok(file) if s.in_state(&file) => "state",
         Ok(file) if file.starts_with(&s.root) => "hidden",
         Ok(_) => "outside",
         // Nothing is there; a spelling that climbs out names nothing inside.
