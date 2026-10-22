@@ -84,10 +84,10 @@ export function imageReference(
 }
 
 // An image the preview shows as media: an inline local image outside tables
-// and inline links ([label](destination)), and not part of the description of
-// an image it shows. Reference-style and linked images stay source text. The
-// server lists exactly these as images link visitors cannot see; both read
-// test/fixtures/media-references.json.
+// and inline links ([label](destination), also with an empty destination),
+// and not part of the description of an image it shows. Reference-style and
+// linked images stay source text. The server lists exactly these as images
+// link visitors cannot see; both read test/fixtures/media-references.json.
 export function previewedImage(
   source: (from: number, to: number) => string,
   node: SyntaxNode,
@@ -95,7 +95,10 @@ export function previewedImage(
   for (let parent = node.parent; parent; parent = parent.parent)
     if (
       parent.name === "Table" ||
-      (parent.name === "Link" && parent.getChild("URL")) ||
+      (parent.name === "Link" &&
+        parent
+          .getChildren("LinkMark")
+          .some((mark) => source(mark.from, mark.to) === "(")) ||
       (parent.name === "Image" && previewedImage(source, parent))
     )
       return null;

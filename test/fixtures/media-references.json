@@ -148,6 +148,13 @@
     "rendered": []
   },
   {
+    "name": "images linked to an empty destination are not previewed",
+    "source": "[![e](empty.png)]()\n\n[![t](title.png)]( \"t\")\n\n[![a](angle.png)](<>)",
+    "references": ["angle.png", "empty.png", "title.png"],
+    "local": ["angle.png", "empty.png", "title.png"],
+    "rendered": []
+  },
+  {
     "name": "an image inside a reference link or brackets is previewed",
     "source": "[![x](x.png)][ref]\n\n[![s](shortcut.png)]\n\n[ref]: https://example.test",
     "references": ["shortcut.png", "x.png"],
