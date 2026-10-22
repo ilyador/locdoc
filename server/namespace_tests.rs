@@ -2372,16 +2372,19 @@ fn saves_of_a_new_file_at_a_held_documents_name_never_walk_the_tree_or_hasten_it
 }
 
 #[test]
-fn a_save_of_another_documents_file_at_a_held_name_keeps_the_held_retry() {
+fn another_documents_file_moved_onto_a_held_name_is_found_at_once_without_hastening_the_retry() {
     let (directory, s, a, b) = swap_fixture();
     s.create_folder("Locked").unwrap();
+    // A's file leaves the root, and long after a pass held A, B's file
+    // takes A's name.
     fs::rename(s.root.join("p.md"), directory.path().join("outside.md")).unwrap();
-    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
     s.reconciliation.take();
+    clock_offset(-10, || walking(locked(&s), || s.retire_missing_documents())).unwrap();
+    let held = s.reconciliation.take().unwrap();
+    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
     walking(locked(&s), || {
-        s.retire_missing_documents().unwrap();
-        let held = s.reconciliation.take().unwrap();
-        // The save's pass still finds B at A's name, which A keeps.
+        // The watcher's pass for the move finds B where A keeps its name,
+        // so B's folder grants are checked against it now.
         assert_eq!(
             s.index_document("p.md").unwrap_err().0,
             StatusCode::SERVICE_UNAVAILABLE
@@ -2393,6 +2396,9 @@ fn a_save_of_another_documents_file_at_a_held_name_keeps_the_held_retry() {
         );
     });
     assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&a.id).is_err());
+    assert_eq!(s.doc(&b.id).unwrap().path, "p.md");
 }
 
 #[test]
