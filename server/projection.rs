@@ -31,7 +31,7 @@ impl Coordinator {
 
 /// Ordinary desktop atomic saves rename files without changing any grant.
 /// Ambiguous notices must still cover a removed shared directory or ancestor,
-/// including directories whose names happen to end in .md or .fountain.
+/// including directories whose names happen to end in .md, .fountain or .txt.
 fn invalidates_permissions(s: &Store, event: &notify::Event) -> Result<bool> {
     match event.kind {
         notify::EventKind::Create(notify::event::CreateKind::Folder)

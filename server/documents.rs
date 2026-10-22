@@ -121,11 +121,25 @@ pub(super) fn record_root(data: &Path, identity: &RootIdentity) -> Result<()> {
     result
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Format {
     Markdown,
     Fountain,
+    /// Plain text: its source has no Markdown, so no media references.
+    Text,
 }
+impl Format {
+    /// The name listings and document payloads give this format.
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Fountain => "fountain",
+            Self::Text => "text",
+        }
+    }
+}
+
+pub(super) const FORMATS: &str = "Document names must end with .md, .fountain or .txt.";
 
 pub(super) fn format(path: &str) -> Option<Format> {
     match Path::new(path)
@@ -136,8 +150,15 @@ pub(super) fn format(path: &str) -> Option<Format> {
     {
         "md" => Some(Format::Markdown),
         "fountain" => Some(Format::Fountain),
+        "txt" => Some(Format::Text),
         _ => None,
     }
+}
+
+/// Whether a document's `![...](...)` syntax names media. In a plain text
+/// document it is text: never approved, served or charged as an embed.
+pub(super) fn has_media(path: &str) -> bool {
+    format(path) != Some(Format::Text)
 }
 
 pub(super) fn relative_path(input: &str, hidden: bool) -> Result<String> {
@@ -333,9 +354,9 @@ impl Store {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
-        if format(&path).is_none() {
-            return Err(bad("Document names must end with .md or .fountain."));
-        }
+        let Some(kind) = format(&path) else {
+            return Err(bad(FORMATS));
+        };
         let full = self.safe(&path, false)?;
         fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
         match fs::symlink_metadata(&full) {
@@ -384,10 +405,11 @@ impl Store {
                 .file_stem()
                 .ok_or_else(|| bad("Invalid filename."))?
                 .to_string_lossy();
-            let initial = if format(&path) == Some(Format::Fountain) {
-                format!("Title: {title}\n\n")
-            } else {
-                format!("# {title}\n\n")
+            // A plain text file starts empty, as a new file in a text editor.
+            let initial = match kind {
+                Format::Fountain => format!("Title: {title}\n\n"),
+                Format::Markdown => format!("# {title}\n\n"),
+                Format::Text => String::new(),
             };
             file.write_all(initial.as_bytes())?;
             file.sync_all()?;
@@ -581,6 +603,41 @@ pub(super) mod tests {
         assert_eq!(discovered.permission, "private");
         assert!(discovered.token.is_none());
         assert_eq!(fs::read_to_string(moved).unwrap(), "# reused\n\n");
+    }
+    #[test]
+    fn plain_text_is_a_document_format_that_renames_keep_across_formats() {
+        let (_dir, s) = store();
+        let notes = s.create_document("Notes/list.txt").unwrap();
+        // A new plain text file starts empty, without a Markdown heading.
+        assert_eq!(
+            fs::read_to_string(s.root.join("Notes/list.txt")).unwrap(),
+            ""
+        );
+        assert_eq!(format(&notes.path), Some(Format::Text));
+        assert!(!has_media(&notes.path));
+        // A desktop file of any letter case is discovered as plain text.
+        fs::write(s.root.join("Notes/README.TXT"), "Desktop notes\n").unwrap();
+        let found = s.index_document("Notes/README.TXT").unwrap();
+        assert_eq!(format(&found.path).map(Format::name), Some("text"));
+        share(&s, &notes.id);
+        // Renames change formats and keep the document, its file and links.
+        for (path, name) in [
+            ("Notes/list.md", "markdown"),
+            ("Notes/list.fountain", "fountain"),
+            ("Notes/list.txt", "text"),
+        ] {
+            s.rename_document(&notes.id, path).unwrap();
+            let renamed = s.doc(&notes.id).unwrap();
+            assert_eq!(renamed.path, path);
+            assert_eq!(renamed.token.as_deref(), Some("old-link"));
+            assert_eq!(format(path).map(Format::name), Some(name));
+            assert!(s.root.join(path).is_file());
+        }
+        for path in ["list.pdf", "list", "list.txt.bak"] {
+            assert_eq!(s.create_document(path).unwrap_err().1, FORMATS);
+            assert_eq!(s.rename_document(&notes.id, path).unwrap_err().1, FORMATS);
+        }
+        assert_eq!(s.doc(&notes.id).unwrap().path, "Notes/list.txt");
     }
     #[test]
     fn creating_or_renaming_never_overwrites_a_file() {

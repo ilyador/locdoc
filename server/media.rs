@@ -12,6 +12,9 @@ pub(super) async fn upload(
     if !s.access(&h, &d, &a)?.1 {
         return Err(denied());
     }
+    if !documents::has_media(&d.path) {
+        return Err(plain_text());
+    }
     let permit = s.uploads.clone().try_acquire_owned().map_err(|_| {
         ApiError(
             StatusCode::TOO_MANY_REQUESTS,
@@ -40,6 +43,9 @@ pub(super) async fn upload(
     .map(Json)
 }
 fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]) -> Result<Value> {
+    if !documents::has_media(&d.path) {
+        return Err(plain_text());
+    }
     let kind = infer::get(bytes).ok_or_else(|| {
         bad("Unsupported file. Use PNG, JPEG, GIF, WebP, AVIF, MP4, WebM, or MOV.")
     })?;
@@ -73,6 +79,9 @@ fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]
     let reference = format!("{}{rel}", "../".repeat(depth));
     let usage = s.usage(&d, &room_text(&room.lock().unwrap()));
     Ok(json!({"path":reference,"name":name,"bytes":bytes.len(),"video":video,"usage":usage}))
+}
+fn plain_text() -> ApiError {
+    bad("Plain text documents cannot embed images or videos.")
 }
 #[derive(Deserialize)]
 pub(super) struct Media {
@@ -173,6 +182,10 @@ pub(super) fn media_file(
             },
         )?
         .0;
+    // A plain text document names no media, not even for its owner.
+    if !documents::has_media(&d.path) {
+        return Err(denied());
+    }
     let path = s.media_path(&d, &q.path)?;
     if !owner || capability {
         // Never open the Markdown file here: even a read would break our
@@ -340,6 +353,110 @@ fn allowed_mime(mime: &str) -> bool {
 mod tests {
     use super::*;
     use crate::tests::{peer_update, store};
+
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=";
+
+    fn owner(s: &Store) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", s.key).parse().unwrap(),
+        );
+        headers
+    }
+    fn link(s: &Store, d: &Document, token: &str) -> Document {
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='edit',token=? WHERE id=?",
+                params![token, d.id],
+            )
+            .unwrap();
+        s.doc(&d.id).unwrap()
+    }
+    fn served(
+        s: &Store,
+        d: &Document,
+        path: &str,
+        token: Option<&str>,
+        h: &HeaderMap,
+    ) -> StatusCode {
+        let request = Media {
+            path: path.into(),
+            token: token.map(Into::into),
+        };
+        match media_file(s, &d.id, &request, h) {
+            Ok(_) => StatusCode::OK,
+            Err(error) => error.0,
+        }
+    }
+    fn approvals(s: &Store, d: &Document) -> i64 {
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM trusted_references WHERE doc=?1)
+                    + (SELECT count(*) FROM active_media WHERE doc=?1)
+                    + (SELECT count(*) FROM grants WHERE doc=?1)",
+                [&d.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn plain_text_image_syntax_is_text_never_approved_served_or_uploaded() {
+        let (_dir, s) = store();
+        let png = BASE64.decode(PNG).unwrap();
+        fs::create_dir_all(s.root.join("Notes")).unwrap();
+        fs::write(s.root.join("Notes/photo.png"), &png).unwrap();
+        // A desktop Markdown file naming this image would approve it.
+        fs::write(s.root.join("Notes/plain.txt"), "![photo](photo.png)\n").unwrap();
+        let d = s.index_document("Notes/plain.txt").unwrap();
+        let d = link(&s, &d, "plain-link");
+        let room = s.room(&d).unwrap();
+        fs::write(
+            s.root.join("Notes/plain.txt"),
+            "![photo](photo.png)\n![again](./photo.png)\n",
+        )
+        .unwrap();
+        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(approvals(&s, &d), 0);
+        assert_eq!(s.usage(&d, &room_text(&room.lock().unwrap())), 0);
+        // A link editor may type image syntax: it is text, not an embed of
+        // an unapproved file, so the edit is accepted.
+        let typed = peer_update(&room, "![secret](../private.png)\n");
+        process_frame(&s, &d, &room, &typed, true, false, &mut Peer::default()).unwrap();
+        assert!(room_text(&room.lock().unwrap()).contains("![secret]"));
+        assert_eq!(approvals(&s, &d), 0);
+        // Nothing is served through it, not even to the owner.
+        for (token, headers) in [(Some("plain-link"), HeaderMap::new()), (None, owner(&s))] {
+            assert_eq!(
+                served(&s, &d, "photo.png", token, &headers),
+                StatusCode::FORBIDDEN
+            );
+        }
+        assert_eq!(
+            upload_payload(&s, d.clone(), d.id.clone(), "photo.png".into(), &png)
+                .unwrap_err()
+                .1,
+            plain_text().1
+        );
+        // As Markdown its image syntax names media, which a rename does not
+        // approve for link visitors.
+        drop(room);
+        s.rename_document(&d.id, "Notes/plain.md").unwrap();
+        let markdown = s.doc(&d.id).unwrap();
+        assert_eq!(
+            served(
+                &s,
+                &markdown,
+                "photo.png",
+                Some("plain-link"),
+                &HeaderMap::new()
+            ),
+            StatusCode::FORBIDDEN
+        );
+    }
 
     #[test]
     fn guest_media_uses_committed_room_source_without_breaking_its_projection_lease() {

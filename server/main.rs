@@ -455,9 +455,18 @@ impl Store {
         })
         .collect()
     }
+    /// The media references `content` holds as `d`'s source. A plain text
+    /// document has none: its `![...](...)` is text.
+    fn media_references(d: &Document, content: &str) -> HashSet<String> {
+        if documents::has_media(&d.path) {
+            Self::references(content)
+        } else {
+            HashSet::new()
+        }
+    }
     fn grant_new_references(&self, d: &Document, before: &str, after: &str) -> Result<()> {
-        let previous = Self::references(before);
-        let current = Self::references(after);
+        let previous = Self::media_references(d, before);
+        let current = Self::media_references(d, after);
         self.grant_references(d, current.difference(&previous))
     }
     fn grant_desktop_references(
@@ -467,9 +476,9 @@ impl Store {
         live: &str,
         after: &str,
     ) -> Result<()> {
-        let previous = Self::references(baseline);
-        let existing = Self::references(live);
-        let current = Self::references(after);
+        let previous = Self::media_references(d, baseline);
+        let existing = Self::media_references(d, live);
+        let current = Self::media_references(d, after);
         // An unrelated desktop save must not bless an anonymous reference
         // already present in accepted browser source, even before projection.
         self.grant_references(
@@ -508,7 +517,7 @@ impl Store {
     /// A restore uses this to re-activate approved media without turning an
     /// unapproved local file into a new grant, the way an edit cannot.
     fn authorized_references(&self, d: &Document, content: &str) -> Result<HashSet<String>> {
-        Ok(Self::references(content)
+        Ok(Self::media_references(d, content)
             .into_iter()
             .filter(|reference| {
                 self.media_path(d, reference)
@@ -554,7 +563,7 @@ impl Store {
     }
 
     fn usage(&self, d: &Document, content: &str) -> usize {
-        self.reference_usage(d, &Self::references(content))
+        self.reference_usage(d, &Self::media_references(d, content))
     }
     fn reference_usage(&self, d: &Document, references: &HashSet<String>) -> usize {
         let mut files: HashSet<PathBuf> = references
@@ -787,6 +796,9 @@ struct Entry {
     modified: u64,
     title: String,
     url: Option<String>,
+    /// A document's format; folders have none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'static str>,
 }
 /// List a folder and its descendants. A subfolder or entry that cannot be
 /// read is left out, logged once until it can be read again, rather than
@@ -845,13 +857,16 @@ fn scan_folder(
                 modified: 0,
                 title: name.to_string_lossy().into_owned(),
                 url: None,
+                format: None,
             });
             match fs::read_dir(&p) {
                 Ok(listing) => scan_folder(s, &p, listing, entries)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => s.listed(&p, Some(error)),
             }
-        } else if metadata.is_file() && documents::format(&rel).is_some() {
+        } else if metadata.is_file()
+            && let Some(format) = documents::format(&rel)
+        {
             let d = match s.listed_document(&rel) {
                 // A file still being matched to its document is listed once a
                 // pass decides. One removed or replaced by a link meanwhile,
@@ -890,6 +905,7 @@ fn scan_folder(
                 } else {
                     format!("{}/d/{}", s.public_url, d.id)
                 }),
+                format: Some(format.name()),
             });
         }
     }

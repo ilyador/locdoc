@@ -72,7 +72,8 @@ impl Preview {
             .char_indices()
             .nth(32_000)
             .map_or(source.len(), |(i, _)| i);
-        let reading = if documents::format(path) == Some(documents::Format::Fountain) {
+        let format = documents::format(path);
+        let reading = if format == Some(documents::Format::Fountain) {
             fountain_excerpt(&source[..end], path)
         } else {
             source[..end].to_owned()
@@ -87,7 +88,22 @@ impl Preview {
         let mut hidden = 0;
         let options = Options::all()
             .difference(Options::ENABLE_WIKILINKS | Options::ENABLE_SMART_PUNCTUATION);
-        for event in Parser::new_ext(&reading, options) {
+        // Plain text has no Markdown: its paragraphs are the excerpt and its
+        // filename is the title.
+        let events = if format == Some(documents::Format::Text) {
+            for line in reading.lines() {
+                if line.trim().is_empty() {
+                    flush(&mut text, &kind, depth, false, &mut blocks);
+                } else {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
+            None
+        } else {
+            Some(Parser::new_ext(&reading, options))
+        };
+        for event in events.into_iter().flatten() {
             match event {
                 Event::Start(Tag::CodeBlock(_) | Tag::Image { .. } | Tag::MetadataBlock(_)) => {
                     hidden += 1
@@ -532,6 +548,25 @@ mod tests {
         assert_eq!(
             Preview::new("INT. ROOM - DAY\n\nA room.", "Script.fountain").title,
             "Script"
+        );
+    }
+    #[test]
+    fn plain_text_cards_show_the_text_itself_under_the_filename() {
+        let value = Preview::new(
+            "# Not a heading\n- not a list\n![not an image](photo.png)\n\nSecond paragraph.[[comment(alex): hidden conversation]]\n",
+            "Notes/list.txt",
+        );
+        assert_eq!(value.title, "list");
+        assert_eq!(
+            value.description,
+            "# Not a heading - not a list ![not an image](photo.png) Second paragraph."
+        );
+        assert_eq!(value.blocks.len(), 2);
+        assert!(
+            value
+                .blocks
+                .iter()
+                .all(|block| matches!(block.kind, Kind::Paragraph))
         );
     }
     #[test]

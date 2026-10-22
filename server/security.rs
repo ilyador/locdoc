@@ -452,7 +452,7 @@ impl super::Store {
         let Ok(source) = file.read() else {
             return Ok(());
         };
-        let approved = Self::references(&source)
+        let approved = Self::media_references(doc, &source)
             .into_iter()
             .filter(|reference| {
                 self.media_path(doc, reference)
@@ -481,7 +481,7 @@ impl super::Store {
         content: &str,
         approved: &std::collections::HashSet<String>,
     ) -> Result<()> {
-        self.commit_media_references(tx, doc, &Self::references(content), approved)
+        self.commit_media_references(tx, doc, &Self::media_references(doc, content), approved)
     }
 
     pub(super) fn commit_media_references(

@@ -1028,7 +1028,10 @@ impl Store {
             Self::check_identity(&self.db.lock().unwrap(), &d.id)?;
             return Ok(());
         }
-        let current_references = r.engine.validation.references(r.awareness.doc())?;
+        let current_references = r
+            .engine
+            .validation
+            .references_as(r.awareness.doc(), documents::has_media(&d.path))?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         Self::check_identity(&tx, &d.id)?;
@@ -1103,7 +1106,7 @@ impl Store {
         Ok(())
     }
     pub(super) fn settle_uploads(&self, d: &Document, content: &str) -> Result<()> {
-        let paths: HashSet<_> = Self::references(content)
+        let paths: HashSet<_> = Self::media_references(d, content)
             .iter()
             .filter_map(|reference| self.media_path(d, reference).ok())
             .filter_map(|path| {
@@ -1155,7 +1158,9 @@ impl Room {
         document: &Document,
     ) -> Result<HashSet<String>> {
         self.ensure_committed(store, document)?;
-        self.engine.validation.references(self.awareness.doc())
+        self.engine
+            .validation
+            .references_as(self.awareness.doc(), documents::has_media(&document.path))
     }
     pub(super) fn detach(&mut self, peer: &Peer) {
         self.engine.state.receipts.remove(&peer.id);
@@ -1440,7 +1445,9 @@ pub(super) fn process_frame(
             let Room {
                 engine, awareness, ..
             } = &mut *r;
-            engine.validation.check(awareness.doc(), update)?
+            engine
+                .validation
+                .check_as(awareness.doc(), update, documents::has_media(&d.path))?
         };
         let validation::Check::Valid { before, after } = checked else {
             // A reconnect may deliver a delta before its causal predecessors.

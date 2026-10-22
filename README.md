@@ -2,7 +2,7 @@
 
 A small, self-hosted Markdown and Fountain editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
 
-- Real nested folders and ordinary UTF-8 `.md` and `.fountain` files.
+- Real nested folders and ordinary UTF-8 `.md`, `.fountain` and `.txt` files.
 - A searchable sidebar with **By date** and **Folders** tabs; your selected view is remembered locally.
 - Autosave, live Markdown formatting, task lists, tables, local images and videos.
 - Live Fountain screenplay formatting: scene headings, dialogue, parentheticals, transitions, title pages, notes, and dual dialogue.
@@ -166,6 +166,17 @@ Speaker names already used in a script appear as suggestions when typing a new c
 
 Paragraph spacing is available under **aA → Layout** for both Markdown and Fountain. Each format remembers its own value. Spacing follows explicit source lines; wrapped text, blank lines, speaker cues and parentheticals keep their existing layout.
 
+## Plain text
+
+Name a document `.txt`, or place a `.txt` file in your documents folder, for
+plain text. It edits as text, without Markdown formatting, the format bar, the
+link picker or media: image syntax such as `![x](y.png)` is text in a `.txt`
+file, so it never approves, serves or uploads an image. Comments use the same
+`[[comment(...)]]` records as Markdown and Fountain. A rename can change a
+document between `.md`, `.fountain` and `.txt`; it keeps its links, comments and
+history. A plain text document renamed to Markdown shows its image syntax as
+images to you, and to link visitors only once you approve them.
+
 ## ChatGPT and MCP
 
 Locdoc includes a Streamable HTTP MCP server in the same Rust process. No extra daemon, database or firewall port is needed. For ChatGPT, configure public HTTPS as described below and set `LOCDOC_PUBLIC_URL` to that exact origin.
@@ -197,7 +208,7 @@ Forward and allow **TCP 80 and 443** for the HTTPS proxy. On an already enabled 
 Choose **Share** in a document, or switch to the **Folders** tab and use the sharing icon beside a folder. A document's share dialog also offers **Share containing folder**.
 
 - **View & comment** permits reading and commenting. **Edit & comment** also permits collaborative text edits. The owner always retains editing access.
-- Folder links include nested folders and future Markdown files added inside them. Guests get a searchable, scoped sidebar; they cannot browse the rest of your workspace or create/rename files.
+- Folder links include nested folders and future documents added inside them. Guests get a searchable, scoped sidebar; they cannot browse the rest of your workspace or create/rename files.
 - Folder access and individual document links are independent. Turning off a document's own link does not remove access granted through a shared parent folder. To remove that access, change the folder link or move the file outside the folder; access ends as soon as Locdoc finds the file outside, even while its new name is still being recorded.
 - A document's own links, comments and history follow a move between folders. Folder access is recalculated from its current location; it is never copied onto the document.
 - Turn a link private to revoke it, or choose **Replace link** to invalidate the old URL. Moving, removing, or replacing a shared folder invalidates its capability. A folder share does not follow an external rename; share the new location again.
