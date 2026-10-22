@@ -37,6 +37,7 @@ import {
   panelTitle,
   useCreateForm,
 } from "./workspace-panels";
+import { baseName, entryFormat, relocateEntries } from "./file-names";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import {
   EmptyWorkspace,
@@ -70,11 +71,46 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     clearRecovery,
     storageWarning,
     setError,
+    reload,
   } = useDocument(
     id,
     !!config && (config.owner || !!sharedToken),
     workspace.initialDocument,
   );
+  // The tree follows renames made here, in other tabs and on the desktop, so
+  // the open document takes its current path from there.
+  const entry = id
+    ? entries.find((item) => item.kind === "file" && item.id === id)
+    : undefined;
+  // Visitors see names only; folder links list paths below the shared folder.
+  const listed = entry
+    ? (doc ? doc.owner : config?.owner)
+      ? entry.path
+      : baseName(entry.path)
+    : null;
+  const path = listed ?? doc?.path ?? null;
+  useEffect(() => {
+    if (path) document.title = `${documentName(path)} · locdoc`;
+  }, [path]);
+  const reopenedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!doc?.owner || !entry || entry.path === doc.path) return;
+    if (entryFormat(entry.path) === entryFormat(doc.path)) {
+      setDoc((value) =>
+        value && value.id === entry.id ? { ...value, path: entry.path } : value,
+      );
+      return;
+    }
+    // A different format needs a different editor, so the document reopens,
+    // once for each new name.
+    if (reopenedFor.current === entry.path) return;
+    reopenedFor.current = entry.path;
+    void (session?.drafts.flush() ?? Promise.resolve()).then(reload, () =>
+      setError(
+        "Could not store unsaved changes. Keep this document open until connected.",
+      ),
+    );
+  }, [entry?.path, doc?.path]);
   const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
   const {
     font,
@@ -218,7 +254,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     });
   const toggleAppearance = () =>
     setPanel((current) => (current === "appearance" ? null : "appearance"));
-  const filename = doc ? documentName(doc.path) : "Your workspace";
+  const filename = path ? documentName(path) : "Your workspace";
   const fountain = documentFormat(doc?.path) === "fountain";
   const formattingTools = (expanded = false) =>
     doc && (
@@ -279,6 +315,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         <main className="workspace">
           <DocumentTopbar
             doc={doc}
+            path={path}
             filename={filename}
             people={people}
             sidebar={sidebar}
@@ -528,6 +565,10 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   onHistory={() => setPanel("history")}
                   onRename={(path) => {
                     setDoc((doc) => (doc ? { ...doc, path } : doc));
+                    if (entry)
+                      workspace.patchEntries((items) =>
+                        relocateEntries(items, entry.path, path),
+                      );
                     void loadTree();
                     setPanel(null);
                   }}

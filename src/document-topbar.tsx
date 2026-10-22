@@ -12,6 +12,7 @@ import { sharedToken, type Document } from "./model";
 
 export function DocumentTopbar({
   doc,
+  path,
   filename,
   people,
   sidebar,
@@ -21,6 +22,8 @@ export function DocumentTopbar({
   share,
 }: {
   doc: Document | null;
+  // The document's current path, which follows renames.
+  path: string | null;
   filename: string;
   people: { name: string; color: string }[];
   sidebar: boolean;
@@ -41,18 +44,18 @@ export function DocumentTopbar({
           {sharedToken ? "Shared" : "Documents"}
         </span>
         <CaretRight size={12} />
-        {doc?.path.includes("/") && (
+        {path?.includes("/") && (
           <>
             <span className="crumb-folder">
-              {doc.path.split("/").slice(0, -1).join(" / ")}
+              {path.split("/").slice(0, -1).join(" / ")}
             </span>
             <CaretRight size={12} />
           </>
         )}
         <span className="crumb-current doc-label">
           <span className="doc-title">{filename}</span>{" "}
-          {doc && (
-            <span className="doc-extension">{documentExtension(doc.path)}</span>
+          {path && (
+            <span className="doc-extension">{documentExtension(path)}</span>
           )}
         </span>
       </div>

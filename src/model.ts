@@ -8,6 +8,7 @@ export type Entry = {
   modified?: number;
   title?: string;
   url?: string;
+  format?: "markdown" | "fountain" | "text";
 };
 export type Document = {
   id: string;

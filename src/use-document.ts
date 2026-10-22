@@ -175,7 +175,6 @@ export function useDocument(
           return true;
         });
         setDoc(projection === "conflict" ? { ...d, edit: false } : d);
-        document.title = `${d.path.split("/").pop()?.replace(/\.md$/, "")} · locdoc`;
         const rejectDraft = (message: string) => {
           if (!active || resetting || projection === "conflict") return;
           resetting = true;
@@ -348,5 +347,7 @@ export function useDocument(
     recovery,
     clearRecovery,
     storageWarning,
+    // Open the document again, as after a change of format.
+    reload: () => setReload((value) => value + 1),
   };
 }
