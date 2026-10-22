@@ -165,6 +165,15 @@ impl Validated {
         }
         Ok(())
     }
+    /// `references` of a document whose source names media when `media`;
+    /// a plain text document has none, and its source is not parsed for them.
+    pub(super) fn references_as(&mut self, doc: &Doc, media: bool) -> Result<HashSet<String>> {
+        if media {
+            self.references(doc)
+        } else {
+            Ok(HashSet::new())
+        }
+    }
     pub(super) fn references(&mut self, doc: &Doc) -> Result<HashSet<String>> {
         self.refresh(doc)?;
         Ok(self
@@ -177,20 +186,30 @@ impl Validated {
             .references()
             .clone())
     }
+    #[cfg(test)]
     pub(super) fn check(&mut self, doc: &Doc, update: &[u8]) -> Result<Check> {
+        self.check_as(doc, update, true)
+    }
+    /// Validate an update. `media` says whether the document's source names
+    /// media; a plain text document's reference sets stay empty, unparsed.
+    pub(super) fn check_as(&mut self, doc: &Doc, update: &[u8], media: bool) -> Result<Check> {
         // Keep the inductive plain-root proof inside this API too: a future
         // caller must not accidentally bypass it by decoding Yrs directly.
         super::security::validate_text_update(update)?;
         self.refresh(doc)?;
-        let result = self.check_candidate(update);
+        let result = self.check_candidate(update, media);
         if !matches!(&result, Ok(Check::Valid { .. })) {
             self.candidate = None;
         }
         result
     }
-    fn check_candidate(&mut self, update: &[u8]) -> Result<Check> {
+    fn check_candidate(&mut self, update: &[u8], media: bool) -> Result<Check> {
         let candidate = self.candidate.as_mut().unwrap();
-        let before = candidate.source.lock().unwrap().references().clone();
+        let before = if media {
+            candidate.source.lock().unwrap().references().clone()
+        } else {
+            HashSet::new()
+        };
         candidate.apply(update)?;
         {
             let txn = candidate.doc.transact();
@@ -224,7 +243,11 @@ impl Validated {
         }
         Ok(Check::Valid {
             before,
-            after: source.references().clone(),
+            after: if media {
+                source.references().clone()
+            } else {
+                HashSet::new()
+            },
         })
     }
     /// A rejected media/quota check happened after the text-only candidate.

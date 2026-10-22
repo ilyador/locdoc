@@ -82,9 +82,11 @@ impl Store {
     /// spelling names that file from the new folder and no longer from the
     /// old one. A file still at its old path stayed behind, even when a hard
     /// link or symlink reaches it from the new folder. It is pinned to that
-    /// file at its exact old path, or ends once the file has left it. An
-    /// approval recorded without a file identity keeps its old target.
-    /// Called in the move's transaction; source bytes stay intact.
+    /// file at its exact old path, with its identity, so the grant follows the
+    /// file if it later moves where the document names it, or ends once the
+    /// file has left it. An approval recorded without a file identity keeps
+    /// its old target. Called in the move's transaction; source bytes stay
+    /// intact.
     pub(super) fn reanchor_moved_media(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -123,9 +125,15 @@ impl Store {
             if let Some(path) = before
                 && (approved.is_none() || stayed)
             {
+                // The file the old spelling named stays approved where it is.
+                let pinned = approved.clone().or_else(|| {
+                    let metadata = fs::metadata(&path).ok()?;
+                    Some(namespace::Identity::of(&metadata)?.as_str().to_owned())
+                });
                 tx.execute(
-                    "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
-                    params![document.id, path.to_string_lossy()],
+                    "INSERT INTO grants(doc,path,identity) VALUES(?,?,?)
+                     ON CONFLICT(doc,path) DO UPDATE SET identity=COALESCE(excluded.identity,identity)",
+                    params![document.id, path.to_string_lossy(), pinned],
                 )?;
             }
             tx.execute(
@@ -184,15 +192,100 @@ impl Store {
                 (recorded.as_deref() != Some(current.as_str())).then_some((doc, reference, current))
             })
             .collect();
-        if changed.is_empty() {
+        if !changed.is_empty() {
+            let mut db = self.db.lock().unwrap();
+            let tx = db.transaction()?;
+            for (doc, reference, identity) in &changed {
+                tx.execute(
+                    "UPDATE trusted_references SET identity=? WHERE doc=? AND reference=?",
+                    params![identity.as_str(), doc, reference],
+                )?;
+            }
+            tx.commit()?;
+        }
+        self.follow_grants(&folders)
+    }
+
+    /// A grant pins the exact path an image stayed at when its document moved
+    /// away. While a file is at that path, record it: an image replaced there
+    /// in place stays approved, as before. Once the pinned file has left the
+    /// path and is where an approved reference of the document now names it,
+    /// as when its folder followed the document, the approval follows it and
+    /// is relative again, like a trusted reference whose file moved with its
+    /// document. A second name of a file still at its pinned path is never
+    /// followed. `folders` maps documents seen at their row path to it.
+    fn follow_grants(&self, folders: &HashMap<&str, &str>) -> Result<()> {
+        let (grants, active) = {
+            let db = self.db.lock().unwrap();
+            let grants = db
+                .prepare("SELECT doc,path,identity FROM grants")?
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let active = db
+                .prepare(
+                    "SELECT doc,reference FROM active_media
+                     WHERE doc IN (SELECT doc FROM grants WHERE identity IS NOT NULL)",
+                )?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            (grants, active)
+        };
+        let mut recorded = Vec::new();
+        let mut followed = Vec::new();
+        for (doc, pinned, approved) in grants {
+            let Some(&document) = folders.get(doc.as_str()) else {
+                continue;
+            };
+            let current = Self::pinned_identity(&pinned);
+            if current.is_some()
+                && current.as_ref().map(namespace::Identity::as_str) == approved.as_deref()
+            {
+                continue;
+            }
+            let moved = approved.as_deref().and_then(|identity| {
+                active
+                    .iter()
+                    .filter(|(owner, _)| *owner == doc)
+                    .map(|(_, reference)| reference)
+                    .find(|reference| {
+                        self.media_identity(document, reference)
+                            .is_some_and(|found| found.as_str() == identity)
+                    })
+            });
+            match (moved, current) {
+                (Some(reference), _) => {
+                    followed.push((doc, pinned, reference.clone(), approved.unwrap()))
+                }
+                (None, Some(current)) => recorded.push((doc, pinned, current)),
+                (None, None) => {}
+            }
+        }
+        if recorded.is_empty() && followed.is_empty() {
             return Ok(());
         }
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        for (doc, reference, identity) in &changed {
+        for (doc, pinned, identity) in &recorded {
             tx.execute(
-                "UPDATE trusted_references SET identity=? WHERE doc=? AND reference=?",
-                params![identity.as_str(), doc, reference],
+                "UPDATE grants SET identity=? WHERE doc=? AND path=?",
+                params![identity.as_str(), doc, pinned],
+            )?;
+        }
+        for (doc, pinned, reference, identity) in &followed {
+            tx.execute(
+                "INSERT INTO trusted_references(doc,reference,identity) VALUES(?,?,?)
+                 ON CONFLICT(doc,reference) DO UPDATE SET identity=excluded.identity",
+                params![doc, reference, identity],
+            )?;
+            tx.execute(
+                "DELETE FROM grants WHERE doc=? AND path=?",
+                params![doc, pinned],
             )?;
         }
         tx.commit()?;
@@ -1077,7 +1170,10 @@ impl Store {
             Self::check_identity(&self.db.lock().unwrap(), &d.id, r.engine.incarnation)?;
             return Ok(());
         }
-        let current_references = r.engine.validation.references(r.awareness.doc())?;
+        let current_references = r
+            .engine
+            .validation
+            .references_as(r.awareness.doc(), documents::has_media(&d.path))?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         Self::check_identity(&tx, &d.id, r.engine.incarnation)?;
@@ -1152,7 +1248,7 @@ impl Store {
         Ok(())
     }
     pub(super) fn settle_uploads(&self, d: &Document, content: &str) -> Result<()> {
-        let paths: HashSet<_> = Self::references(content)
+        let paths: HashSet<_> = Self::media_references(d, content)
             .iter()
             .filter_map(|reference| self.media_path(d, reference).ok())
             .filter_map(|path| {
@@ -1204,7 +1300,67 @@ impl Room {
         document: &Document,
     ) -> Result<HashSet<String>> {
         self.ensure_committed(store, document)?;
-        self.engine.validation.references(self.awareness.doc())
+        self.engine
+            .validation
+            .references_as(self.awareness.doc(), documents::has_media(&document.path))
+    }
+    /// The owner's approval of current media references for link visitors,
+    /// as a desktop edit adding them would approve them: trusted from the
+    /// document's folder and active while the source names them. Each must
+    /// be a current reference whose file `media::publishable` accepts.
+    /// Returns the approved references and the refused ones with why.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn share_media(
+        &mut self,
+        store: &Store,
+        document: &Document,
+        requested: &[String],
+    ) -> Result<(Vec<String>, Vec<(String, &'static str)>)> {
+        let references = self.references(store, document)?;
+        let mut seen = HashSet::new();
+        let mut approved = Vec::new();
+        let mut refused = Vec::new();
+        for reference in requested {
+            if !seen.insert(reference) {
+                continue;
+            }
+            if !references.contains(reference) {
+                refused.push((reference.clone(), "unreferenced"));
+                continue;
+            }
+            match media::publishable(store, document, reference) {
+                Ok(identity) => approved.push((reference.clone(), identity)),
+                Err(reason) => refused.push((reference.clone(), reason)),
+            }
+        }
+        if !approved.is_empty() {
+            let mut db = store.db.lock().unwrap();
+            let tx = db.transaction()?;
+            Store::check_identity(&tx, &document.id, self.engine.incarnation)?;
+            for (reference, identity) in &approved {
+                tx.execute(
+                    "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
+                    params![document.id, reference],
+                )?;
+                tx.execute(
+                    "INSERT INTO trusted_references(doc,reference,identity) VALUES(?,?,?)
+                     ON CONFLICT(doc,reference) DO UPDATE SET identity=COALESCE(excluded.identity,identity)",
+                    params![
+                        document.id,
+                        reference,
+                        identity.as_ref().map(namespace::Identity::as_str)
+                    ],
+                )?;
+            }
+            tx.commit()?;
+        }
+        Ok((
+            approved
+                .into_iter()
+                .map(|(reference, _)| reference)
+                .collect(),
+            refused,
+        ))
     }
     pub(super) fn detach(&mut self, peer: &Peer) {
         self.engine.state.receipts.remove(&peer.id);
@@ -1489,7 +1645,9 @@ pub(super) fn process_frame(
             let Room {
                 engine, awareness, ..
             } = &mut *r;
-            engine.validation.check(awareness.doc(), update)?
+            engine
+                .validation
+                .check_as(awareness.doc(), update, documents::has_media(&d.path))?
         };
         let validation::Check::Valid { before, after } = checked else {
             // A reconnect may deliver a delta before its causal predecessors.

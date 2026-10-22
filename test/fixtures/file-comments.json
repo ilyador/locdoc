@@ -220,5 +220,23 @@
         }
       ]
     ]
+  },
+  {
+    "name": "plain text documents keep the same record grammar",
+    "source": "Shopping list\n- oat milk[[comment(ana): which brand?]]\n\nReceipt ![photo](receipt.png)[[comment(alex): image syntax is text in a .txt file]]\n",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "which brand?"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "image syntax is text in a .txt file"
+        }
+      ]
+    ]
   }
 ]

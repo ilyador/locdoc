@@ -4,7 +4,7 @@
 //! applies all path and identity changes in one transaction. A recorded file
 //! identity outranks a path: a pathname alone never moves a document's links,
 //! history or text onto another document's file.
-use super::documents::{format, relative_path, retire, retire_trashed};
+use super::documents::{FORMATS, format, relative_path, retire, retire_trashed};
 use super::*;
 use std::hash::Hash;
 use std::os::unix::ffi::OsStrExt;
@@ -1809,7 +1809,7 @@ impl Store {
             return Ok(());
         }
         if format(&path).is_none() {
-            return Err(bad("Document names must end with .md or .fountain."));
+            return Err(bad(FORMATS));
         }
         let dest = self.safe(&path, false)?;
         if !dest.parent().is_some_and(Path::is_dir) {

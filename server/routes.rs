@@ -289,6 +289,7 @@ pub(super) fn router(s: App) -> Router {
             post(upload).layer(DefaultBodyLimit::max(21 * MB)),
         )
         .route("/api/docs/{id}/media", get(media::media))
+        .route("/api/docs/{id}/media/share", post(media::share_media))
         .route("/api/fonts", get(font_list).post(install_font))
         .route("/api/fonts.css", get(font_css))
         .route("/ws/{id}", get(websocket))

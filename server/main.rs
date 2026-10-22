@@ -458,9 +458,18 @@ impl Store {
         })
         .collect()
     }
+    /// The media references `content` holds as `d`'s source. A plain text
+    /// document has none: its `![...](...)` is text.
+    fn media_references(d: &Document, content: &str) -> HashSet<String> {
+        if documents::has_media(&d.path) {
+            Self::references(content)
+        } else {
+            HashSet::new()
+        }
+    }
     fn grant_new_references(&self, d: &Document, before: &str, after: &str) -> Result<()> {
-        let previous = Self::references(before);
-        let current = Self::references(after);
+        let previous = Self::media_references(d, before);
+        let current = Self::media_references(d, after);
         self.grant_references(d, current.difference(&previous))
     }
     fn grant_desktop_references(
@@ -470,9 +479,9 @@ impl Store {
         live: &str,
         after: &str,
     ) -> Result<()> {
-        let previous = Self::references(baseline);
-        let existing = Self::references(live);
-        let current = Self::references(after);
+        let previous = Self::media_references(d, baseline);
+        let existing = Self::media_references(d, live);
+        let current = Self::media_references(d, after);
         // An unrelated desktop save must not bless an anonymous reference
         // already present in accepted browser source, even before projection.
         self.grant_references(
@@ -511,7 +520,7 @@ impl Store {
     /// A restore uses this to re-activate approved media without turning an
     /// unapproved local file into a new grant, the way an edit cannot.
     fn authorized_references(&self, d: &Document, content: &str) -> Result<HashSet<String>> {
-        Ok(Self::references(content)
+        Ok(Self::media_references(d, content)
             .into_iter()
             .filter(|reference| {
                 self.media_path(d, reference)
@@ -520,44 +529,20 @@ impl Store {
             .collect())
     }
     fn attachment_allowed(&self, d: &Document, path: &Path) -> bool {
-        let db = self.db.lock().unwrap();
-        let grant = db
-            .query_row(
-                "SELECT 1 FROM grants WHERE doc=? AND path=?",
-                params![d.id, path.to_string_lossy()],
-                |r| r.get::<_, i64>(0),
-            )
-            .is_ok();
-        let rel = path
-            .strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy();
-        let uploaded = db
-            .query_row(
-                "SELECT 1 FROM assets WHERE doc=? AND path=?",
-                params![d.id, rel],
-                |r| r.get::<_, i64>(0),
-            )
-            .is_ok();
-        if grant || uploaded {
-            return true;
+        self.approvals(d).approves(path)
+    }
+    /// The file still at the exact path a grant pinned, as long as that path
+    /// is its own name rather than a link to where it went.
+    fn pinned_identity(path: &str) -> Option<namespace::Identity> {
+        let path = Path::new(path);
+        if fs::canonicalize(path).ok()? != path {
+            return None;
         }
-        let references = db
-            .prepare("SELECT reference FROM trusted_references WHERE doc=?")
-            .and_then(|mut query| {
-                query
-                    .query_map([&d.id], |r| r.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-            })
-            .unwrap_or_default();
-        drop(db);
-        references
-            .iter()
-            .any(|reference| self.media_path(d, reference).is_ok_and(|p| p == path))
+        namespace::Identity::of(&fs::metadata(path).ok()?)
     }
 
     fn usage(&self, d: &Document, content: &str) -> usize {
-        self.reference_usage(d, &Self::references(content))
+        self.reference_usage(d, &Self::media_references(d, content))
     }
     fn reference_usage(&self, d: &Document, references: &HashSet<String>) -> usize {
         let mut files: HashSet<PathBuf> = references
@@ -790,7 +775,13 @@ struct Entry {
     modified: u64,
     title: String,
     url: Option<String>,
+    /// A document's format; folders have none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'static str>,
 }
+/// Folders of this name hold a document's images, like `.assets`. One with
+/// no document at any depth is left out of listings; it is still walked.
+const ATTACHMENTS: &str = "_attachments";
 /// List a folder and its descendants. A subfolder or entry that cannot be
 /// read is left out, logged once until it can be read again, rather than
 /// failing every poll of the whole listing.
@@ -840,6 +831,7 @@ fn scan_folder(
             .to_string_lossy()
             .to_string();
         if metadata.is_dir() {
+            let at = entries.len();
             entries.push(Entry {
                 path: rel,
                 kind: "folder",
@@ -848,13 +840,19 @@ fn scan_folder(
                 modified: 0,
                 title: name.to_string_lossy().into_owned(),
                 url: None,
+                format: None,
             });
             match fs::read_dir(&p) {
                 Ok(listing) => scan_folder(s, &p, listing, entries)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => s.listed(&p, Some(error)),
             }
-        } else if metadata.is_file() && documents::format(&rel).is_some() {
+            if name == ATTACHMENTS && !entries[at..].iter().any(|entry| entry.id.is_some()) {
+                entries.truncate(at);
+            }
+        } else if metadata.is_file()
+            && let Some(format) = documents::format(&rel)
+        {
             let d = match s.listed_document(&rel) {
                 // A file still being matched to its document is listed once a
                 // pass decides. One removed or replaced by a link meanwhile,
@@ -893,6 +891,7 @@ fn scan_folder(
                 } else {
                     format!("{}/d/{}", s.public_url, d.id)
                 }),
+                format: Some(format.name()),
             });
         }
     }
@@ -1003,6 +1002,8 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         payload["mcpAllowed"] = json!(access.mcp_allowed);
         payload["mcpDirect"] = json!(access.mcp_direct);
         payload["mcpInherited"] = json!(access.mcp_inherited);
+        let references = room.references(s, d)?;
+        payload["hiddenMedia"] = json!(media::hidden_media(s, d, &references));
     }
     Ok(payload)
 }
@@ -1573,6 +1574,127 @@ mod tests {
         .unwrap();
         s.persist(&d, &mut room.lock().unwrap()).unwrap();
         assert!(s.active_attachment_allowed(&d, &s.media_path(&d, "intentional.png").unwrap()));
+    }
+    fn listed(s: &Store) -> Vec<Entry> {
+        let mut entries = vec![];
+        scan(s, &s.root, &mut entries).unwrap();
+        entries
+    }
+    #[test]
+    fn listings_name_formats_and_leave_out_attachment_folders_without_documents() {
+        let (_dir, s) = store();
+        let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+        for path in ["Trip/script.fountain", "Trip/list.txt"] {
+            s.create_document(path).unwrap();
+        }
+        // Images only, at any depth: left out of listings like .assets.
+        fs::create_dir_all(s.root.join("Trip/_attachments/2024")).unwrap();
+        fs::write(s.root.join("Trip/_attachments/photo.png"), &png).unwrap();
+        fs::write(s.root.join("Trip/_attachments/2024/old.png"), &png).unwrap();
+        fs::write(
+            s.root.join("Trip/page.md"),
+            "![photo](_attachments/photo.png)\n",
+        )
+        .unwrap();
+        let page = s.index_document("Trip/page.md").unwrap();
+        // A document at any depth keeps its attachment folder listed, and a
+        // folder with another name is listed even when empty.
+        s.create_document("Work/_attachments/Notes/kept.md")
+            .unwrap();
+        s.create_folder("Trip/attachments").unwrap();
+        s.create_folder("Empty/_attachments").unwrap();
+        let entries = listed(&s);
+        let entry = |path: &str| entries.iter().find(|entry| entry.path == path);
+        for hidden in [
+            "Trip/_attachments",
+            "Trip/_attachments/2024",
+            "Empty/_attachments",
+        ] {
+            assert!(entry(hidden).is_none(), "{hidden} is listed");
+        }
+        for shown in [
+            "Trip/attachments",
+            "Empty",
+            "Work/_attachments",
+            "Work/_attachments/Notes",
+        ] {
+            assert!(entry(shown).is_some(), "{shown} is not listed");
+        }
+        let formats = [
+            "Trip/page.md",
+            "Trip/script.fountain",
+            "Trip/list.txt",
+            "Work/_attachments/Notes/kept.md",
+            "Trip",
+        ]
+        .map(|path| entry(path).unwrap().format);
+        assert_eq!(
+            formats,
+            [
+                Some("markdown"),
+                Some("fountain"),
+                Some("text"),
+                Some("markdown"),
+                None
+            ]
+        );
+        // Folders keep their entry shape; documents gain only the format.
+        let folder = serde_json::to_value(entry("Trip").unwrap()).unwrap();
+        assert!(folder.get("format").is_none());
+        let document = serde_json::to_value(entry("Trip/list.txt").unwrap()).unwrap();
+        assert_eq!(document["format"], "text");
+        // A folder link lists the same entries.
+        let link = folders::share_folder(
+            &s,
+            serde_json::from_value(json!({"path": "Trip", "permission": "view"})).unwrap(),
+        )
+        .unwrap();
+        let token = link["shareUrl"]
+            .as_str()
+            .unwrap()
+            .rsplit('/')
+            .next()
+            .unwrap();
+        let visible = folders::entries(&s, &folders::grant(&s, token).unwrap()).unwrap();
+        assert!(visible.iter().any(|entry| entry.path == "attachments"));
+        assert!(
+            !visible
+                .iter()
+                .any(|entry| entry.path.starts_with("_attachments"))
+        );
+        // Hidden folders are still walked: their images keep working, and a
+        // document moved into one is followed and lists the folder again.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='view',token='old-link' WHERE id=?",
+                [&page.id],
+            )
+            .unwrap();
+        let shared = s.doc(&page.id).unwrap();
+        s.room(&shared).unwrap();
+        let request = Media {
+            path: "_attachments/photo.png".into(),
+            token: Some("old-link".into()),
+        };
+        assert!(media_file(&s, &page.id, &request, &HeaderMap::new()).is_ok());
+        fs::rename(
+            s.root.join("Trip/list.txt"),
+            s.root.join("Trip/_attachments/2024/list.txt"),
+        )
+        .unwrap();
+        s.discover_file_moves().unwrap();
+        let entries = listed(&s);
+        for shown in [
+            "Trip/_attachments",
+            "Trip/_attachments/2024",
+            "Trip/_attachments/2024/list.txt",
+        ] {
+            assert!(
+                entries.iter().any(|entry| entry.path == shown),
+                "{shown} is not listed"
+            );
+        }
     }
     #[test]
     fn concurrent_unicode_edits_merge_against_the_disk_baseline() {
