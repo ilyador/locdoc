@@ -371,9 +371,12 @@ impl super::Store {
         media_paths: &mut std::collections::HashSet<std::path::PathBuf>,
     ) -> Result<std::collections::HashSet<String>> {
         let mut approved = std::collections::HashSet::new();
+        // Read the approvals once, not once per reference on every keystroke.
+        let approvals = self.approvals(doc);
         for reference in previous {
             if let Ok(path) = self.media_path(doc, reference)
-                && self.active_attachment_allowed(doc, &path)
+                && approvals.approves(&path)
+                && approvals.active(&path)
             {
                 media_paths.insert(path);
             }
