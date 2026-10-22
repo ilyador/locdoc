@@ -2281,7 +2281,7 @@ button:hover {
 }
 .hidden-media {
   border-top: 1px solid var(--line);
-  margin-top: 20px;
+  margin: 20px 0 16px;
   padding-top: 12px;
 }
 .hidden-media-heading {
@@ -2298,6 +2298,9 @@ button:hover {
 }
 .hidden-media .field-help {
   margin: 2px 0 8px;
+}
+.hidden-media .hidden-media-status {
+  margin-top: 10px;
 }
 .hidden-media .hidden-media-status:empty {
   display: none;
