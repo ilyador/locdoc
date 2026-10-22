@@ -16,7 +16,11 @@ import { FormattingTools } from "./formatting-tools";
 import { publishPresence } from "./presence";
 import { DraftRecoveryNotice } from "./draft-recovery";
 import { useDocument } from "./use-document";
-import { AppearancePanel, documentFontFamily } from "./appearance";
+import {
+  AppearancePanel,
+  documentFontFamily,
+  useFontCategory,
+} from "./appearance";
 import { VersionHistory } from "./version-history";
 import { IconButton } from "./ui";
 import { documentFormat, documentName } from "./document-format";
@@ -148,6 +152,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     scrollPastEnd,
     paragraphSpacing,
   } = appearance;
+  const fontCategory = useFontCategory(font);
   const [shareFolderPath, setShareFolderPath] = useState<string | null>(null);
   const [panel, setPanel] = useState<string | null>(null);
   const { toast, tell, dismiss } = useToast();
@@ -304,7 +309,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const style = {
     "--sidebar-custom-width":
       sidebarWidth === null ? undefined : `${sidebarWidth}px`,
-    "--doc-font": documentFontFamily(font),
+    "--doc-font": documentFontFamily(font, fontCategory),
     "--doc-size": `${fontSize}px`,
     "--doc-line-height": lineHeight,
     "--doc-width": pageWidth === null ? undefined : `${pageWidth}px`,

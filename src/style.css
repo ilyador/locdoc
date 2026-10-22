@@ -35,7 +35,8 @@
   --fountain-scene: #971e70;
   --fountain-speaker: #566f8b;
   --fountain-parenthetical: #806b88;
-  --ui-font: "IBM Plex Sans", "Segoe UI", sans-serif;
+  /* Each family is followed by its Hebrew partner from hebrew-fonts.css. */
+  --ui-font: "IBM Plex Sans", "Locdoc Hebrew Sans", "Segoe UI", sans-serif;
   --ui-body-size: 0.9375rem;
   --ui-control-size: 0.875rem;
   --ui-meta-size: 0.8125rem;
@@ -47,7 +48,9 @@
   --weight-semibold: 600;
   --weight-bold: 700;
   --display-font: "Bebas Neue", "Arial Narrow", sans-serif;
-  --reading-font: "JetBrains Mono", ui-monospace, monospace;
+  --reading-font:
+    "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace;
+  --code-font: "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace;
   --doc-font: var(--reading-font);
   --doc-size: 18px;
   --doc-line-height: 1.85;
@@ -1653,17 +1656,14 @@ button:hover {
 }
 .md-inline-code {
   background: var(--subtle);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--code-font);
   font-size: 0.9em;
   border-radius: 4px;
   padding: 2px 4px;
   color: var(--syntax-code);
 }
 .md-code-line {
-  font:
-    0.9em/1.65 "JetBrains Mono",
-    ui-monospace,
-    monospace;
+  font: 0.9em/1.65 var(--code-font);
   background: var(--subtle);
   color: var(--syntax-code);
   padding: 0 13px !important;
@@ -2930,6 +2930,7 @@ button:hover {
   padding: 15px;
   font:
     0.9375rem/1.8 ui-monospace,
+    "Locdoc Hebrew Mono",
     monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
