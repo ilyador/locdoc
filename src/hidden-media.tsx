@@ -173,7 +173,7 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
             )}
           </div>
           <p className="field-help">
-            You can see these images, but people opening the link cannot.
+            People opening the link cannot see these images.
           </p>
         </>
       )}

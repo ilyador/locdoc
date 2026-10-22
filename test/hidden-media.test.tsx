@@ -240,6 +240,10 @@ test("each listed reason reads as it is, and only an unapproved image offers Sho
   respond = () => response({ ...makeDoc("doc-l"), hiddenMedia: hidden });
   render(panel(makeDoc("doc-l")));
   await screen.findByText("photo.png");
+  // Some of them nobody can see, the owner included.
+  assert.ok(
+    screen.getByText("People opening the link cannot see these images."),
+  );
   const rows = Array.from(
     document.querySelectorAll(".hidden-media-item"),
     (row) =>
