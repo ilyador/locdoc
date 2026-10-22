@@ -40,7 +40,7 @@ import {
   downloadDocument,
   panelTitle,
 } from "./workspace-panels";
-import { baseName, entryFormat, within } from "./file-names";
+import { baseName, within } from "./file-names";
 import { TrashedDocument, TrashedNotice } from "./trash";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import {
@@ -102,7 +102,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const reopenedFor = useRef<string | null>(null);
   useEffect(() => {
     if (!doc?.owner || !entry || entry.path === doc.path) return;
-    if (entryFormat(entry.path) === entryFormat(doc.path)) {
+    if (documentFormat(entry.path) === documentFormat(doc.path)) {
       setDoc((value) =>
         value && value.id === entry.id ? { ...value, path: entry.path } : value,
       );

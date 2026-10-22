@@ -8,19 +8,22 @@ import {
 } from "react";
 import { api, send } from "./api";
 import {
+  documentExtension,
+  documentFormat,
+  documentName,
+  type DocumentExtension,
+} from "./document-format";
+import {
   ancestors,
   baseName,
   checkName,
   copyName,
-  entryFormat,
-  extensionOf,
   joinPath,
   parentPath,
   relocateEntries,
   relocatePaths,
   siblingNames,
   within,
-  type DocumentExtension,
 } from "./file-names";
 import type { Entry, TrashItem } from "./model";
 import type { SidebarView } from "./workspace";
@@ -98,18 +101,15 @@ async function writeClipboard(text: string) {
   }
 }
 
-const fileEntry = (path: string, id: string | null): Entry => {
-  const name = baseName(path);
-  return {
-    path,
-    kind: "file",
-    id,
-    shared: false,
-    modified: Math.floor(Date.now() / 1000),
-    title: name.slice(0, name.length - extensionOf(name).length),
-    format: entryFormat(path),
-  };
-};
+const fileEntry = (path: string, id: string | null): Entry => ({
+  path,
+  kind: "file",
+  id,
+  shared: false,
+  modified: Math.floor(Date.now() / 1000),
+  title: documentName(path),
+  format: documentFormat(path),
+});
 
 export function useFileActions({
   owner,
@@ -259,7 +259,7 @@ export function useFileActions({
       original: current.original,
       extension:
         current.mode === "rename"
-          ? extensionOf(current.original || "") || ".md"
+          ? documentExtension(current.original || "") || ".md"
           : extension,
     });
   // An edit holding text the user may still want is never replaced; one
@@ -436,7 +436,7 @@ export function useFileActions({
         return;
       }
       focusPath(path);
-      const typed = extensionOf(current.value.trim());
+      const typed = documentExtension(current.value.trim());
       if (typed && typed !== extension) {
         setExtension(typed);
         try {

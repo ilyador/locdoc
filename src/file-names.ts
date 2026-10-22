@@ -1,15 +1,20 @@
+import {
+  documentExtension,
+  documentFormat,
+  documentName,
+  type DocumentExtension,
+  type DocumentFormat,
+} from "./document-format";
 import type { Entry } from "./model";
 
 // Names and paths for the sidebar's file actions. Everything here is pure, so
 // the inline name field validates on every keystroke without a request.
 
-export const DOCUMENT_EXTENSIONS = [".md", ".fountain", ".txt"] as const;
-export type DocumentExtension = (typeof DOCUMENT_EXTENSIONS)[number];
-
-const formats: Record<DocumentExtension, string> = {
-  ".md": "Markdown",
-  ".fountain": "a Fountain screenplay",
-  ".txt": "plain text",
+// How a rename that changes format says the document will open.
+const opensAs: Record<DocumentFormat, string> = {
+  markdown: "Markdown",
+  fountain: "a Fountain screenplay",
+  text: "plain text",
 };
 
 export const parentPath = (path: string) =>
@@ -20,20 +25,6 @@ export const joinPath = (folder: string, name: string) =>
 // True for the path itself and everything inside it.
 export const within = (path: string, folder: string) =>
   path === folder || path.startsWith(`${folder}/`);
-
-export function extensionOf(name: string): DocumentExtension | "" {
-  const match = /\.(md|fountain|txt)$/i.exec(name);
-  return match ? (match[0].toLowerCase() as DocumentExtension) : "";
-}
-
-export function entryFormat(path: string): Entry["format"] {
-  const extension = extensionOf(path);
-  return extension === ".fountain"
-    ? "fountain"
-    : extension === ".txt"
-      ? "text"
-      : "markdown";
-}
 
 export type NameCheck = {
   // The final file or folder name, with any added extension.
@@ -77,7 +68,7 @@ export function checkName(
   if (/[\u0000-\u001f\u007f]/.test(value))
     return { ...result, error: "Remove the control characters." };
   let name = value;
-  if (options.kind === "file" && !extensionOf(value))
+  if (options.kind === "file" && !documentExtension(value))
     name += options.extension || ".md";
   if (new TextEncoder().encode(name).length > 255)
     return { ...result, name, error: "That name is too long." };
@@ -87,10 +78,10 @@ export function checkName(
     return { ...result, name, error: `${name} already exists here.` };
   let hint = name === value ? "" : `Saved as ${name}`;
   if (options.kind === "file" && options.original !== undefined) {
-    const before = extensionOf(options.original);
-    const after = extensionOf(name);
+    const before = documentExtension(options.original);
+    const after = documentExtension(name);
     if (before && after && before !== after)
-      hint = `${hint ? `${hint}. ` : ""}Opens as ${formats[after]}.`;
+      hint = `${hint ? `${hint}. ` : ""}Opens as ${opensAs[documentFormat(name)]}.`;
   }
   return { ...result, name, hint };
 }
@@ -104,7 +95,7 @@ export function siblingNames(entries: Entry[], folder: string, except = "") {
 
 // "Plan copy.md", then "Plan copy 2.md", like a desktop file manager.
 export function copyName(name: string, taken: string[]) {
-  const extension = extensionOf(name);
+  const extension = documentExtension(name);
   const stem = (extension ? name.slice(0, -extension.length) : name).replace(
     / copy(?: \d+)?$/,
     "",
@@ -121,15 +112,14 @@ export function relocateEntries(entries: Entry[], from: string, to: string) {
     if (!within(entry.path, from)) return entry;
     const path = to + entry.path.slice(from.length);
     if (entry.path !== from) return { ...entry, path };
-    const name = baseName(to);
     return entry.kind === "file"
       ? {
           ...entry,
           path,
-          title: name.slice(0, name.length - extensionOf(name).length),
-          format: entryFormat(path),
+          title: documentName(to),
+          format: documentFormat(path),
         }
-      : { ...entry, path, title: name };
+      : { ...entry, path, title: baseName(to) };
   });
 }
 

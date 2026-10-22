@@ -1,7 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef } from "react";
 import { FileText, Folder } from "@phosphor-icons/react";
 import type { FileActions } from "./file-actions";
-import { baseName, extensionOf } from "./file-names";
+import { documentExtension } from "./document-format";
+import { baseName } from "./file-names";
 
 // The name field VS Code places in the tree for New and Rename. It checks the
 // name on every keystroke, keeps its text on any failure, commits with Enter
@@ -27,7 +28,7 @@ export function InlineName({
     // Renaming selects the name without its extension, as desktop apps do.
     const stem =
       edit.mode === "rename" && edit.kind === "file"
-        ? field.value.length - extensionOf(field.value).length
+        ? field.value.length - documentExtension(field.value).length
         : field.value.length;
     field.setSelectionRange(0, stem);
     // Only a new edit takes focus and selects its text.
