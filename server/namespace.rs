@@ -600,7 +600,8 @@ impl Store {
     /// the match outranks path continuity as identity does. Duplicate
     /// contents fall back to paths, and the pass then follows, records and
     /// retires like a settled one. It changes nothing unless it saw and read
-    /// every file. Normal passes never compare content.
+    /// every file, nor when it would retire every document. Normal passes
+    /// never compare content.
     pub(super) fn restore_documents(&self) -> Result<Restoration> {
         let _files = self.document_files.lock().unwrap();
         const ACTIVE: &str = "SELECT d.id,d.path,f.identity FROM docs d
