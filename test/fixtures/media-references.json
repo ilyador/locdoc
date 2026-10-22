@@ -1,0 +1,144 @@
+[
+  {
+    "name": "whole-line image",
+    "source": "![A picture](_media/picture.png)",
+    "references": ["_media/picture.png"],
+    "rendered": [
+      {
+        "path": "_media/picture.png",
+        "alt": "A picture",
+        "title": "",
+        "block": true
+      }
+    ]
+  },
+  {
+    "name": "whole-line image with a double-quoted title",
+    "source": "Intro\n\n![Chart](charts/q3.png \"Quarter three\")\n\nAfter",
+    "references": ["charts/q3.png"],
+    "rendered": [
+      {
+        "path": "charts/q3.png",
+        "alt": "Chart",
+        "title": "Quarter three",
+        "block": true
+      }
+    ]
+  },
+  {
+    "name": "parenthesized title and trailing spaces",
+    "source": "![Plan](plan.png (Floor plan))  ",
+    "references": ["plan.png"],
+    "rendered": [
+      {
+        "path": "plan.png",
+        "alt": "Plan",
+        "title": "Floor plan",
+        "block": true
+      }
+    ]
+  },
+  {
+    "name": "inline image inside a paragraph",
+    "source": "See ![the logo](brand/logo.png) before the end.",
+    "references": ["brand/logo.png"],
+    "rendered": [
+      {
+        "path": "brand/logo.png",
+        "alt": "the logo",
+        "title": "",
+        "block": false
+      }
+    ]
+  },
+  {
+    "name": "inline angle-bracket destination with a single-quoted title",
+    "source": "Text ![a cat](<photos/my cat.png> 'Sleeping') more",
+    "references": ["photos/my cat.png"],
+    "rendered": [
+      {
+        "path": "photos/my cat.png",
+        "alt": "a cat",
+        "title": "Sleeping",
+        "block": false
+      }
+    ]
+  },
+  {
+    "name": "two images on one line",
+    "source": "![one](1.png) ![two](2.png)",
+    "references": ["1.png", "2.png"],
+    "rendered": [
+      { "path": "1.png", "alt": "one", "title": "", "block": false },
+      { "path": "2.png", "alt": "two", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "list item and heading images",
+    "source": "# ![mark](mark.png) Title\n\n- ![item](item.png)",
+    "references": ["item.png", "mark.png"],
+    "rendered": [
+      { "path": "mark.png", "alt": "mark", "title": "", "block": false },
+      { "path": "item.png", "alt": "item", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "backslash escapes and character references are decoded",
+    "source": "![a\\]b](dir/c\\_d.png \"x \\\"y\\\" &amp; z\")\n\n![amp](x&amp;y.png)",
+    "references": ["dir/c_d.png", "x&y.png"],
+    "rendered": [
+      {
+        "path": "dir/c_d.png",
+        "alt": "a]b",
+        "title": "x \"y\" & z",
+        "block": true
+      },
+      { "path": "x&y.png", "alt": "amp", "title": "", "block": true }
+    ]
+  },
+  {
+    "name": "percent-encoding stays for the media endpoint to decode",
+    "source": "![space](my%20pic.png)",
+    "references": ["my%20pic.png"],
+    "rendered": [
+      { "path": "my%20pic.png", "alt": "space", "title": "", "block": true }
+    ]
+  },
+  {
+    "name": "remote, absolute and data destinations are never requested",
+    "source": "![w](https://example.test/w.png) ![a](/abs.png) ![d](data:image/png;base64,AAAA) ![f](#top)",
+    "references": [
+      "#top",
+      "/abs.png",
+      "data:image/png;base64,AAAA",
+      "https://example.test/w.png"
+    ],
+    "rendered": []
+  },
+  {
+    "name": "code keeps image syntax literal",
+    "source": "`![c](code.png)`\n\n```\n![f](fence.png)\n```\n\n    ![i](indented.png)",
+    "references": [],
+    "rendered": []
+  },
+  {
+    "name": "escaped or unfinished image syntax is prose",
+    "source": "\\![e](escaped.png)\n\n![u](unfinished.png",
+    "references": [],
+    "rendered": []
+  },
+  {
+    "name": "reference-style and linked images are not previewed",
+    "source": "![r][ref]\n\n[![l](linked.png)](https://example.test)\n\n[ref]: ref.png",
+    "references": ["linked.png", "ref.png"],
+    "rendered": []
+  },
+  {
+    "name": "comment records are not part of an image",
+    "source": "Before[[comment(ana): ![hidden](secret.png)]]\n![shown](shown.png)",
+    "references": ["shown.png"],
+    "rendered": [
+      { "path": "shown.png", "alt": "shown", "title": "", "block": true }
+    ]
+  }
+]

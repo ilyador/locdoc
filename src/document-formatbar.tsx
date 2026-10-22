@@ -1,11 +1,12 @@
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from "react";
 import { CaretDown, DotsThree, Minus, Plus } from "@phosphor-icons/react";
+import type { DocumentFormat } from "./document-format";
 import type { FountainForce } from "./fountain";
 import { IconButton } from "./ui";
 
 export function DocumentFormatbar({
   editable,
-  fountain,
+  format,
   font,
   fontSize,
   setFontSize,
@@ -18,7 +19,7 @@ export function DocumentFormatbar({
   tools,
 }: {
   editable: boolean;
-  fountain: boolean;
+  format: DocumentFormat;
   font: string;
   fontSize: number;
   setFontSize: Dispatch<SetStateAction<number>>;
@@ -30,8 +31,9 @@ export function DocumentFormatbar({
   formatFountain: (kind: FountainForce) => void;
   tools: ReactNode;
 }) {
+  const fountain = format === "fountain";
   return (
-    <div className="formatbar" data-format={fountain ? "fountain" : "markdown"}>
+    <div className="formatbar" data-format={format}>
       <div className="format-left">
         <button
           className="font-button"

@@ -9,11 +9,16 @@ import {
   TextAa,
 } from "@phosphor-icons/react";
 import { ShareControls } from "./sharing";
+import { HiddenMediaSection } from "./hidden-media";
 import { CollaborationRecovery } from "./collaboration-recovery";
 import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { McpConnections } from "./mcp-authorization";
 import { RenameDocument } from "./rename-document";
-import { documentFormat } from "./document-format";
+import {
+  documentFormat,
+  formatLabel,
+  type DocumentFormat,
+} from "./document-format";
 import type { DocumentSession } from "./document-session";
 import type { FileActions } from "./file-actions";
 import type { Config, Document } from "./model";
@@ -53,6 +58,9 @@ export function DocumentSharePanel({
         onChange={onChange}
         mcpTarget={doc.owner ? { kind: "document", id: doc.id } : undefined}
       />
+      {doc.owner && documentFormat(doc.path) === "markdown" && (
+        <HiddenMediaSection key={doc.id} doc={doc} />
+      )}
       {doc.owner && doc.path.includes("/") && (
         <button
           className="text-button"
@@ -217,9 +225,9 @@ export function downloadDocument(
     [session?.ydoc.getText("content").toString() ?? doc.content ?? ""],
     {
       type:
-        documentFormat(doc.path) === "fountain"
-          ? "text/plain;charset=utf-8"
-          : "text/markdown;charset=utf-8",
+        documentFormat(doc.path) === "markdown"
+          ? "text/markdown;charset=utf-8"
+          : "text/plain;charset=utf-8",
     },
   );
   const a = document.createElement("a");
@@ -231,7 +239,7 @@ export function downloadDocument(
 
 export function DocumentOptions({
   doc,
-  fountain,
+  format,
   endpoint,
   formatting,
   onDownload,
@@ -239,7 +247,7 @@ export function DocumentOptions({
   onRename,
 }: {
   doc: Document;
-  fountain: boolean;
+  format: DocumentFormat;
   endpoint: string;
   formatting: ReactNode;
   onDownload: () => void;
@@ -249,14 +257,14 @@ export function DocumentOptions({
   return (
     <>
       <p className="dialog-description">{doc.path}</p>
-      {doc.edit && !fountain && (
+      {doc.edit && format === "markdown" && (
         <div className="formatting-menu" role="group" aria-label="Formatting">
           {formatting}
         </div>
       )}
       <button className="menu-action" onClick={onDownload}>
         <DownloadSimple />
-        Download {fountain ? "Fountain" : "Markdown"}
+        Download {format === "text" ? "plain text" : formatLabel(format)}
       </button>
       {doc.owner && (
         <button className="menu-action" onClick={onHistory}>
@@ -271,13 +279,15 @@ export function DocumentOptions({
           onRename={onRename}
         />
       )}
-      <div className="attachment-info">
-        <Image />
-        <span>
-          <strong>{(doc.usage / 1e6).toFixed(1)} MB of 50 MB used</strong>
-          <small>Images up to 5 MB · Videos up to 20 MB</small>
-        </span>
-      </div>
+      {format !== "text" && (
+        <div className="attachment-info">
+          <Image />
+          <span>
+            <strong>{(doc.usage / 1e6).toFixed(1)} MB of 50 MB used</strong>
+            <small>Images up to 5 MB · Videos up to 20 MB</small>
+          </span>
+        </div>
+      )}
     </>
   );
 }

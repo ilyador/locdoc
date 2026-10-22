@@ -4,6 +4,7 @@ import {
   Decoration,
   BlockWrapper,
   placeholder,
+  type DecorationSet,
 } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import {
@@ -22,11 +23,14 @@ import { fountainSpeakerCompletion } from "./fountain-completion";
 import { emphasisContentRange } from "./emphasis-range";
 import { parseMarkdownTable } from "./markdown-table";
 import {
+  InlineMediaWidget,
   MediaWidget,
   TableWidget,
   TaskWidget,
   mediaUrl,
 } from "./markdown-widgets";
+import { imageReference, mediaPreview } from "./markdown-media";
+import { plainTextSupport } from "./plain-text";
 import type { Entry } from "./model";
 
 // Solarized II, from the owner's Ulysses theme. Dark variants keep its hues
@@ -61,12 +65,18 @@ export function livePreview(
   function build(state: EditorState, ranges: PreviewRange[]) {
     const decorations: ReturnType<Decoration["range"]>[] = [];
     const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
+    const images: ReturnType<Decoration["range"]>[] = [];
     const active = (state.readOnly ? [] : state.selection.ranges).map((r) => ({
       from: state.doc.lineAt(r.from).from,
       to: state.doc.lineAt(r.to).to,
     }));
     const inactive = (from: number, to = from) =>
       !active.some((r) => from <= r.to && to >= r.from);
+    // Inline media reveals its source only when a selection touches it, so
+    // writing elsewhere on a long line keeps the picture in place.
+    const touched = (from: number, to: number) =>
+      !state.readOnly &&
+      state.selection.ranges.some((r) => r.from <= to && r.to >= from);
     const codeLines = new Set<number>();
     const tableLines = new Set<number>();
     const blockEnds = new Set<number>();
@@ -78,6 +88,39 @@ export function livePreview(
         enter(n) {
           const { name, from, to } = n;
           if (name === "LocdocComment") return false;
+          if (name === "Image") {
+            const image = imageReference(
+              (a, b) => state.sliceDoc(a, b),
+              n.node,
+            );
+            let cell = n.node.parent;
+            while (cell && cell.name !== "Table") cell = cell.parent;
+            if (!image || cell) return;
+            const line = state.doc.lineAt(from);
+            const src = mediaUrl(id, image.path, token);
+            if (
+              from === line.from &&
+              to <= line.to &&
+              !state.sliceDoc(to, line.to).trim()
+            ) {
+              if (!inactive(line.from, line.to)) return;
+              decorations.push(
+                Decoration.replace({
+                  widget: new MediaWidget(src, image.alt, image.title),
+                  block: true,
+                }).range(line.from, line.to),
+              );
+              return false;
+            }
+            images.push(inlineImage.range(from, to));
+            if (touched(from, to)) return;
+            decorations.push(
+              Decoration.replace({
+                widget: new InlineMediaWidget(src, image.alt, image.title),
+              }).range(from, to),
+            );
+            return false;
+          }
           if (name === "Table" && inactive(from, to)) {
             const source = state.sliceDoc(from, to);
             if (parseMarkdownTable(source, from)) {
@@ -289,19 +332,6 @@ export function livePreview(
       ) {
         const line = state.doc.line(i);
         if (codeLines.has(i) || tableLines.has(i)) continue;
-        const m = line.text.match(
-          /^!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))\)\s*$/,
-        );
-        if (m && inactive(line.from, line.to)) {
-          const path = m[2] || m[3];
-          if (!/^(?:https?:|data:|\/)/.test(path))
-            decorations.push(
-              Decoration.replace({
-                widget: new MediaWidget(mediaUrl(id, path, token), m[1]),
-                block: true,
-              }).range(line.from, line.to),
-            );
-        }
         if (/^\s*[-*_]{3,}\s*$/.test(line.text) && inactive(line.from, line.to))
           decorations.push(
             Decoration.line({ class: "md-rule" }).range(line.from),
@@ -310,6 +340,7 @@ export function livePreview(
     return {
       decorations,
       wrappers,
+      images,
     };
   }
   function create(state: EditorState) {
@@ -317,22 +348,27 @@ export function livePreview(
     return {
       decorations: Decoration.set(value.decorations, true),
       wrappers: BlockWrapper.set(value.wrappers, true),
+      images: Decoration.set(value.images, true),
     };
   }
-  return StateField.define<ReturnType<typeof create>>({
+  const field = StateField.define<ReturnType<typeof create>>({
     create,
     update(value, tr) {
       if (tr.reconfigured) return create(tr.state);
       if (
         !tr.docChanged &&
         !(
-          tr.selection && previewLines(tr.state) !== previewLines(tr.startState)
+          tr.selection &&
+          (previewLines(tr.state) !== previewLines(tr.startState) ||
+            touchedImages(tr.state, value.images) !==
+              touchedImages(tr.startState, value.images))
         ) &&
         syntaxTree(tr.state) === syntaxTree(tr.startState)
       )
         return value;
       let decorations = value.decorations.map(tr.changes);
       let wrappers = value.wrappers.map(tr.changes);
+      let images = value.images.map(tr.changes);
       const ranges = previewRanges(tr);
       // Range-limited filtering keeps untouched branches and block widgets,
       // including those outside the viewport, intact during editing/scrolling.
@@ -348,11 +384,17 @@ export function livePreview(
           filterTo: to,
           filter: keep,
         });
+        images = images.update({
+          filterFrom: from,
+          filterTo: to,
+          filter: keep,
+        });
       }
       const fresh = build(tr.state, ranges);
       return {
         decorations: decorations.update({ add: fresh.decorations, sort: true }),
         wrappers: wrappers.update({ add: fresh.wrappers, sort: true }),
+        images: images.update({ add: fresh.images, sort: true }),
       };
     },
     provide: (f) => [
@@ -360,6 +402,21 @@ export function livePreview(
       EditorView.blockWrappers.from(f, (value) => value.wrappers),
     ],
   });
+  return [field, mediaPreview.of(true)];
+}
+
+// The extent of every rendered-inline image, kept to notice when a selection
+// starts or stops touching one without moving to another line.
+const inlineImage = Decoration.mark({});
+
+function touchedImages(state: EditorState, images: DecorationSet) {
+  if (state.readOnly) return "";
+  const touched: number[] = [];
+  for (const range of state.selection.ranges)
+    images.between(range.from, range.to, (from) => {
+      touched.push(from);
+    });
+  return touched.join(",");
 }
 
 function previewLines(state: EditorState) {
@@ -385,7 +442,9 @@ export function documentPreview(
   path = "",
   entries: Entry[] = [],
 ) {
-  const fountain = documentFormat(path) === "fountain";
+  const format = documentFormat(path);
+  if (format === "text") return plainTextSupport;
+  const fountain = format === "fountain";
   return [
     fountain
       ? [fountainPreview(), fountainSpeakerCompletion()]

@@ -1,6 +1,7 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 import * as Y from "yjs";
 import { api } from "./api";
+import { documentFormat } from "./document-format";
 import {
   captureInsertion,
   insertAttachment,
@@ -30,6 +31,9 @@ export async function uploadAttachment(
   },
 ) {
   if (!doc?.edit || !origin || origin.id !== doc.id) return;
+  // Only Markdown renders media; plain text and Fountain keep it literal.
+  if (documentFormat(doc.path) !== "markdown")
+    throw new Error("Use a Markdown document for images and videos.");
   const video = file.type.startsWith("video/");
   if (file.size > (video ? 20 : 5) * 1e6)
     throw new Error(

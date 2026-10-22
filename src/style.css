@@ -55,6 +55,7 @@
   --toolbar-height: 58px;
   --format-control-height: 32px;
   --footer-height: 36px;
+  --float-shadow: 0 8px 28px #1521311f;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
@@ -1207,7 +1208,8 @@ button:hover {
 }
 /* Keep block spacing in CodeMirror's measured line box, never a margin. */
 .cm-line.md-block-end,
-.cm-line.fountain-block-end {
+.cm-line.fountain-block-end,
+.cm-line.text-block-end {
   padding-block-end: calc(
     var(--doc-paragraph-spacing, 0.15) * var(--doc-line-height) * 1em
   ) !important;
@@ -1354,9 +1356,237 @@ button:hover {
   color: var(--text);
   border-bottom: 1px solid var(--line) !important;
 }
-.cm-search {
+/* Find widget: a small transient layer pinned to the top of the writing
+   column. Its strip is transparent so prose stays visible beside it. */
+.cm-editor .cm-panels-top {
+  top: 8px;
+  display: flex;
+  justify-content: flex-end;
+  background: transparent !important;
+  border: 0 !important;
+  pointer-events: none;
+}
+.find-widget {
+  pointer-events: auto;
+  width: min(100%, 476px);
+  margin-bottom: 8px;
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: var(--float-shadow);
   font-family: var(--ui-font);
   font-size: var(--ui-control-size);
+  font-weight: var(--weight-regular);
+  line-height: 1.25;
+}
+.find-row,
+.find-tools,
+.find-options,
+.find-navigation {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.find-options {
+  gap: 2px;
+}
+.find-tools {
+  flex-shrink: 0;
+}
+.find-replace {
+  padding-inline-start: 36px;
+}
+.find-replace[hidden] {
+  display: none;
+}
+.find-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 9px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.find-field:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+.find-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: var(--ui-control-size);
+}
+.find-input:focus {
+  outline: none;
+}
+.find-count {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.find-widget.no-matches .find-count {
+  color: var(--syntax-delete);
+}
+.find-button {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--secondary);
+  transition:
+    background-color 150ms ease-out,
+    color 150ms ease-out;
+}
+.find-button svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.find-button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+}
+.find-button:focus-visible,
+.find-text-button:focus-visible {
+  outline-offset: -2px;
+}
+.find-toggle {
+  width: 28px;
+  height: 28px;
+}
+.find-toggle[aria-pressed="true"],
+.find-toggle[aria-pressed="true"]:hover {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.find-disclosure svg {
+  width: 14px;
+  height: 14px;
+  transition: transform 150ms ease-out;
+}
+.find-disclosure[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.find-disclosure[hidden] {
+  display: none;
+}
+.find-text-button {
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--secondary);
+  font-size: var(--ui-control-size);
+  white-space: nowrap;
+  transition: background-color 150ms ease-out;
+}
+.find-text-button:hover:not(:disabled) {
+  background: var(--subtle);
+}
+.find-label-short {
+  display: none;
+}
+@media (pointer: coarse) {
+  .find-button,
+  .find-toggle,
+  .find-text-button,
+  .find-field {
+    height: 40px;
+  }
+  .find-button,
+  .find-toggle {
+    width: 40px;
+  }
+  .find-text-button {
+    min-width: 44px;
+  }
+  .find-replace {
+    padding-inline-start: 44px;
+  }
+  .find-input {
+    font-size: 1rem;
+  }
+}
+/* Narrow writing columns: the field gets its own row and the options and
+   navigation share the next, in reading and tab order. */
+@container (max-width: 600px) {
+  .find-widget {
+    width: 100%;
+  }
+  .find-main {
+    flex-wrap: wrap;
+  }
+  .find-main > .find-field {
+    flex-basis: calc(100% - 36px);
+  }
+  .find-tools {
+    flex: 1 1 100%;
+  }
+  .find-navigation {
+    margin-inline-start: auto;
+  }
+  .find-replace {
+    padding-inline-start: 0;
+  }
+  .find-label-long {
+    display: none;
+  }
+  .find-label-short {
+    display: inline;
+  }
+}
+@media (pointer: coarse) {
+  @container (max-width: 600px) {
+    .find-main > .find-field {
+      flex-basis: calc(100% - 44px);
+    }
+  }
+  @container (max-width: 340px) {
+    .find-button,
+    .find-toggle {
+      width: 34px;
+    }
+  }
+}
+/* Found text: a quiet accent tint for every match, the blue selection with a
+   firm accent edge for the current one. Hidden records never match. */
+.markdown-editor .cm-editor .cm-searchMatch,
+.markdown-editor .cm-editor .cm-selectionMatch {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 2px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.markdown-editor .cm-editor .cm-searchMatch-selected {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.markdown-editor .cm-editor .cm-searchMatch .cm-selectionMatch {
+  background: transparent;
+  box-shadow: none;
 }
 /* CodeMirror measures these boxes for hit testing: use padding, never vertical margins. */
 .md-h1 {
@@ -1519,6 +1749,25 @@ button:hover {
 .embed:hover .embed-edit,
 .embed:focus-within .embed-edit {
   opacity: 1;
+}
+/* An image within a line keeps the figure's treatment and flows with text.
+   Padding, never margins: CodeMirror measures this box for hit testing. */
+.embed-inline {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 0;
+  line-height: 0;
+  vertical-align: bottom;
+}
+.embed-inline img,
+.embed-inline video {
+  max-width: 100%;
+  max-height: 560px;
+  border-radius: 6px;
+  vertical-align: bottom;
+}
+.cm-content[contenteditable="true"] .embed-inline img {
+  cursor: pointer;
 }
 .unsupported-embed {
   font-size: var(--ui-body-size);
@@ -2064,6 +2313,100 @@ button:hover {
 .mcp-access .field-help {
   margin: 2px 0 0;
 }
+.hidden-media {
+  border-top: 1px solid var(--line);
+  margin: 20px 0 16px;
+  padding-top: 12px;
+}
+.hidden-media-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+}
+.hidden-media-heading h3 {
+  margin: 0;
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-medium);
+}
+.hidden-media .field-help {
+  margin: 2px 0 8px;
+}
+.hidden-media .hidden-media-status {
+  margin-top: 10px;
+}
+.hidden-media .hidden-media-status:empty {
+  display: none;
+}
+.hidden-media-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.hidden-media-item {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-areas: "thumb text action";
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.hidden-media-item:first-child {
+  border-top: 1px solid var(--line);
+}
+.hidden-media-thumb {
+  grid-area: thumb;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  object-fit: cover;
+  border-radius: 5px;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.hidden-media-text {
+  grid-area: text;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.hidden-media-path {
+  font-size: var(--ui-control-size);
+  overflow-wrap: anywhere;
+}
+.hidden-media-reason {
+  color: var(--muted);
+  font-size: var(--ui-meta-size);
+}
+.hidden-media-reason.is-refused {
+  color: var(--syntax-amber);
+}
+.button.hidden-media-action {
+  grid-area: action;
+  height: var(--format-control-height);
+  padding: 0 10px;
+  gap: 6px;
+}
+@media (max-width: 480px) {
+  .hidden-media-item {
+    grid-template-columns: 40px minmax(0, 1fr);
+    grid-template-areas:
+      "thumb text"
+      ". action";
+  }
+  .button.hidden-media-action {
+    justify-self: start;
+  }
+}
+@media (pointer: coarse) {
+  .button.hidden-media-action {
+    height: 40px;
+  }
+}
 .copy-field {
   display: flex;
   align-items: center;
@@ -2306,6 +2649,7 @@ button:hover {
   --fountain-scene: #fffac0;
   --fountain-speaker: #9eb3ca;
   --fountain-parenthetical: #b8a5c0;
+  --float-shadow: 0 10px 30px #0000006b;
   color-scheme: dark;
 }
 .app[data-theme="dark"] {

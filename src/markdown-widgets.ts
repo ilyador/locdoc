@@ -65,29 +65,42 @@ export class TableWidget extends WidgetType {
   }
 }
 
+// Source text reaches the DOM only through properties, never as markup.
+function mediaElement(src: string, alt: string, title: string) {
+  const el = document.createElement(isVideo(src) ? "video" : "img");
+  if (el instanceof HTMLVideoElement) {
+    el.controls = true;
+    el.preload = "metadata";
+    if (alt) el.setAttribute("aria-label", alt);
+  } else {
+    el.alt = alt;
+    el.loading = "lazy";
+    el.draggable = false;
+  }
+  if (title) el.title = title;
+  el.src = src;
+  return el;
+}
+
 export class MediaWidget extends WidgetType {
   constructor(
     readonly src: string,
     readonly alt: string,
+    readonly title = "",
   ) {
     super();
   }
   eq(other: MediaWidget) {
-    return other.src === this.src && other.alt === this.alt;
+    return (
+      other.src === this.src &&
+      other.alt === this.alt &&
+      other.title === this.title
+    );
   }
   toDOM(view: EditorView) {
     const wrap = document.createElement("figure");
     wrap.className = "embed";
-    const el = document.createElement(isVideo(this.src) ? "video" : "img");
-    if (el instanceof HTMLVideoElement) {
-      el.controls = true;
-      el.preload = "metadata";
-    } else {
-      el.alt = this.alt;
-      el.loading = "lazy";
-    }
-    el.src = this.src;
-    wrap.appendChild(el);
+    wrap.appendChild(mediaElement(this.src, this.alt, this.title));
     const edit = document.createElement("button");
     edit.textContent = "Edit Markdown";
     edit.className = "embed-edit";
@@ -97,6 +110,42 @@ export class MediaWidget extends WidgetType {
       view.focus();
     };
     wrap.appendChild(edit);
+    return wrap;
+  }
+  ignoreEvent() {
+    return true;
+  }
+}
+
+// An image or video inside a line of text. Clicking an image in an editable
+// view places the caret at its source, which the preview then reveals.
+export class InlineMediaWidget extends WidgetType {
+  constructor(
+    readonly src: string,
+    readonly alt: string,
+    readonly title = "",
+  ) {
+    super();
+  }
+  eq(other: InlineMediaWidget) {
+    return (
+      other.src === this.src &&
+      other.alt === this.alt &&
+      other.title === this.title
+    );
+  }
+  toDOM(view: EditorView) {
+    const wrap = document.createElement("span");
+    wrap.className = "embed-inline";
+    const media = mediaElement(this.src, this.alt, this.title);
+    wrap.appendChild(media);
+    if (!(media instanceof HTMLVideoElement))
+      wrap.onclick = (event) => {
+        if (view.state.readOnly) return;
+        event.preventDefault();
+        view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
+        view.focus();
+      };
     return wrap;
   }
   ignoreEvent() {

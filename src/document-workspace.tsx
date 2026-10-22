@@ -136,7 +136,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     handledTrash.current = trashEvent.seq;
     if (doc && within(doc.path, trashEvent.item.path)) checkTrashed();
   }, [trashEvent?.seq]);
-  const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
+  const format = documentFormat(doc?.path);
+  const appearance = workspace.appearance.forFormat(format);
   const {
     font,
     fontSize,
@@ -157,7 +158,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
   const closeLink = useCallback(() => setLinkTarget(null), []);
   const startLink = () => {
-    if (!doc?.edit) return;
+    if (!doc?.edit || documentFormat(doc.path) !== "markdown") return;
     setLinkSelection(editor.current?.selection() || null);
     setLinkTarget(null);
     setPanel("link");
@@ -273,12 +274,13 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const toggleAppearance = () =>
     setPanel((current) => (current === "appearance" ? null : "appearance"));
   const filename = path ? documentName(path) : "Your workspace";
-  const fountain = documentFormat(doc?.path) === "fountain";
+  // Only Markdown can hold links, images and videos.
+  const markdown = format === "markdown";
   const formattingTools = (expanded = false) =>
     doc && (
       <FormattingTools
         expanded={expanded}
-        fountain={fountain}
+        format={format}
         editable={doc.edit}
         busy={busy}
         onEdit={(command) => {
@@ -364,7 +366,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           {doc && (
             <DocumentFormatbar
               editable={doc.edit}
-              fountain={fountain}
+              format={format}
               font={font}
               fontSize={fontSize}
               setFontSize={setFontSize}
@@ -428,16 +430,16 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         path={doc.path}
                         entries={entries}
                         onLink={setLinkTarget}
-                        onInsertLink={fountain ? undefined : startLink}
+                        onInsertLink={markdown ? startLink : undefined}
                         onIntegrityError={setError}
                         onComment={thread.start}
                         onUpload={
-                          fountain
-                            ? () =>
+                          markdown
+                            ? upload
+                            : () =>
                                 tell(
                                   "Use a Markdown document for images and videos.",
                                 )
-                            : upload
                         }
                         comments={comments}
                         activeComment={currentComment?.id}
@@ -570,7 +572,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               {panel === "document" && doc && (
                 <DocumentOptions
                   doc={doc}
-                  fountain={fountain}
+                  format={format}
                   endpoint={endpoint()}
                   formatting={formattingTools(true)}
                   onDownload={() => {

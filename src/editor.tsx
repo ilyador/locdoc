@@ -11,7 +11,7 @@ import { createPortal } from "react-dom";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, drawSelection } from "@codemirror/view";
 import { defaultKeymap, indentWithTab } from "@codemirror/commands";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { highlightSelectionMatches } from "@codemirror/search";
 import { yCollab } from "y-codemirror.next";
 import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
@@ -38,6 +38,7 @@ import {
   readOnlyInputGuard,
 } from "./editor-permissions";
 import { rememberEditorScroll } from "./editor-scroll";
+import { findExtension, findKeymap } from "./find-panel";
 import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
 import { toggleInlineFormat } from "./inline-format";
 import { lineBackspaceIntent } from "./line-backspace";
@@ -132,6 +133,9 @@ export const MarkdownEditor = forwardRef<
         ? v
         : null;
     };
+    // Plain text has no Markdown or screenplay syntax to insert.
+    const formatted = () =>
+      documentFormat(path) === "text" ? null : writable();
     return {
       formatFountain(kind) {
         const v = writable();
@@ -139,11 +143,11 @@ export const MarkdownEditor = forwardRef<
           formatFountainLine(v, kind);
       },
       insertLink(url, label, anchor) {
-        const v = writable();
+        const v = formatted();
         if (v && anchor) insertDocumentLink(v, ydoc, url, label, anchor);
       },
       toggleTasks() {
-        const v = writable();
+        const v = formatted();
         if (v) toggleTaskList(v);
       },
       insert(text) {
@@ -151,11 +155,11 @@ export const MarkdownEditor = forwardRef<
         if (v) insertText(v, text);
       },
       insertTable(rows, columns) {
-        const v = writable();
+        const v = formatted();
         if (v) insertMarkdownTable(v, rows, columns);
       },
       wrap(before, after = "") {
-        const v = writable();
+        const v = formatted();
         if (!v) return;
         if (
           before === after &&
@@ -213,6 +217,7 @@ export const MarkdownEditor = forwardRef<
         doc: source,
         extensions: [
           EditorState.lineSeparator.of("\n"),
+          EditorState.allowMultipleSelections.of(true),
           integrity.current.of(integrityAccess()),
           canonicalLineEndings,
           sourceCommentLayer,
@@ -221,6 +226,7 @@ export const MarkdownEditor = forwardRef<
           EditorView.lineWrapping,
           drawSelection(),
           highlightSelectionMatches(),
+          findExtension(),
           layer.extension,
           access.current.of(editorAccess(editable)),
           preview.current.of(documentPreview(id, token, path, entries)),
@@ -244,7 +250,7 @@ export const MarkdownEditor = forwardRef<
             },
             ...guardedUndoKeymap,
             ...defaultKeymap,
-            ...searchKeymap,
+            ...findKeymap,
             indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
@@ -324,7 +330,7 @@ export const MarkdownEditor = forwardRef<
     return () => observer.disconnect();
   }, [commentHost]);
   const previewEntries =
-    documentFormat(path) === "fountain" ? undefined : entries;
+    documentFormat(path) === "markdown" ? entries : undefined;
   useEffect(() => {
     view.current?.dispatch({
       effects: preview.current.reconfigure(

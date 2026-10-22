@@ -1,3 +1,4 @@
+import type { DocumentFormat } from "./document-format";
 import type { Anchor } from "./editor-types";
 
 export type Entry = {
@@ -8,7 +9,7 @@ export type Entry = {
   modified?: number;
   title?: string;
   url?: string;
-  format?: "markdown" | "fountain" | "text";
+  format?: DocumentFormat;
 };
 // A document or folder in Locdoc's trash. `deleted` is in seconds.
 export type TrashItem = {
@@ -18,6 +19,8 @@ export type TrashItem = {
   deleted: number;
   documents: number;
 };
+// A media reference the owner sees but link visitors cannot.
+export type HiddenMedia = { path: string; reason: "unapproved" | "missing" };
 export type Document = {
   id: string;
   path: string;
@@ -35,6 +38,7 @@ export type Document = {
   lineEndingMigrated?: boolean;
   collaborationEpoch?: string;
   mediaToken?: string | null;
+  hiddenMedia?: HiddenMedia[];
 };
 export type Config = {
   owner: boolean;

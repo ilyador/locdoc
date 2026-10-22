@@ -17,6 +17,7 @@ import {
 import { syntaxTree } from "@codemirror/language";
 import type { Anchor } from "./editor-types";
 import { sourceComments } from "./comment-syntax";
+import { mediaPreview, wholeLineImage } from "./markdown-media";
 
 // Source records stay editable on disk, while the writing surface shows only
 // their passage marker and conversation. Atomic ranges keep cursors out of them.
@@ -281,7 +282,7 @@ function commentPosition(state: EditorState, offset: number) {
       return { pos: state.doc.lineAt(node.to).to, block: true };
   }
   const line = state.doc.lineAt(pos);
-  if (/^!\[([^\]]*)\]\((?:<([^>]+)>|([^\s)]+))\)\s*$/.test(line.text))
+  if (state.facet(mediaPreview) && wholeLineImage(line.text))
     return { pos: line.to, block: true };
   return { pos, block: false };
 }

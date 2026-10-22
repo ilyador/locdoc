@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
+import { isDocumentPath } from "./document-format";
 import { archiveOwnerDrafts, type DraftArchive } from "./drafts";
 import { recoveredSource, type RemovedRecovery } from "./removed-recovery";
 import { useRemote } from "./use-remote";
@@ -71,7 +72,7 @@ export function RemovedDocumentRecovery() {
       link.href = url;
       link.download = archive
         ? `${name}.recovery.json`
-        : /\.(md|fountain)$/i.test(name)
+        : isDocumentPath(name)
           ? name
           : `${name}.txt`;
       link.click();

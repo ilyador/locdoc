@@ -7,7 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type * as Y from "yjs";
 import { countDocumentWords } from "./word-count";
-import { documentFormat } from "./document-format";
+import { documentFormat, formatLabel } from "./document-format";
 import type { Document } from "./model";
 
 export function DocumentWordMetrics({
@@ -83,7 +83,7 @@ export function DocumentFooter({
     footerStatus.startsWith("Offline") ||
     footerStatus === "Recovery needed" ||
     footerStatus === "Unable to open document";
-  const fountain = documentFormat(doc?.path) === "fountain";
+  const format = documentFormat(doc?.path);
   return (
     <footer className="statusbar">
       <div
@@ -112,15 +112,15 @@ export function DocumentFooter({
             initial={doc.content}
             path={doc.path}
           />
-          <span
-            className="attachment-usage"
-            title="Attachment storage, including uploaded files awaiting insertion"
-          >
-            {(doc.usage / 1e6).toFixed(1)} / 50 MB
-          </span>
-          <span className="markdown-tag">
-            {fountain ? "Fountain" : "Markdown"}
-          </span>
+          {format !== "text" && (
+            <span
+              className="attachment-usage"
+              title="Attachment storage, including uploaded files awaiting insertion"
+            >
+              {(doc.usage / 1e6).toFixed(1)} / 50 MB
+            </span>
+          )}
+          <span className="markdown-tag">{formatLabel(format)}</span>
         </div>
       )}
     </footer>
