@@ -472,15 +472,18 @@ impl Store {
     fn grant_new_references(&self, d: &Document, before: &str, after: &str) -> Result<()> {
         let previous = Self::media_references(d, before);
         let current = Self::media_references(d, after);
-        self.grant_references(d, current.difference(&previous))
+        self.grant_references(d, current.difference(&previous))?;
+        Ok(())
     }
+    /// Approves the references a desktop save adds, and says whether it
+    /// approved any.
     fn grant_desktop_references(
         &self,
         d: &Document,
         baseline: &str,
         live: &str,
         after: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let previous = Self::media_references(d, baseline);
         let existing = Self::media_references(d, live);
         let current = Self::media_references(d, after);
@@ -497,11 +500,12 @@ impl Store {
         &self,
         d: &Document,
         references: impl Iterator<Item = &'a String>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // A move later checks whether each approved file moved with it.
         let approved: Vec<_> = references
             .map(|reference| (reference, self.media_identity(&d.path, reference)))
             .collect();
+        let any = !approved.is_empty();
         let db = self.db.lock().unwrap();
         for (reference, identity) in approved {
             db.execute(
@@ -516,7 +520,7 @@ impl Store {
                 params![d.id, reference, identity.as_ref().map(namespace::Identity::as_str)],
             )?;
         }
-        Ok(())
+        Ok(any)
     }
     /// References in `content` whose file this document may already serve.
     /// A restore uses this to re-activate approved media without turning an

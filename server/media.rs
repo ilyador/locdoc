@@ -1010,6 +1010,59 @@ mod tests {
     }
 
     #[test]
+    fn approvals_tell_every_open_view_to_request_its_media_again() {
+        let (_dir, s) = store();
+        let png = BASE64.decode(PNG).unwrap();
+        fs::create_dir_all(s.root.join("Notes")).unwrap();
+        for path in ["Notes/photo.png", "Notes/other.png"] {
+            fs::write(s.root.join(path), &png).unwrap();
+        }
+        fs::write(s.root.join("Notes/page.md"), "# Page\n").unwrap();
+        let d = s.index_document("Notes/page.md").unwrap();
+        let d = link(&s, &d, "page-link");
+        let room = s.room(&d).unwrap();
+        // Typed in the owner's browser, so link visitors cannot see it.
+        let typed = peer_update(&room, "![photo](./photo.png) ![other](other.png)\n");
+        process_frame(&s, &d, &room, &typed, true, true, &mut Peer::default()).unwrap();
+        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+        // Every socket of the document, owner and visitors alike, hears the
+        // room; the signal is the bare message code.
+        let mut events = room.lock().unwrap().tx.subscribe();
+        let signal = Message::Custom(engine::MEDIA_APPROVED, Vec::new()).encode_v1();
+        let mut signals = || {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|frame| *frame == signal)
+                .count()
+        };
+        let visitor = |path: &str| served(&s, &d, path, Some("page-link"), &HeaderMap::new());
+        assert_eq!(visitor("./photo.png"), StatusCode::FORBIDDEN);
+        // A desktop save that approves nothing says nothing.
+        let text = room_text(&room.lock().unwrap());
+        fs::write(s.root.join("Notes/page.md"), format!("{text}More\n")).unwrap();
+        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(signals(), 0);
+        // One naming that file another way approves it for the spelling
+        // visitors already failed to load.
+        let text = room_text(&room.lock().unwrap());
+        fs::write(
+            s.root.join("Notes/page.md"),
+            format!("{text}![again](photo.png)\n"),
+        )
+        .unwrap();
+        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(signals(), 1, "a desktop approval");
+        assert_eq!(visitor("./photo.png"), StatusCode::OK);
+        // So does Show to link visitors, once it approves something.
+        let mut room = room.lock().unwrap();
+        room.share_media(&s, &d, &["gone.png".into()]).unwrap();
+        assert_eq!(signals(), 0);
+        room.share_media(&s, &d, &["other.png".into()]).unwrap();
+        drop(room);
+        assert_eq!(signals(), 1, "Show to link visitors");
+        assert_eq!(visitor("other.png"), StatusCode::OK);
+    }
+
+    #[test]
     fn no_approval_shows_link_visitors_a_file_in_a_hidden_folder() {
         let (_dir, s) = store();
         let png = BASE64.decode(PNG).unwrap();
