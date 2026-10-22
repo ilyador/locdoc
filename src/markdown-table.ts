@@ -1,7 +1,9 @@
 export type TableCell = { text: string; from: number; to: number };
 export type MarkdownTable = {
   rows: TableCell[][];
-  align: ("left" | "center" | "right")[];
+  // A column without colons starts where each cell's text starts: at the
+  // right in a Hebrew cell. Colons ask for an edge or the center.
+  align: ("start" | "left" | "center" | "right")[];
 };
 
 // Retain source offsets so a preview cell opens at the right Markdown position.
@@ -48,12 +50,14 @@ export function parseMarkdownTable(
     !separator.every((cell) => /^:?-+:?$/.test(cell.text))
   )
     return null;
-  const align = separator.map((cell): "left" | "center" | "right" =>
+  const align = separator.map((cell): MarkdownTable["align"][number] =>
     cell.text.endsWith(":")
       ? cell.text.startsWith(":")
         ? "center"
         : "right"
-      : "left",
+      : cell.text.startsWith(":")
+        ? "left"
+        : "start",
   );
   const rows = [header];
   let start = offset + lines[0].length + lines[1].length + 2;

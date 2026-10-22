@@ -31,6 +31,7 @@ import {
 } from "./markdown-widgets";
 import { mediaPreview, previewedImage } from "./markdown-media";
 import { plainTextSupport } from "./plain-text";
+import { directionSyntax, markdownDirectionSyntax } from "./text-direction";
 import type { Entry } from "./model";
 
 // Solarized II, from the owner's Ulysses theme. Dark variants keep its hues
@@ -432,6 +433,7 @@ function previewLines(state: EditorState) {
 const markdownSupport = [
   markdown({ base: markdownLanguage, extensions: [commentMarkdown] }),
   syntaxHighlighting(writingHighlight),
+  directionSyntax.of(markdownDirectionSyntax),
 ];
 
 export function documentPreview(

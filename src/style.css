@@ -1030,7 +1030,7 @@ button:hover {
   color: var(--fountain-parenthetical);
 }
 .fountain-transition > .cm-line {
-  text-align: right;
+  text-align: end;
   text-transform: uppercase;
   color: var(--secondary);
 }
@@ -1673,8 +1673,8 @@ button:hover {
   color: var(--syntax-teal);
   font-style: italic;
   background: color-mix(in srgb, var(--syntax-teal) 5%, var(--surface));
-  padding-left: 14px !important;
-  border-left: 1px solid var(--syntax-teal);
+  padding-inline-start: 14px !important;
+  border-inline-start: 1px solid var(--syntax-teal);
 }
 .md-list > .cm-line.md-quote {
   padding-inline-start: calc(14px + var(--list-indent)) !important;
@@ -1738,7 +1738,7 @@ button:hover {
 .embed-edit {
   position: absolute;
   top: 21px;
-  right: 9px;
+  inset-inline-end: 9px;
   background: var(--surface);
   font:
     0.8125rem "IBM Plex Sans",
@@ -1875,7 +1875,7 @@ button:hover {
 }
 .comment-marker-block .comment-marker {
   position: absolute;
-  right: 0;
+  inset-inline-end: 0;
   bottom: 2px;
 }
 .inline-comment-host {
@@ -3060,7 +3060,8 @@ button:hover {
   justify-content: center;
   width: 24px;
   height: 24px;
-  margin: 0 7px 0 -3px;
+  margin-block: 0;
+  margin-inline: -3px 7px;
   vertical-align: -5px;
   cursor: pointer;
 }

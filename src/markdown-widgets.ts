@@ -1,6 +1,7 @@
 import { Facet } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
 import { parseMarkdownTable } from "./markdown-table";
+import { isolate, textDirection } from "./bidi";
 
 export function mediaUrl(id: string, path: string, token?: string) {
   return `/api/docs/${id}/media?${new URLSearchParams({ path, ...(token ? { token } : {}) })}`;
@@ -24,6 +25,12 @@ export class TableWidget extends WidgetType {
     wrap.className = "md-table-preview";
     const data = parseMarkdownTable(this.source, 0);
     if (!data) return wrap;
+    // A table whose text starts in Hebrew runs its columns from the right and
+    // scrolls from there. Each cell reads in its own direction.
+    const direction = textDirection(
+      data.rows.flatMap((row) => row.map((cell) => cell.text)).join(" "),
+    );
+    if (direction) wrap.dir = direction;
     const table = document.createElement("table");
     table.setAttribute("aria-label", "Document table");
     const head = document.createElement("thead");
@@ -32,6 +39,8 @@ export class TableWidget extends WidgetType {
       const tr = document.createElement("tr");
       row.forEach((cell, columnIndex) => {
         const td = document.createElement(rowIndex === 0 ? "th" : "td");
+        const own = textDirection(cell.text);
+        if (own) td.dir = own;
         td.style.textAlign = data.align[columnIndex];
         if (this.editable) {
           const edit = document.createElement("button");
@@ -128,8 +137,10 @@ function describeUnavailable(
       : unavailable,
   );
   holder.title = unavailable;
+  // The description keeps its own direction beside the interface's reason.
+  const description = isolate(alt);
   holder.lastElementChild!.textContent =
-    alt && why ? `${alt} · ${why}` : alt || why || unavailable;
+    alt && why ? `${description} · ${why}` : description || why || unavailable;
 }
 
 // The placeholder of each medium a view could not load, with how to request
@@ -218,6 +229,8 @@ export class MediaWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = document.createElement("figure");
     wrap.className = "embed";
+    // A Hebrew description puts Edit Markdown at the figure's left edge.
+    if (textDirection(this.alt) === "rtl") wrap.dir = "rtl";
     wrap.appendChild(
       mediaElement(
         this.src,

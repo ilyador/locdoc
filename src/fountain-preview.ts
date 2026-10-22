@@ -9,6 +9,7 @@ import { commentParser } from "./comment-syntax";
 import { sourceCommentRanges, visibleTextRanges } from "./editor-comments";
 import { parseFountain, type FountainScript } from "./fountain";
 import { emphasisContentRange } from "./emphasis-range";
+import { directionSyntax } from "./text-direction";
 
 // Reuse the established delimiter parser, with Fountain's underscore semantics.
 // Prefixing each isolated line prevents Markdown block rules from reclassifying it.
@@ -203,5 +204,10 @@ export function fountainPreview() {
   return [
     field,
     EditorView.focusChangeEffect.of((_state, focused) => focus.of(focused)),
+    // A title page key, such as Title:, is hidden like the other markers.
+    directionSyntax.of(
+      (state, line) =>
+        state.facet(fountainScript)?.lines[line.number - 1]?.markers ?? [],
+    ),
   ];
 }

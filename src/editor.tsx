@@ -50,6 +50,7 @@ import {
 import { documentPreview } from "./markdown-preview";
 import { explainMedia, retryUnavailableMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
+import { perLineDirection } from "./text-direction";
 import type { Comment, Entry } from "./model";
 
 export const MarkdownEditor = forwardRef<
@@ -232,6 +233,7 @@ export const MarkdownEditor = forwardRef<
           lineBackspaceIntent(),
           readOnlyInputGuard,
           EditorView.lineWrapping,
+          perLineDirection,
           drawSelection(),
           highlightSelectionMatches(),
           findExtension(),
