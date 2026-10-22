@@ -2316,16 +2316,18 @@ impl Store {
     }
 
     pub(super) fn rename_document(&self, id: &str, input: &str) -> Result<()> {
-        self.rename_document_checked(id, input, |_, _| Ok(()))
+        self.rename_document_checked(id, input, |_, _| Ok(()), &|_| true)
     }
 
     /// Recheck scoped callers after filesystem discovery and under the same
-    /// namespace lock as folder opt-ins and the move itself.
+    /// namespace lock as folder opt-ins and the move itself. A refusal names
+    /// only folders `visible` accepts.
     pub(super) fn rename_document_checked(
         &self,
         id: &str,
         input: &str,
         authorize: impl FnOnce(&Document, &str) -> Result<()>,
+        visible: &dyn Fn(&str) -> bool,
     ) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         self.finish_pending_path(&self.doc(id)?.path)?;
@@ -2375,7 +2377,8 @@ impl Store {
         // A previous document whose file was found elsewhere follows it once
         // a pass can place it; its name is not free yet.
         if let Some(previous) = previous
-            && (unplaced.contains(&previous) || !self.retire_missing_identity(&previous, &dest)?)
+            && (unplaced.contains(&previous)
+                || !self.retire_missing_identity(&previous, &dest, visible)?)
         {
             return Err(ApiError(
                 StatusCode::CONFLICT,
@@ -2682,8 +2685,15 @@ impl Store {
     /// restore. Preserve the final accepted room before revoking identity,
     /// with one lock order. A missing document an incomplete walk holds
     /// never retires here: a folder that walk could not list may hide its
-    /// file, so the reuse is refused until a walk can list it.
-    pub(super) fn retire_missing_identity(&self, id: &str, path: &Path) -> Result<bool> {
+    /// file, so the reuse is refused until a walk can list it. The refusal
+    /// names that folder only when `visible` accepts its path: a folder
+    /// the caller may use.
+    pub(super) fn retire_missing_identity(
+        &self,
+        id: &str,
+        path: &Path,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<bool> {
         let room = self.rooms.lock().unwrap().get(id).cloned();
         let mut live = if let Some(room) = &room {
             // A busy missing file must not delay unrelated documents' saves.
@@ -2709,13 +2719,19 @@ impl Store {
                 }
                 _ => "the documents folder".into(),
             };
-            let (path, folder) = (name(path), name(&folder));
-            return Err(ApiError(
-                StatusCode::CONFLICT,
+            let path = name(path);
+            let relative = folder.strip_prefix(&self.root).unwrap_or(Path::new(""));
+            let message = if visible(&relative.to_string_lossy()) {
+                let folder = name(&folder);
                 format!(
                     "{path} still belongs to a document whose file may be in {folder}, which Locdoc cannot read. Make {folder} readable for Locdoc, then try again."
-                ),
-            ));
+                )
+            } else {
+                format!(
+                    "{path} still belongs to a document whose file may be in a folder Locdoc cannot read. Choose another path, or try again once the owner has made that folder readable for Locdoc."
+                )
+            };
+            return Err(ApiError(StatusCode::CONFLICT, message));
         }
         if let Some(room) = live.as_mut() {
             self.preserve_for_retirement(id, room)?;
@@ -3797,8 +3813,9 @@ impl Store {
     fn free_rows_below(&self, folder: &str, unplaced: &HashSet<String>) -> Result<()> {
         for document in self.documents_below(folder)? {
             let full = self.safe(&document.path, false)?;
+            // Only the owner moves folders and restores items.
             if unplaced.contains(&document.id)
-                || !self.retire_missing_identity(&document.id, &full)?
+                || !self.retire_missing_identity(&document.id, &full, &|_| true)?
             {
                 return Err(busy_entry());
             }

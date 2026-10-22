@@ -782,7 +782,9 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
                         Ok(json!({"path":path,"kind":"folder"}))
                     }
                     Kind::File => {
-                        let d = s.create_document(&path)?;
+                        let d = s.create_document_scoped(&path, &|folder| {
+                            mcp_access::require_folder(s, folder).is_ok()
+                        })?;
                         let format = documents::format(&d.path).map(|f| f.name());
                         Ok(json!({"id":d.id,"path":d.path,"kind":"file","format":format}))
                     }
@@ -807,14 +809,19 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
         "rename_document" => {
             let b: Renaming = arguments(input)?;
             document_job(s, grant, b.doc_id.clone(), required, move |s, d| {
-                s.rename_document_checked(&d.id, &b.path, |current, path| {
-                    mcp_access::require_document(s, current)?;
-                    let parent = Path::new(path).parent().unwrap();
-                    if parent != Path::new(&current.path).parent().unwrap() {
-                        mcp_access::require_folder(s, &parent.to_string_lossy())?;
-                    }
-                    Ok(())
-                })?;
+                s.rename_document_checked(
+                    &d.id,
+                    &b.path,
+                    |current, path| {
+                        mcp_access::require_document(s, current)?;
+                        let parent = Path::new(path).parent().unwrap();
+                        if parent != Path::new(&current.path).parent().unwrap() {
+                            mcp_access::require_folder(s, &parent.to_string_lossy())?;
+                        }
+                        Ok(())
+                    },
+                    &|folder| mcp_access::require_folder(s, folder).is_ok(),
+                )?;
                 Ok(json!({"ok":true}))
             })
             .await
@@ -1638,6 +1645,73 @@ mod tests {
         assert_eq!(
             read["content"],
             "Oat milk\n![receipt](_attachments/photo.png)\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_path_never_names_a_folder_the_connector_cannot_use() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (_dir, s, _d) = fixture();
+        s.create_folder("Shared").unwrap();
+        s.create_folder("Private/Taxes 2026").unwrap();
+        let identity = folders::directory_identity(&s, "Shared").unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO mcp_folders(path,identity) VALUES('Shared',?)",
+                [identity],
+            )
+            .unwrap();
+        s.create_document("Shared/held.md").unwrap();
+        let other = s.create_document("Shared/other.md").unwrap();
+        // Its file moves into a folder Locdoc can enter but not list, so a
+        // settled pass holds the document at its path.
+        fs::rename(
+            s.root.join("Shared/held.md"),
+            s.root.join("Private/Taxes 2026/held.md"),
+        )
+        .unwrap();
+        let hidden = s.root.join("Private/Taxes 2026");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o300)).unwrap();
+        let passed = s.retire_missing_documents();
+        let all = access(&["locdoc:read", "locdoc:write"]);
+        let run = |name: &'static str, input: Value| execute(s.clone(), all.clone(), name, input);
+        let created = run(
+            "create_document",
+            json!({"path": "Shared/held.md", "kind": "file"}),
+        )
+        .await;
+        let renamed = run(
+            "rename_document",
+            json!({"doc_id": other.id, "path": "Shared/held.md"}),
+        )
+        .await;
+        let owner = s.create_document("Shared/held.md");
+        fs::set_permissions(&hidden, fs::Permissions::from_mode(0o700)).unwrap();
+        passed.unwrap();
+        for (what, result) in [("create", created), ("rename", renamed)] {
+            let error = result.unwrap_err();
+            assert_eq!(error.0, StatusCode::CONFLICT, "{what}: {}", error.1);
+            assert!(
+                error
+                    .1
+                    .starts_with("Shared/held.md still belongs to a document")
+                    && !error.1.contains("Private")
+                    && !error.1.contains("Taxes"),
+                "{what}: {}",
+                error.1
+            );
+        }
+        // The owner learns which folder to make readable.
+        let error = owner.unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT, "{}", error.1);
+        assert!(
+            error.1.contains("may be in Private/Taxes 2026"),
+            "{}",
+            error.1
         );
     }
 }

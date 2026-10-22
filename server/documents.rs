@@ -400,6 +400,16 @@ impl Store {
     }
 
     pub(super) fn create_document(&self, input: &str) -> Result<Document> {
+        self.create_document_scoped(input, &|_| true)
+    }
+
+    /// `create_document` for a caller that may use only the folders
+    /// `visible` accepts, as an MCP connection: a refusal names no other.
+    pub(super) fn create_document_scoped(
+        &self,
+        input: &str,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<Document> {
         use std::io::Write;
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
@@ -415,7 +425,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        self.free_document_path(&path, &full)?;
+        self.free_document_path(&path, &full, visible)?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -469,8 +479,13 @@ impl Store {
     /// Explicit creation reuses a path still recorded for a document only
     /// once that document's file is known to be gone. One whose file was
     /// found elsewhere follows it once a pass can place it; its name is not
-    /// free yet.
-    fn free_document_path(&self, path: &str, full: &Path) -> Result<()> {
+    /// free yet. A refusal names only folders `visible` accepts.
+    fn free_document_path(
+        &self,
+        path: &str,
+        full: &Path,
+        visible: &dyn Fn(&str) -> bool,
+    ) -> Result<()> {
         let previous = self
             .db
             .lock()
@@ -485,7 +500,7 @@ impl Store {
             let unplaced = self.discover_file_moves_locked()?;
             if self.doc(&previous)?.path == path
                 && (unplaced.contains(&previous)
-                    || !self.retire_missing_identity(&previous, full)?)
+                    || !self.retire_missing_identity(&previous, full, visible)?)
             {
                 return Err(ApiError(
                     StatusCode::CONFLICT,
@@ -530,7 +545,8 @@ impl Store {
             Err(error) => return Err(error.into()),
         }
         fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
-        self.free_document_path(&path, &full)?;
+        // Only the owner duplicates documents.
+        self.free_document_path(&path, &full, &|_| true)?;
         let ending = text::uniform(ending);
         let doc = Doc::with_options(Options {
             offset_kind: OffsetKind::Utf16,
