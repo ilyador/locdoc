@@ -1575,7 +1575,8 @@ mod tests {
     #[tokio::test]
     async fn connectors_list_create_read_search_edit_and_move_plain_text() {
         let (_dir, s, _d) = fixture();
-        s.create_folder("Notes").unwrap();
+        s.create_folder("Notes/_attachments").unwrap();
+        fs::write(s.root.join("Notes/_attachments/photo.png"), b"image").unwrap();
         let identity = folders::directory_identity(&s, "Notes").unwrap();
         s.db.lock()
             .unwrap()
@@ -1598,6 +1599,7 @@ mod tests {
             .await
             .unwrap();
         let entries = listed["entries"].as_array().unwrap();
+        // The attachment folder holds no document, so it stays out of view.
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert_eq!(entries[0]["path"], "Notes/list.txt");
         assert_eq!(entries[0]["format"], "text");
