@@ -39,8 +39,8 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
-  // Where the list was scrolled, kept by the workspace while this sidebar
-  // mounts again for each document.
+  // Where each view's list was scrolled, kept by the workspace while this
+  // sidebar mounts again for each document.
   scroll?: SidebarScroll;
   expanded: Set<string>;
   toggleFolder: (path: string) => void;
@@ -55,19 +55,29 @@ export function DocumentSidebar({
 }) {
   const tabId = useId();
   const panel = useRef<HTMLDivElement>(null);
+  const own = useRef<SidebarScroll>({ date: 0, folders: 0 }).current;
+  const places = scroll ?? own;
   // The view the list shows, whose position it keeps.
   const shown = useRef(view);
+  // Each view returns to its own position. A row or name field that has
+  // focus, such as a new folder's name, stays in sight.
   useLayoutEffect(() => {
+    if (shown.current === view) return;
     shown.current = view;
+    const list = panel.current!;
+    list.scrollTop = places[view];
+    const focused = document.activeElement;
+    if (focused && focused !== list && list.contains(focused))
+      focused.scrollIntoView?.({ block: "nearest" });
   }, [view]);
   // Each document's workspace mounts this sidebar again. The list takes its
   // position back before it paints and keeps it as it goes, so opening a
   // document leaves the list where it was.
   useLayoutEffect(() => {
     const list = panel.current!;
-    if (scroll) list.scrollTop = scroll[shown.current];
+    list.scrollTop = places[shown.current];
     return () => {
-      if (scroll) scroll[shown.current] = list.scrollTop;
+      places[shown.current] = list.scrollTop;
     };
   }, []);
   // Search reveals matches inside closed folders without changing the normal tree.
@@ -208,6 +218,9 @@ export function DocumentSidebar({
         id={`${tabId}-panel`}
         aria-labelledby={`${tabId}-${view}`}
         tabIndex={rows.length ? undefined : 0}
+        onScroll={(event) => {
+          places[shown.current] = event.currentTarget.scrollTop;
+        }}
       >
         <nav
           aria-label={view === "date" ? "Recent documents" : "Document folders"}

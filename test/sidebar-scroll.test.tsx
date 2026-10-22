@@ -176,3 +176,55 @@ test("on a narrow screen the sidebar closes after a choice and opens again where
   assert.equal(document.querySelector(".sidebar")!.classList.contains("is-open"), true);
   assert.equal(list().scrollTop, 1260, "It opens where the list was");
 });
+
+test("By date and Folders each return to their own place, also after a document opens", async () => {
+  await open("date", "Doc 47.md");
+  // The browser reports every scroll, including those of the keyboard.
+  const scrollTo = (top: number) => {
+    list().scrollTop = top;
+    fireEvent.scroll(list());
+  };
+  scrollTo(840);
+  fireEvent.click(screen.getByRole("tab", { name: "Folders" }));
+  assert.equal(list().scrollTop, 0, "Folders starts at its own top");
+  scrollTo(126);
+  fireEvent.click(screen.getByRole("tab", { name: "By date" }));
+  assert.equal(list().scrollTop, 840, "By date returns to where it was");
+  fireEvent.click(row("Doc 30.md"));
+  await opened("Doc 30.md");
+  assert.equal(list().scrollTop, 840);
+  fireEvent.click(screen.getByRole("tab", { name: "Folders" }));
+  assert.equal(list().scrollTop, 126, "Folders kept its place meanwhile");
+});
+
+test("a new folder's name field stays in sight when it brings up Folders", async () => {
+  // Rows are 42px tall in a 420px list; scrolling an element into view moves
+  // the list as little as it must, like the browser's block: "nearest".
+  const prototype = window.Element.prototype as any;
+  const native = prototype.scrollIntoView;
+  prototype.scrollIntoView = function () {
+    const list = this.closest(".file-tree");
+    const item = this.closest('[role="treeitem"]');
+    if (!list || !item) return;
+    const top = [...list.querySelectorAll('[role="treeitem"]')].indexOf(item) * 42;
+    if (top < list.scrollTop) list.scrollTop = top;
+    else if (top + 42 > list.scrollTop + 420) list.scrollTop = top + 42 - 420;
+  };
+  try {
+    await open("date", "Doc 47.md");
+    fireEvent.click(screen.getByRole("tab", { name: "Folders" }));
+    list().scrollTop = 1260;
+    fireEvent.scroll(list());
+    fireEvent.click(screen.getByRole("tab", { name: "By date" }));
+    fireEvent.click(screen.getByRole("button", { name: "New folder" }));
+    const field = screen.getByRole("textbox", { name: "New folder name" });
+    assert.ok(document.activeElement === field, "The name field takes focus");
+    assert.equal(
+      screen.getByRole("tab", { name: "Folders" }).getAttribute("aria-selected"),
+      "true",
+    );
+    assert.equal(list().scrollTop, 0, "Folders shows the field at its top");
+  } finally {
+    prototype.scrollIntoView = native;
+  }
+});
