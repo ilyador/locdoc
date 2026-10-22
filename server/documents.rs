@@ -333,6 +333,7 @@ impl Store {
     pub(super) fn create_folder(&self, input: &str) -> Result<()> {
         let _files = self.document_files.lock().unwrap();
         let path = self.safe(input, false)?;
+        self.not_into_state(&path)?;
         if path.exists() {
             return Err(bad("A file or folder with this name already exists."));
         }
@@ -353,6 +354,26 @@ impl Store {
             }
         }
         Ok(path)
+    }
+
+    /// Whether `path` is the state folder or inside it, for a state folder
+    /// kept inside the documents folder. Like Locdoc's trash it is no part
+    /// of the namespace: walks, listings, folder links, MCP and media never
+    /// enter it. A documents folder kept inside the state folder holds none
+    /// of the state's own files.
+    pub(super) fn in_state(&self, path: &Path) -> bool {
+        self.data != self.root && self.data.starts_with(&self.root) && path.starts_with(&self.data)
+    }
+
+    /// No document or folder is created, renamed, moved, restored or
+    /// duplicated at `path` inside the state folder.
+    pub(super) fn not_into_state(&self, path: &Path) -> Result<()> {
+        if self.in_state(path) {
+            return Err(bad(
+                "Locdoc keeps its own state in that folder. Choose another destination.",
+            ));
+        }
+        Ok(())
     }
 
     pub(super) fn doc(&self, id: &str) -> Result<Document> {
@@ -387,6 +408,7 @@ impl Store {
             return Err(bad(FORMATS));
         };
         let full = self.safe(&path, false)?;
+        self.not_into_state(&full)?;
         fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
         match fs::symlink_metadata(&full) {
             Ok(_) => return Err(bad("A file or folder with this name already exists.")),
@@ -497,6 +519,7 @@ impl Store {
             return Err(bad(FORMATS));
         }
         let full = self.safe(&path, false)?;
+        self.not_into_state(&full)?;
         let taken = || ApiError(StatusCode::CONFLICT, "That path already exists.".into());
         match fs::symlink_metadata(&full) {
             Ok(_) => return Err(taken()),

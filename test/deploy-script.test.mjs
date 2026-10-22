@@ -235,6 +235,79 @@ test("rollback to the adopted release warns about MCP connections, and restore r
   }
 });
 
+test("rollback to a release that predates the trash warns how many deleted items wait for a roll forward", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
+  try {
+    const { releases, run, current } = await fixture(root);
+    const older = "20260101T000000Z-aaaaaaaaaaaa";
+    const newer = "20260102T000000Z-bbbbbbbbbbbb";
+    // A build of a commit with the trash names its folder.
+    const build = async (name, kind, trash) => {
+      const binary = `#!/bin/sh\n${trash ? "# .locdoc-trash\n" : ""}echo ${name}\n`;
+      await writeFile(join(releases, name, "locdoc"), binary, { mode: 0o700 });
+      const manifest = join(releases, name, "manifest.json");
+      const recorded = JSON.parse(await readFile(manifest, "utf8"));
+      await writeFile(
+        manifest,
+        JSON.stringify({
+          ...recorded,
+          kind,
+          binary_sha256: createHash("sha256").update(binary).digest("hex"),
+        }),
+      );
+    };
+    await build(older, "build", false);
+    await build(newer, "build", true);
+    spawnSync("ln", ["-s", newer, join(releases, "current")]);
+    const sql = (statements) => {
+      const ran = spawnSync(
+        "python3",
+        [
+          "-I",
+          "-c",
+          "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.executescript(sys.argv[2]); db.commit()",
+          join(root, "state/locdoc.sqlite"),
+          statements,
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(ran.status, 0, ran.stderr);
+    };
+    sql(
+      "CREATE TABLE trash(id TEXT PRIMARY KEY,kind TEXT NOT NULL,path TEXT NOT NULL,location TEXT NOT NULL,deleted INTEGER NOT NULL); INSERT INTO trash VALUES('a','document','a.md','.locdoc-trash/a/a.md',1),('b','folder','B','.locdoc-trash/b/B',2);",
+    );
+
+    const back = run(["rollback"]);
+    assert.equal(back.status, 0, back.stderr);
+    assert.match(
+      back.stderr,
+      /predates the trash; 2 Recently deleted item\(s\) stay in \.locdoc-trash/,
+    );
+    assert.equal(await current(), older);
+
+    const forward = run(["rollback", newer]);
+    assert.equal(forward.status, 0, forward.stderr);
+    assert.doesNotMatch(forward.stderr, /trash/, "a build with the trash");
+
+    // The adopted release predates the trash, whatever its binary names.
+    await build(older, "adopted", true);
+    const adopted = run(["rollback", older]);
+    assert.equal(adopted.status, 0, adopted.stderr);
+    assert.match(adopted.stderr, /predates the trash; 2 Recently deleted/);
+
+    // An empty trash leaves nothing to warn about.
+    sql("DELETE FROM trash");
+    assert.equal(run(["rollback", newer]).status, 0);
+    await build(older, "build", false);
+    const empty = run(["rollback", older]);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.doesNotMatch(empty.stderr, /trash/);
+    assert.equal(await current(), older);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--no-restart refuses the default release and systemd folders", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
   try {

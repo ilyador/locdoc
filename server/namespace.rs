@@ -93,8 +93,9 @@ pub(super) struct Requests(Mutex<Requested>);
 struct Requested {
     next: Option<Instant>,
     /// Missing documents the last incomplete listing keeps until its own
-    /// retry. Asking again for them cannot complete the listing sooner.
-    held: HashSet<String>,
+    /// retry, each with a folder it could not list that may hide its file.
+    /// Asking again for them cannot complete the listing sooner.
+    held: HashMap<String, PathBuf>,
     /// Where the last pass found the file of a document whose row could not
     /// follow yet: a busy room, or a name another document still keeps.
     elsewhere: HashMap<String, String>,
@@ -122,11 +123,16 @@ impl Requests {
             self.after(RETRY);
         }
     }
-    fn hold(&self, documents: HashSet<String>) {
+    fn hold(&self, documents: HashMap<String, PathBuf>) {
         self.0.lock().unwrap().held = documents;
     }
     fn holds(&self, document: &str) -> bool {
-        self.0.lock().unwrap().held.contains(document)
+        self.0.lock().unwrap().held.contains_key(document)
+    }
+    /// The folder the last listing could not read that may hide the file of
+    /// a document it keeps from retiring.
+    fn holder(&self, document: &str) -> Option<PathBuf> {
+        self.0.lock().unwrap().held.get(document).cloned()
     }
     /// Whether a document is now found somewhere it was not before.
     fn found(&self, elsewhere: HashMap<String, String>) -> bool {
@@ -532,14 +538,16 @@ fn classify<E: Clone + Eq + Hash>(
     plan
 }
 
-/// How the owner's restore pass placed a document that was active before it.
+/// How the owner's restore pass placed a document that was active or in the
+/// trash before it.
 pub(super) struct Placement {
     pub(super) id: String,
     /// The path the restored database recorded.
     pub(super) recorded: String,
-    /// Its path now, or None once retired.
+    /// Its path now, or None once retired or in the trash.
     pub(super) restored: Option<String>,
-    /// identity, content, path, retired, or undecided when it is not placed.
+    /// identity, content, path, retired, trashed when it is in the trash, or
+    /// undecided when it is not placed.
     pub(super) evidence: &'static str,
 }
 
@@ -550,6 +558,167 @@ pub(super) struct Restoration {
     pub(super) unclaimed: Vec<String>,
     /// Why the pass could not complete, if it could not.
     pub(super) problem: Option<String>,
+}
+
+/// Locdoc's trash as the restore pass finds it in the copy.
+struct RestoredTrash {
+    /// Document files in it with a single name that no trashed document's
+    /// row names, by path from the root.
+    files: HashMap<String, Option<Identity>>,
+    documents: Vec<TrashedDocument>,
+    /// Each item's kind, original path and location.
+    items: HashMap<String, (EntryKind, String, String)>,
+}
+
+/// A trashed document as the restored database records it.
+struct TrashedDocument {
+    id: String,
+    item: String,
+    /// The path a restore gives it.
+    original: String,
+    /// Whether the copy holds anything where its row names its file.
+    present: bool,
+}
+
+/// What the restore pass changes in the trash.
+#[derive(Default)]
+struct TrashChanges {
+    /// Documents whose text it found only in the trash, which go to the
+    /// item holding that text, or move to it within the trash.
+    trashed: Vec<Trashing>,
+    /// Items for them the database does not know: id, kind, original path
+    /// and location.
+    items: Vec<(String, EntryKind, String, String)>,
+    /// Trashed documents whose text it found outside the trash, with that
+    /// file's path and evidence.
+    restored: Vec<(String, String, Option<Identity>)>,
+    /// Items trashed documents leave, which may be left empty.
+    left: HashSet<String>,
+}
+impl TrashChanges {
+    fn is_empty(&self) -> bool {
+        self.trashed.is_empty() && self.restored.is_empty()
+    }
+}
+
+/// A document the restore pass puts in the trash.
+struct Trashing {
+    id: String,
+    item: String,
+    /// Where its file is in the trash.
+    path: String,
+    /// The path a restore gives it.
+    original: String,
+    evidence: Option<Identity>,
+}
+
+/// Turn the restore pass's matches into the trash's changes. A document
+/// whose text it found in the trash goes to the item whose folder there
+/// holds that text. A known item keeps its kind and paths. One the database
+/// does not know is a document item at that document's own path when its
+/// folder holds the file itself, or else a folder item at the path most of
+/// its documents' paths give, or at the root when none does. A trashed
+/// document whose text it found outside the trash comes back there.
+fn trash_changes(
+    tracked: &[Tracked<Identity>],
+    files: &HashMap<String, Option<Identity>>,
+    trash: &RestoredTrash,
+    matches: &HashMap<String, String>,
+) -> TrashChanges {
+    let mut changes = TrashChanges::default();
+    // Where each document was before it went to the trash.
+    let originals: HashMap<&str, &str> = tracked
+        .iter()
+        .map(|document| (document.id.as_str(), document.path.as_str()))
+        .chain(
+            trash
+                .documents
+                .iter()
+                .map(|document| (document.id.as_str(), document.original.as_str())),
+        )
+        .collect();
+    let item = |id: &str| {
+        trash
+            .documents
+            .iter()
+            .find(|document| document.id == id)
+            .map(|document| document.item.clone())
+    };
+    // The documents found in each item: id, path, entry name, path below it.
+    let mut found: HashMap<&str, Vec<(&str, &str, &str, &str)>> = HashMap::new();
+    for (id, path) in matches {
+        let Some(inside) = below(path, TRASH) else {
+            if let Some(item) = item(id) {
+                changes.left.insert(item);
+                changes
+                    .restored
+                    .push((id.clone(), path.clone(), files[path].clone()));
+            }
+            continue;
+        };
+        let mut parts = inside.splitn(3, '/');
+        if let (Some(item), Some(name)) = (parts.next(), parts.next()) {
+            let rest = parts.next().unwrap_or("");
+            found.entry(item).or_default().push((id, path, name, rest));
+        }
+    }
+    for (id, members) in found {
+        let (name, folder) = (members[0].2, !members[0].3.is_empty());
+        // A delete leaves one entry in its item's folder.
+        if members
+            .iter()
+            .any(|(_, _, other, rest)| *other != name || rest.is_empty() == folder)
+        {
+            continue;
+        }
+        let kind = if folder {
+            EntryKind::Folder
+        } else {
+            EntryKind::Document
+        };
+        let location = format!("{TRASH}/{id}/{name}");
+        let original = match trash.items.get(id) {
+            Some((known, path, at)) if *known == kind && *at == location => path.clone(),
+            Some(_) => continue,
+            None if folder => {
+                let mut votes: HashMap<&str, usize> = HashMap::new();
+                for (document, _, _, rest) in &members {
+                    if let Some(parent) = originals[document]
+                        .strip_suffix(rest)
+                        .and_then(|path| path.strip_suffix('/'))
+                    {
+                        *votes.entry(parent).or_default() += 1;
+                    }
+                }
+                votes
+                    .into_iter()
+                    .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
+                    .map_or(name, |(path, _)| path)
+                    .to_owned()
+            }
+            None => originals[members[0].0].to_owned(),
+        };
+        if !trash.items.contains_key(id) {
+            changes
+                .items
+                .push((id.to_owned(), kind, original.clone(), location));
+        }
+        for (document, path, _, rest) in members {
+            changes.left.extend(item(document));
+            changes.trashed.push(Trashing {
+                id: document.to_owned(),
+                item: id.to_owned(),
+                path: path.to_owned(),
+                original: if folder {
+                    format!("{original}/{rest}")
+                } else {
+                    original.clone()
+                },
+                evidence: trash.files[path].clone(),
+            });
+        }
+    }
+    changes
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -585,14 +754,17 @@ fn sooner(retry: &mut Option<Duration>, delay: Duration) {
 #[derive(Default)]
 struct Unlisted {
     folders: Vec<PathBuf>,
-    enterable: bool,
+    /// The first of them this process can enter.
+    enterable: Option<PathBuf>,
 }
 impl Unlisted {
     fn add(&mut self, folder: &Path) {
         let path = std::ffi::CString::new(folder.as_os_str().as_bytes());
         let enterable =
             |path: std::ffi::CString| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 };
-        self.enterable |= path.is_ok_and(enterable);
+        if self.enterable.is_none() && path.is_ok_and(enterable) {
+            self.enterable = Some(folder.to_owned());
+        }
         self.folders.push(folder.to_owned());
     }
     fn complete(&self) -> bool {
@@ -600,11 +772,17 @@ impl Unlisted {
     }
     /// Whether the file of a document recorded at `path` may be in one.
     fn may_hide(&self, root: &Path, path: &str) -> bool {
-        self.enterable
-            || self
-                .folders
-                .iter()
-                .any(|folder| root.join(path).starts_with(folder))
+        self.hiding(root, path).is_some()
+    }
+    /// The one that may hide the file of a document recorded at `path`: a
+    /// folder holding that path, or else one this process can enter.
+    fn hiding(&self, root: &Path, path: &str) -> Option<&Path> {
+        let full = root.join(path);
+        self.folders
+            .iter()
+            .find(|folder| full.starts_with(folder))
+            .or(self.enterable.as_ref())
+            .map(PathBuf::as_path)
     }
 }
 
@@ -676,7 +854,9 @@ impl Store {
         self.finish_pending_path(&path)?;
         let full = self.safe(&path, false)?;
         let not_found = || ApiError(StatusCode::NOT_FOUND, "Document not found.".into());
-        if format(&path).is_none() || !full.is_file() {
+        // A file in a state folder kept inside the documents folder is
+        // never found, as one in the trash is not.
+        if format(&path).is_none() || !full.is_file() || self.in_state(&full) {
             return Err(not_found());
         }
         let observe = || match fs::symlink_metadata(&full) {
@@ -852,18 +1032,21 @@ impl Store {
     /// have that file's text. The file's identity becomes the document's, so
     /// the match outranks path continuity as identity does. Duplicate
     /// contents fall back to paths, and the pass then follows, records and
-    /// retires like a settled one. It changes nothing unless it saw and read
-    /// every file, nor when it would retire every document. Normal passes
-    /// never compare content.
+    /// retires like a settled one. The trash is evidence too: a document
+    /// whose text is only in the trash goes back into it, and a trashed one
+    /// whose text left it comes back where that text is. It changes nothing
+    /// unless it saw and read every file, nor when it would retire every
+    /// document. Normal passes never compare content.
     pub(super) fn restore_documents(&self) -> Result<Restoration> {
         let _files = self.document_files.lock().unwrap();
-        const ACTIVE: &str = "SELECT d.id,d.path,f.identity FROM docs d
-            LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active=1 ORDER BY d.path";
+        const PLACED: &str = "SELECT d.id,d.path,f.identity FROM docs d
+            LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active IN (1,2)
+            ORDER BY d.path";
         let before = self
             .db
             .lock()
             .unwrap()
-            .prepare(ACTIVE)?
+            .prepare(PLACED)?
             .query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -881,26 +1064,25 @@ impl Store {
             let (active, path, identity) =
                 self.db.lock().unwrap().query_row(CURRENT, [&id], |r| {
                     Ok((
-                        r.get::<_, bool>(0)?,
+                        r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<String>>(2)?,
                     ))
                 })?;
-            let evidence = if !active {
-                "retired"
-            } else if self.inspect(&path) != Seen::File(identity.clone().map(Identity)) {
-                "undecided"
-            } else if content.contains_key(&id) {
-                "content"
-            } else if identity.is_some() && identity == previous {
-                "identity"
-            } else {
-                "path"
+            let evidence = match active {
+                0 => "retired",
+                2 => "trashed",
+                _ if self.inspect(&path) != Seen::File(identity.clone().map(Identity)) => {
+                    "undecided"
+                }
+                _ if content.contains_key(&id) => "content",
+                _ if identity.is_some() && identity == previous => "identity",
+                _ => "path",
             };
             documents.push(Placement {
                 id,
                 recorded,
-                restored: active.then_some(path),
+                restored: (active == 1).then_some(path),
                 evidence,
             });
         }
@@ -924,9 +1106,10 @@ impl Store {
             ));
         }
         // Restored files are new, so an interrupted rename settles under
-        // neither name and its document is placed below. So does an
-        // interrupted folder move, delete or restore; trashed documents keep
-        // their place in the trash, which the pass leaves alone.
+        // neither name and its document is placed below. An interrupted
+        // folder move, delete or restore settles from where the copy holds
+        // its entry, and what it held is placed below too.
+        self.settle_restored_entries()?;
         self.settle_intents(false)?;
         let started = clock();
         let Namespace {
@@ -942,24 +1125,47 @@ impl Store {
             document.seen = self.inspect(&document.path);
         }
         let (files, linked, unlisted) = self.survey(&mut tracked);
-        if !unlisted.complete()
-            || tracked
-                .iter()
-                .any(|document| document.seen == Seen::Unknown)
-        {
+        let trash = self.restored_trash()?;
+        let Some(trash) = trash.filter(|_| {
+            unlisted.complete()
+                && tracked
+                    .iter()
+                    .all(|document| document.seen != Seen::Unknown)
+        }) else {
             return Ok(Some("Some folders or files in the documents folder could not be read. Fix their permissions, then run locdoc --restored again.".into()));
-        }
-        *content = match self.match_contents(&tracked, &files, &linked) {
+        };
+        let matches = match self.match_contents(&tracked, &files, &linked, &trash) {
             Ok(matches) => matches,
             Err(error) => return Ok(Some(error.1)),
         };
+        let changes = trash_changes(&tracked, &files, &trash, &matches);
+        // A document going into the trash is no longer placed here.
+        tracked.retain(|document| {
+            !changes
+                .trashed
+                .iter()
+                .any(|trashed| trashed.id == document.id)
+        });
+        let moved: HashMap<&str, &str> = matches
+            .iter()
+            .filter(|(id, _)| tracked.iter().any(|document| &document.id == *id))
+            .filter(|(_, path)| below(path, TRASH).is_none())
+            .map(|(id, path)| (id.as_str(), path.as_str()))
+            .collect();
         for document in &mut tracked {
-            if let Some(path) = content.get(&document.id) {
-                document.recorded = files[path].clone();
+            if let Some(path) = moved.get(document.id.as_str()) {
+                document.recorded = files[*path].clone();
             }
         }
+        // A trashed document coming back owns its file as a pending rename
+        // does, so no document whose name it has keeps it.
+        let returning: Vec<(&str, &Identity)> = changes
+            .restored
+            .iter()
+            .filter_map(|(id, _, evidence)| Some((id.as_str(), evidence.as_ref()?)))
+            .collect();
         // Every restored file is new, so an earlier gap is no evidence here.
-        let mut plan = classify(&tracked, &[], &files, &HashSet::new());
+        let mut plan = classify(&tracked, &returning, &files, &HashSet::new());
         self.confirm_missing(&mut plan, &unlisted);
         if !plan.undecided.is_empty() {
             return Ok(Some(
@@ -968,26 +1174,89 @@ impl Store {
         }
         // Retiring revokes links. A copy holding none of the documents is an
         // empty or wrong backup, not a workspace whose every file was removed.
-        if !tracked.is_empty() && plan.missing.len() == tracked.len() {
+        if !tracked.is_empty() && plan.missing.len() == tracked.len() && changes.is_empty() {
             return Ok(Some(format!(
                 "The restored documents folder holds none of the {} documents. Check that the backup copied the documents folder, then run locdoc --restored again.",
                 tracked.len()
             )));
         }
         // A matched document records its file now, even if its move waits.
-        for (id, path) in content.iter() {
+        for (id, path) in &moved {
             plan.records.retain(|(record, _)| record != id);
-            plan.records.push((id.clone(), files[path].clone()));
+            plan.records.push(((*id).to_owned(), files[*path].clone()));
         }
+        content.extend(
+            moved
+                .iter()
+                .map(|(id, path)| ((*id).to_owned(), (*path).to_owned())),
+        );
+        content.extend(
+            changes
+                .restored
+                .iter()
+                .map(|(id, path, _)| (id.clone(), path.clone())),
+        );
+        // Rows going to the trash first leave paths active documents may
+        // take; trashed documents come back once those have left theirs.
+        self.commit_trashed(&changes)?;
         // Restored images are new files too. Identify each approval where its
         // document's row places it, so a move pins what stayed behind.
         let rows: Vec<(&str, &str)> = tracked
             .iter()
             .map(|document| (document.id.as_str(), document.path.as_str()))
+            .chain(
+                changes
+                    .restored
+                    .iter()
+                    .map(|(id, path, _)| (id.as_str(), path.as_str())),
+            )
             .collect();
         self.refresh_media_identities(&rows)?;
         self.apply(Pass::Settled, plan, &tracked, &reserved, &unlisted, started)?;
+        self.commit_restored(&changes)?;
         Ok(None)
+    }
+
+    /// The restore pass settles each journaled folder move, delete or restore
+    /// from where the copy holds its entry, since no restored file has the
+    /// journaled identity. Found at its destination and not at its source,
+    /// it commits; otherwise the intent ends. Nothing moves either way.
+    fn settle_restored_entries(&self) -> Result<()> {
+        for movement in self.pending_entries()? {
+            let holds = |path: &str| -> Result<bool> {
+                let Some(full) = self.entry_path(path)? else {
+                    return Ok(false);
+                };
+                match fs::symlink_metadata(full) {
+                    Ok(metadata) => Ok(match movement.entry {
+                        EntryKind::Document => metadata.is_file(),
+                        EntryKind::Folder => metadata.is_dir(),
+                    }),
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error.into()),
+                }
+            };
+            let settled = holds(&movement.destination).and_then(|moved| {
+                if moved && !holds(&movement.source)? {
+                    self.finish_entry(&movement)
+                } else {
+                    self.drop_entry(&movement)
+                }
+            });
+            // A move left pending keeps the pass from completing.
+            if let Err(error) = settled {
+                let action = movement.action.as_str();
+                tracing::debug!(path = movement.source, "{action} still pending: {error}");
+            }
+        }
+        Ok(())
     }
 
     /// One pass under document_files. A busy room or an undecidable file
@@ -1281,17 +1550,25 @@ impl Store {
         }
     }
 
-    /// Walk the tree once, never following symlinks or entering dot folders.
-    /// An entry that vanishes is skipped; a folder that cannot be listed in
-    /// full is reported rather than failing the pass, except the root's
-    /// lost+found, which fsck owns. Also returns the files that other names
-    /// link to.
+    /// Walk the tree once, never following symlinks or entering dot folders
+    /// or the state folder. An entry that vanishes is skipped; a folder that
+    /// cannot be listed in full is reported rather than failing the pass,
+    /// except the root's lost+found, which fsck owns. Also returns the files
+    /// that other names link to.
     fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, Unlisted) {
+        self.walk_from(self.root.clone())
+    }
+
+    /// `walk` from a folder below the root, with paths still from the root.
+    fn walk_from(
+        &self,
+        start: PathBuf,
+    ) -> (HashMap<String, Option<Identity>>, HashSet<String>, Unlisted) {
         let mut files = HashMap::new();
         let mut linked = HashSet::new();
         let mut unlisted = Unlisted::default();
         let fsck = self.root.join("lost+found");
-        let mut folders = vec![self.root.clone()];
+        let mut folders = vec![start];
         while let Some(folder) = folders.pop() {
             let children = match walk_step(&folder).and_then(|()| fs::read_dir(&folder)) {
                 Ok(children) => children,
@@ -1316,6 +1593,7 @@ impl Store {
                 }
                 let path = child.path();
                 match walk_step(&path).and_then(|()| fs::symlink_metadata(&path)) {
+                    Ok(metadata) if metadata.is_dir() && self.in_state(&path) => {}
                     Ok(metadata) if metadata.is_dir() => folders.push(path),
                     Ok(metadata) if metadata.is_file() => {
                         if let Some(relative) =
@@ -1346,12 +1624,16 @@ impl Store {
     /// had, when no other document is known to have that file's text. A file
     /// that cannot be read could hold a duplicate, so it fails the pass. A
     /// file with other names is still found: its document never follows a
-    /// copy, though the link cannot show where it moved.
+    /// copy, though the link cannot show where it moved. Trashed documents
+    /// take part as well: each owns its texts, and one whose file is not
+    /// where its row names it in the trash is lost. Files in the trash that
+    /// no trashed document's row names can be matched too.
     fn match_contents(
         &self,
         tracked: &[Tracked<Identity>],
         files: &HashMap<String, Option<Identity>>,
         linked: &HashSet<Identity>,
+        trash: &RestoredTrash,
     ) -> Result<HashMap<String, String>> {
         let found: HashSet<&Identity> = files.values().flatten().chain(linked).collect();
         let lost = |document: &Tracked<Identity>| {
@@ -1360,28 +1642,34 @@ impl Store {
                 .as_ref()
                 .is_none_or(|evidence| !found.contains(evidence))
         };
-        if !tracked.iter().any(lost) {
+        if !tracked.iter().any(lost) && trash.documents.iter().all(|document| document.present) {
             return Ok(HashMap::new());
         }
         let mut owners: HashMap<String, HashSet<&str>> = HashMap::new();
         let mut wanted = Vec::new();
-        for document in tracked {
+        let documents = tracked
+            .iter()
+            .map(|document| (document.id.as_str(), lost(document)))
+            .chain(
+                trash
+                    .documents
+                    .iter()
+                    .map(|document| (document.id.as_str(), !document.present)),
+            );
+        for (id, lost) in documents {
             // Empty files are common and unrelated; a blank text identifies
             // no file.
             let digests: HashSet<String> = self
-                .known_contents(&document.id)?
+                .known_contents(id)?
                 .iter()
                 .filter(|text| !text.trim().is_empty())
                 .map(|text| hash(text))
                 .collect();
             for digest in &digests {
-                owners
-                    .entry(digest.clone())
-                    .or_default()
-                    .insert(&document.id);
+                owners.entry(digest.clone()).or_default().insert(id);
             }
-            if lost(document) {
-                wanted.push((document.id.as_str(), digests));
+            if lost {
+                wanted.push((id, digests));
             }
         }
         let claimed: HashSet<&Identity> = tracked
@@ -1390,13 +1678,15 @@ impl Store {
             .collect();
         let mut holders: HashMap<String, Vec<&str>> = HashMap::new();
         let mut held = HashMap::new();
-        for (path, evidence) in files {
-            if evidence
-                .as_ref()
-                .is_some_and(|evidence| claimed.contains(evidence))
-            {
-                continue;
-            }
+        let unclaimed = files
+            .iter()
+            .filter(|(_, evidence)| {
+                evidence
+                    .as_ref()
+                    .is_none_or(|evidence| !claimed.contains(evidence))
+            })
+            .chain(&trash.files);
+        for (path, evidence) in unclaimed {
             if let Some(text) = self.restored_text(path, evidence.as_ref())? {
                 let digest = hash(&text);
                 holders.entry(digest.clone()).or_default().push(path);
@@ -1415,11 +1705,198 @@ impl Store {
                 continue;
             };
             // Only a file with an identity can become the document's.
-            if files[path].is_some() && owners[&held[path]].len() == 1 {
+            let evidence = files.get(path).or_else(|| trash.files.get(path));
+            if evidence.is_some_and(Option::is_some) && owners[&held[path]].len() == 1 {
                 matches.insert(id.to_owned(), path.to_owned());
             }
         }
         Ok(matches)
+    }
+
+    /// The trash as the restore pass reads it, or None when a folder or file
+    /// in it cannot be read. It is walked as the documents folder is.
+    fn restored_trash(&self) -> Result<Option<RestoredTrash>> {
+        let (rows, items) = {
+            let db = self.db.lock().unwrap();
+            let rows = db
+                .prepare(
+                    "SELECT d.id,d.path,t.trash,t.path FROM docs d
+                     JOIN trashed_documents t ON t.doc=d.id WHERE d.active=2",
+                )?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let items = db
+                .prepare("SELECT id,kind,path,location FROM trash")?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            (rows, items)
+        };
+        let folder = self.root.join(TRASH);
+        let (mut files, linked, unlisted) = match fs::symlink_metadata(&folder) {
+            Ok(metadata) if metadata.is_dir() => self.walk_from(folder),
+            // Nothing else holds deleted files.
+            Ok(_) => Default::default(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(_) => return Ok(None),
+        };
+        if !unlisted.complete() {
+            return Ok(None);
+        }
+        for path in &linked {
+            files.remove(path);
+        }
+        let mut documents = Vec::new();
+        for (id, path, item, original) in rows {
+            let present = match self.trashed_seen(&path) {
+                Seen::Unknown => return Ok(None),
+                Seen::Absent => false,
+                // Whatever is there stays its own, as a path keeps its file.
+                Seen::File(_) => {
+                    files.remove(&path);
+                    true
+                }
+            };
+            documents.push(TrashedDocument {
+                id,
+                item,
+                original,
+                present,
+            });
+        }
+        let items = items
+            .into_iter()
+            .filter_map(|(id, kind, path, location)| {
+                Some((id, (EntryKind::parse(&kind)?, path, location)))
+            })
+            .collect();
+        Ok(Some(RestoredTrash {
+            files,
+            documents,
+            items,
+        }))
+    }
+
+    /// Put the documents the restore pass found only in the trash there, in
+    /// one transaction, before it moves or retires active documents.
+    fn commit_trashed(&self, changes: &TrashChanges) -> Result<()> {
+        if changes.trashed.is_empty() {
+            return Ok(());
+        }
+        // When its entry went into the trash, as the item's folder shows.
+        let deleted = |item: &str| {
+            fs::symlink_metadata(self.root.join(TRASH).join(item))
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or_else(now, |time| time.as_secs() as i64)
+        };
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for (id, kind, path, location) in &changes.items {
+            tx.execute(
+                "INSERT OR IGNORE INTO trash(id,kind,path,location,deleted) VALUES(?,?,?,?,?)",
+                params![id, kind.as_str(), path, location, deleted(id)],
+            )?;
+        }
+        for trashed in &changes.trashed {
+            // As for a delete, an active document starts a new incarnation.
+            let updated = tx.execute(
+                "UPDATE docs SET path=?,active=2,
+                 incarnation=CASE WHEN active=1 THEN incarnation+1 ELSE incarnation END
+                 WHERE id=? AND active IN (1,2)",
+                params![trashed.path, trashed.id],
+            )?;
+            if updated != 1 {
+                return Err(bad("A document identity changed during the restore."));
+            }
+            tx.execute(
+                "INSERT INTO trashed_documents(doc,trash,path) VALUES(?,?,?)
+                 ON CONFLICT(doc) DO UPDATE SET trash=excluded.trash,path=excluded.path",
+                params![trashed.id, trashed.item, trashed.original],
+            )?;
+            tx.execute("DELETE FROM document_gaps WHERE doc=?", [&trashed.id])?;
+            record_identity(&tx, &trashed.id, trashed.evidence.as_ref())?;
+        }
+        tx.commit()?;
+        drop(db);
+        self.permissions.invalidate();
+        Ok(())
+    }
+
+    /// Bring back the trashed documents the restore pass found outside the
+    /// trash, once it has moved and retired active documents, as a restore
+    /// does. An item the pass left with no document and nothing at its
+    /// location leaves the trash, a folder's links and grants back at its
+    /// path.
+    fn commit_restored(&self, changes: &TrashChanges) -> Result<()> {
+        if changes.restored.is_empty() && changes.left.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for (id, path, evidence) in &changes.restored {
+            vacate(&tx, path, id)?;
+            let updated = tx.execute(
+                "UPDATE docs SET active=1,path=? WHERE id=? AND active=2",
+                params![path, id],
+            )?;
+            if updated != 1 {
+                return Err(bad("A document identity changed during the restore."));
+            }
+            tx.execute("DELETE FROM trashed_documents WHERE doc=?", [id])?;
+            record_identity(&tx, id, evidence.as_ref())?;
+        }
+        for item in &changes.left {
+            let documents: i64 = tx.query_row(
+                "SELECT count(*) FROM trashed_documents t JOIN docs d ON d.id=t.doc
+                 WHERE t.trash=? AND d.active=2",
+                [item],
+                |row| row.get(0),
+            )?;
+            let entry = tx
+                .query_row(
+                    "SELECT kind,path,location FROM trash WHERE id=?",
+                    [item],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((kind, original, location)) = entry else {
+                continue;
+            };
+            if documents > 0 || self.trashed_seen(&location) != Seen::Absent {
+                continue;
+            }
+            if EntryKind::parse(&kind) == Some(EntryKind::Folder) {
+                rebase_rows(&tx, "folder_shares", &location, &original)?;
+                rebase_rows(&tx, "mcp_folders", &location, &original)?;
+                self.rebase_grants(&tx, &location, &original)?;
+            }
+            tx.execute("DELETE FROM trash WHERE id=?", [item])?;
+        }
+        tx.commit()?;
+        drop(db);
+        self.permissions.invalidate();
+        Ok(())
     }
 
     /// A restored file's text as an import reads it, or None when it cannot
@@ -1436,7 +1913,7 @@ impl Store {
             )
         };
         let full = self
-            .safe(path, false)
+            .safe(path, below(path, TRASH).is_some())
             .map_err(|error| unreadable(error.1))?;
         let file = fs::OpenOptions::new()
             .read(true)
@@ -1564,8 +2041,15 @@ impl Store {
             sooner(&mut retry, RETRY);
             retiring.clear();
         }
-        self.reconciliation
-            .hold(waiting.into_iter().map(|missing| missing.id).collect());
+        self.reconciliation.hold(
+            waiting
+                .into_iter()
+                .filter_map(|missing| {
+                    let folder = unlisted.hiding(&self.root, &missing.path)?.to_owned();
+                    Some((missing.id, folder))
+                })
+                .collect(),
+        );
         // Map before room, and never wait for a room: a busy one defers.
         let rooms: Vec<(String, Arc<Mutex<Room>>)> = {
             let cached = self.rooms.lock().unwrap();
@@ -1812,6 +2296,7 @@ impl Store {
             return Err(bad(FORMATS));
         }
         let dest = self.safe(&path, false)?;
+        self.not_into_state(&dest)?;
         if !dest.parent().is_some_and(Path::is_dir) {
             return Err(bad("Choose an existing destination folder."));
         }
@@ -2148,8 +2633,11 @@ impl Store {
         Ok(())
     }
 
-    /// Intentional path reuse by creation or rename. Preserve the final
-    /// accepted room before revoking identity, with one lock order.
+    /// Intentional path reuse by creation, a rename, a folder move or a
+    /// restore. Preserve the final accepted room before revoking identity,
+    /// with one lock order. A missing document an incomplete walk holds
+    /// never retires here: a folder that walk could not list may hide its
+    /// file, so the reuse is refused until a walk can list it.
     pub(super) fn retire_missing_identity(&self, id: &str, path: &Path) -> Result<bool> {
         let room = self.rooms.lock().unwrap().get(id).cloned();
         let mut live = if let Some(room) = &room {
@@ -2168,6 +2656,21 @@ impl Store {
         };
         if !missing() {
             return Ok(false);
+        }
+        if let Some(folder) = self.reconciliation.holder(id) {
+            let name = |path: &Path| match path.strip_prefix(&self.root) {
+                Ok(relative) if !relative.as_os_str().is_empty() => {
+                    relative.to_string_lossy().into_owned()
+                }
+                _ => "the documents folder".into(),
+            };
+            let (path, folder) = (name(path), name(&folder));
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "{path} still belongs to a document whose file may be in {folder}, which Locdoc cannot read. Make {folder} readable for Locdoc, then try again."
+                ),
+            ));
         }
         if let Some(room) = live.as_mut() {
             self.preserve_for_retirement(id, room)?;
@@ -2457,6 +2960,7 @@ impl Store {
             }
         };
         let destination = self.safe(&original, false)?;
+        self.not_into_state(&destination)?;
         if fs::symlink_metadata(&destination).is_ok() {
             return Err(ApiError(
                 StatusCode::CONFLICT,

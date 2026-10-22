@@ -44,7 +44,12 @@ impl Grant {
 }
 
 pub(super) fn directory_identity(s: &Store, path: &str) -> Result<String> {
-    let metadata = fs::metadata(s.safe(path, false)?)?;
+    let full = s.safe(path, false)?;
+    // No link or MCP grant opens the state folder or a folder inside it.
+    if s.in_state(&full) {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Folder not found.".into()));
+    }
+    let metadata = fs::metadata(full)?;
     if !metadata.is_dir() {
         return Err(bad("Choose an existing folder."));
     }
