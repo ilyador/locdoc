@@ -173,8 +173,9 @@ test("Markdown lines whose first visible strong character is Hebrew read right t
       true,
       "CodeMirror reads each line's direction for caret motion and selection",
     );
+    // A document opens rendered, so the heading on line 1 hides its marker.
     assert.deepEqual(lines(editor.view), [
-      "rtl: # כותרת ראשית",
+      "rtl: כותרת ראשית",
       "ltr: English paragraph with שלום inside.",
       "rtl:  קרם לחות",
       "ltr:  An English task",
