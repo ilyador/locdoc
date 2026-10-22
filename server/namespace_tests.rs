@@ -1283,6 +1283,71 @@ fn renaming_onto_a_name_never_retires_a_document_whose_file_was_found_elsewhere(
 }
 
 #[test]
+fn no_path_reuse_retires_a_document_a_folder_it_cannot_list_may_hide() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let held = s.create_document("held.md").unwrap();
+    share_link(&s, &held.id, "held-link");
+    s.create_document("Notes/old.md").unwrap();
+    let item = s.trash_folder("Notes").unwrap();
+    let inside = s.create_document("Notes/inside.md").unwrap();
+    share_link(&s, &inside.id, "inside-link");
+    let other = s.create_document("other.md").unwrap();
+    s.create_folder("Drafts").unwrap();
+    s.create_folder("Drop").unwrap();
+    // Both files move into a folder Locdoc can enter but not list, and the
+    // folder one of them was in goes, so either path looks free.
+    fs::rename(s.root.join("held.md"), s.root.join("Drop/held.md")).unwrap();
+    fs::rename(
+        s.root.join("Notes/inside.md"),
+        s.root.join("Drop/inside.md"),
+    )
+    .unwrap();
+    fs::remove_dir(s.root.join("Notes")).unwrap();
+    let drop = s.root.join("Drop");
+    fs::set_permissions(&drop, fs::Permissions::from_mode(0o300)).unwrap();
+    let passed = s.retire_missing_documents();
+    let reused = [
+        ("create", s.create_document("held.md").map(|_| ())),
+        (
+            "duplicate",
+            s.duplicate_document(&other, "held.md", "Copy\n", "lf")
+                .map(|_| ()),
+        ),
+        ("rename", s.rename_document(&other.id, "held.md")),
+        (
+            "move a folder",
+            s.rename_folder("Drafts", "Notes").map(|_| ()),
+        ),
+        ("restore", s.restore_trash(&item).map(|_| ())),
+    ];
+    fs::set_permissions(&drop, fs::Permissions::from_mode(0o700)).unwrap();
+    passed.unwrap();
+    for (what, result) in reused {
+        let error = result.unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT, "{what}: {}", error.1);
+        assert!(error.1.contains("may be in Drop"), "{what}: {}", error.1);
+    }
+    assert!(!s.root.join("held.md").exists() && !s.root.join("Notes").exists());
+    // Once the folder can be listed, both documents are found there with
+    // their links, and their old paths are free.
+    s.retire_missing_documents().unwrap();
+    for (document, path, token) in [
+        (&held, "Drop/held.md", "held-link"),
+        (&inside, "Drop/inside.md", "inside-link"),
+    ] {
+        let found = s.doc(&document.id).unwrap();
+        assert_eq!(found.path, path);
+        assert_eq!(found.token.as_deref(), Some(token));
+    }
+    assert_ne!(s.create_document("held.md").unwrap().id, held.id);
+    assert_eq!(s.rename_folder("Drafts", "Notes").unwrap(), "Notes");
+}
+
+#[test]
 fn a_file_moved_between_folders_during_the_walk_is_not_retired() {
     let (directory, s) = store();
     let document = s.create_document("page.md").unwrap();

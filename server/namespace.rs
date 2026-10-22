@@ -93,8 +93,9 @@ pub(super) struct Requests(Mutex<Requested>);
 struct Requested {
     next: Option<Instant>,
     /// Missing documents the last incomplete listing keeps until its own
-    /// retry. Asking again for them cannot complete the listing sooner.
-    held: HashSet<String>,
+    /// retry, each with a folder it could not list that may hide its file.
+    /// Asking again for them cannot complete the listing sooner.
+    held: HashMap<String, PathBuf>,
     /// Where the last pass found the file of a document whose row could not
     /// follow yet: a busy room, or a name another document still keeps.
     elsewhere: HashMap<String, String>,
@@ -122,11 +123,16 @@ impl Requests {
             self.after(RETRY);
         }
     }
-    fn hold(&self, documents: HashSet<String>) {
+    fn hold(&self, documents: HashMap<String, PathBuf>) {
         self.0.lock().unwrap().held = documents;
     }
     fn holds(&self, document: &str) -> bool {
-        self.0.lock().unwrap().held.contains(document)
+        self.0.lock().unwrap().held.contains_key(document)
+    }
+    /// The folder the last listing could not read that may hide the file of
+    /// a document it keeps from retiring.
+    fn holder(&self, document: &str) -> Option<PathBuf> {
+        self.0.lock().unwrap().held.get(document).cloned()
     }
     /// Whether a document is now found somewhere it was not before.
     fn found(&self, elsewhere: HashMap<String, String>) -> bool {
@@ -585,14 +591,17 @@ fn sooner(retry: &mut Option<Duration>, delay: Duration) {
 #[derive(Default)]
 struct Unlisted {
     folders: Vec<PathBuf>,
-    enterable: bool,
+    /// The first of them this process can enter.
+    enterable: Option<PathBuf>,
 }
 impl Unlisted {
     fn add(&mut self, folder: &Path) {
         let path = std::ffi::CString::new(folder.as_os_str().as_bytes());
         let enterable =
             |path: std::ffi::CString| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 };
-        self.enterable |= path.is_ok_and(enterable);
+        if self.enterable.is_none() && path.is_ok_and(enterable) {
+            self.enterable = Some(folder.to_owned());
+        }
         self.folders.push(folder.to_owned());
     }
     fn complete(&self) -> bool {
@@ -600,11 +609,17 @@ impl Unlisted {
     }
     /// Whether the file of a document recorded at `path` may be in one.
     fn may_hide(&self, root: &Path, path: &str) -> bool {
-        self.enterable
-            || self
-                .folders
-                .iter()
-                .any(|folder| root.join(path).starts_with(folder))
+        self.hiding(root, path).is_some()
+    }
+    /// The one that may hide the file of a document recorded at `path`: a
+    /// folder holding that path, or else one this process can enter.
+    fn hiding(&self, root: &Path, path: &str) -> Option<&Path> {
+        let full = root.join(path);
+        self.folders
+            .iter()
+            .find(|folder| full.starts_with(folder))
+            .or(self.enterable.as_ref())
+            .map(PathBuf::as_path)
     }
 }
 
@@ -1564,8 +1579,15 @@ impl Store {
             sooner(&mut retry, RETRY);
             retiring.clear();
         }
-        self.reconciliation
-            .hold(waiting.into_iter().map(|missing| missing.id).collect());
+        self.reconciliation.hold(
+            waiting
+                .into_iter()
+                .filter_map(|missing| {
+                    let folder = unlisted.hiding(&self.root, &missing.path)?.to_owned();
+                    Some((missing.id, folder))
+                })
+                .collect(),
+        );
         // Map before room, and never wait for a room: a busy one defers.
         let rooms: Vec<(String, Arc<Mutex<Room>>)> = {
             let cached = self.rooms.lock().unwrap();
@@ -2148,8 +2170,11 @@ impl Store {
         Ok(())
     }
 
-    /// Intentional path reuse by creation or rename. Preserve the final
-    /// accepted room before revoking identity, with one lock order.
+    /// Intentional path reuse by creation, a rename, a folder move or a
+    /// restore. Preserve the final accepted room before revoking identity,
+    /// with one lock order. A missing document an incomplete walk holds
+    /// never retires here: a folder that walk could not list may hide its
+    /// file, so the reuse is refused until a walk can list it.
     pub(super) fn retire_missing_identity(&self, id: &str, path: &Path) -> Result<bool> {
         let room = self.rooms.lock().unwrap().get(id).cloned();
         let mut live = if let Some(room) = &room {
@@ -2168,6 +2193,21 @@ impl Store {
         };
         if !missing() {
             return Ok(false);
+        }
+        if let Some(folder) = self.reconciliation.holder(id) {
+            let name = |path: &Path| match path.strip_prefix(&self.root) {
+                Ok(relative) if !relative.as_os_str().is_empty() => {
+                    relative.to_string_lossy().into_owned()
+                }
+                _ => "the documents folder".into(),
+            };
+            let (path, folder) = (name(path), name(&folder));
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!(
+                    "{path} still belongs to a document whose file may be in {folder}, which Locdoc cannot read. Make {folder} readable for Locdoc, then try again."
+                ),
+            ));
         }
         if let Some(room) = live.as_mut() {
             self.preserve_for_retirement(id, room)?;
