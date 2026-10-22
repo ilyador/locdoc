@@ -236,11 +236,13 @@ Images up to **5 MB**, videos up to **20 MB**, and total embeds up to **50 MB pe
 
 To reclaim retained storage, the owner can delete unwanted files from `.assets/` locally. Uploads reconcile missing files before rejecting a retained storage limit; an upload still within its ten-minute insertion window remains reserved until that window ends.
 
-Useful shortcuts: Ctrl/Cmd K to find a file or insert a link in the editor, Ctrl/Cmd F to search text, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
+Useful shortcuts: Ctrl/Cmd K to find a file or insert a link in the editor, Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
 
 ## Files, folders and the trash
 
 The **Folders** tab offers file actions as in a code editor's explorer: **New File** and **New Folder** with an inline name, **Rename**, **Delete**, **Duplicate**, **Copy Path** and **Copy Relative Path**, and dragging documents and folders onto a folder or the root to move them. The **By date** tab offers the document actions that need no folder.
+
+The sidebar works from the keyboard: the arrow keys, Home and End move between rows, Right and Left open and close folders, Enter opens a document, F2 renames, Delete deletes, and Shift+F10 or a row's **⋯** button opens its menu. On touch screens, where dragging is not available, the menu's **Move to…** moves an item into another folder.
 
 - **Rename or move a folder**, also into another folder. Its documents keep their ids, links, comments and history, and open documents stay open: edits still waiting for their file are written at the new path. Folder links and MCP folder grants follow the folder and its subfolders, and approved images inside it stay approved. A folder never moves into itself or one of its own folders, and a move never replaces anything at its destination.
 - **Duplicate** creates a new private document without links. It holds the document's current accepted text, the collaboration state everyone sees rather than the file, which may not have caught up, without its comment records: a record on a line of its own leaves with its line. The copy keeps the original's line endings and only the image approvals the original had for files its references reach from the copy's folder.
