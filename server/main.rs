@@ -12,6 +12,8 @@ mod mcp;
 mod mcp_access;
 mod mcp_auth;
 mod media;
+#[cfg(test)]
+mod media_reference_tests;
 mod namespace;
 mod peers;
 #[cfg(test)]

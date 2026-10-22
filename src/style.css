@@ -1486,6 +1486,25 @@ button:hover {
 .embed:focus-within .embed-edit {
   opacity: 1;
 }
+/* An image within a line keeps the figure's treatment and flows with text.
+   Padding, never margins: CodeMirror measures this box for hit testing. */
+.embed-inline {
+  display: inline-block;
+  max-width: 100%;
+  padding: 3px 0;
+  line-height: 0;
+  vertical-align: bottom;
+}
+.embed-inline img,
+.embed-inline video {
+  max-width: 100%;
+  max-height: 560px;
+  border-radius: 6px;
+  vertical-align: bottom;
+}
+.cm-content[contenteditable="true"] .embed-inline img {
+  cursor: pointer;
+}
 .unsupported-embed {
   font-size: var(--ui-body-size);
   color: var(--muted);
