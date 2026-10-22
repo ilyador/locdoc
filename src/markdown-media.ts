@@ -1,6 +1,7 @@
 import { Facet } from "@codemirror/state";
 import type { SyntaxNode } from "@lezer/common";
-import { commentParser } from "./comment-syntax";
+// Explicit extensions keep this parser loadable by Node's .mjs tests.
+import { commentParser } from "./comment-syntax.ts";
 
 export type ImageReference = {
   from: number;
