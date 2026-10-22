@@ -102,7 +102,7 @@ scripts/deploy.sh rollback                                 # the previous releas
 scripts/deploy.sh rollback 20261021T180516Z-0123456789ab   # a named release
 ```
 
-Rollback runs the same checks but leaves the state folder as it is. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE`, `LOCDOC_DOCS` and a non-default `LOCDOC_RELEASES` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
+Rollback runs the same checks but leaves the state folder as it is. The release `install-unit` adopted predates signed MCP client registrations: after rolling back to it, MCP connections approved since keep working only until their access token expires, within an hour, and must then be connected again, or roll forward. Rollback warns when this applies, and `restore` refuses to run while the adopted release is current, since it has no restore pass. `LOCDOC_RELEASES`, `LOCDOC_SERVICE` and `LOCDOC_HEALTH_URL` override the defaults; `--no-restart` with `LOCDOC_STATE`, `LOCDOC_DOCS` and a non-default `LOCDOC_RELEASES` runs the flow against temporary folders without systemctl. See `scripts/deploy.sh --help`.
 
 ### Restore from a backup
 
@@ -139,7 +139,7 @@ rm -rf -- "$LOCDOC_DOCS".before-restore-* "$LOCDOC_STATE"/before-restore-*
 rm -rf -- "$LOCDOC_DOCS".failed-restore-* "$LOCDOC_STATE"/failed-restore-*
 ```
 
-A release's `backup/` folder holds only the state from before that deploy. To return to it, stop the service, move the state files aside as above, copy the backup's files into the state folder and start the service. The documents folder stays as it is, so no restore pass is needed.
+A release's `backup/` folder holds only the state from before that deploy. To return to it, stop the service, move the state files aside as above, copy the backup's files into the state folder, run `locdoc --restored` as above with a release this script built and start the service. The documents folder stays as it is, but the backup was taken while the service ran: the pass applies edits the backup still had to write to their files only once.
 
 ## Fountain screenplays
 

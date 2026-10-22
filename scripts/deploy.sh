@@ -80,7 +80,7 @@ state_files=(locdoc.sqlite locdoc.sqlite-wal locdoc.sqlite-shm locdoc.sqlite-jou
 # Small JSON, SQLite and /proc helpers. SQLite copies use the online backup
 # API, never a file copy of a database that may have active WAL writes.
 read -r -d '' py_helper <<'PY' || true
-import json, os, shlex, socket, sqlite3, sys
+import json, os, shlex, socket, sqlite3, sys, time
 from pathlib import Path
 
 def connect(path):
@@ -132,6 +132,16 @@ elif command == "get":
 elif command == "rows":
     count = json.load(open(args[0]))["counts"].get(args[1])
     print("" if count is None else count)
+elif command == "signed-clients":
+    # Unexpired MCP connections of signed client registrations, which builds
+    # from before them cannot refresh: their client IDs are not 64 hex digits.
+    try:
+        clients = [row[0] for row in connect(args[0]).execute(
+            "SELECT client FROM mcp_connections WHERE expires > ?", (int(time.time()),))]
+    except sqlite3.OperationalError:
+        clients = []
+    legacy = lambda client: len(client) == 70 and all(c in "0123456789abcdef" for c in client[6:])
+    print(sum(not legacy(client) for client in clients))
 elif command == "space":
     # destination=source pairs. Copies onto one filesystem must fit together,
     # with 64 MiB to spare.
@@ -621,7 +631,7 @@ cmd_deploy() {
 }
 
 cmd_rollback() {
-  local current name output
+  local current name output signed
   resolve_paths
   lock_releases
   current=$(current_release)
@@ -634,6 +644,11 @@ cmd_rollback() {
   [[ -x $releases/$name/locdoc && -f $releases/$name/web/index.html && -f $releases/$name/manifest.json ]] ||
     die "release $name is incomplete"
   [[ ! -f $releases/$name/FAILED ]] || say "warning: $name failed its checks when it was deployed"
+  if [[ $(py get "$releases/$name/manifest.json" kind) == adopted ]]; then
+    signed=$(py signed-clients "$state/locdoc.sqlite")
+    ((signed == 0)) || say "warning: $name was adopted from a build that may predate signed MCP clients;" \
+      "$signed MCP connection(s) would stop refreshing and need connecting again, or roll forward"
+  fi
   make_work
   py inspect "$state/locdoc.sqlite" >"$work/before.json"
   output=$(py compare "$work/before.json" "$work/before.json" exact) ||
@@ -862,6 +877,10 @@ cmd_restore() {
   lock_releases
   current=$(current_release)
   [[ -n $current && -x $releases/$current/locdoc ]] || die "there is no current release to run the restore pass"
+  # The running build install-unit adopted has no restore pass; it would start
+  # a server instead.
+  [[ $(py get "$releases/$current/manifest.json" kind) != adopted ]] ||
+    die "$current was adopted from a build without locdoc --restored; deploy or roll forward to a built release first"
   make_work
   say "checking $snapshot"
   preflight "$snap"

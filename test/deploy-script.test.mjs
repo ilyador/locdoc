@@ -184,6 +184,57 @@ test("rollback repoints current, restores it after failed checks and refuses mis
   }
 });
 
+test("rollback to the adopted release warns about MCP connections, and restore refuses to run there", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
+  try {
+    const { releases, run, current } = await fixture(root);
+    const older = "20260101T000000Z-aaaaaaaaaaaa";
+    const newer = "20260102T000000Z-bbbbbbbbbbbb";
+    const manifest = join(releases, older, "manifest.json");
+    const recorded = JSON.parse(await readFile(manifest, "utf8"));
+    await writeFile(manifest, JSON.stringify({ ...recorded, kind: "adopted" }));
+    spawnSync("ln", ["-s", newer, join(releases, "current")]);
+    // A legacy client, a signed one and an expired signed one.
+    const seeded = spawnSync(
+      "python3",
+      [
+        "-I",
+        "-c",
+        "import sqlite3,sys,time; db=sqlite3.connect(sys.argv[1]); db.execute('CREATE TABLE mcp_connections(id TEXT,client TEXT,expires INTEGER)'); now=int(time.time()); db.executemany('INSERT INTO mcp_connections VALUES(?,?,?)', [('a','mcp_c_'+'0f'*32,now+60),('b','mcp_c_eyJ2IjoxfQ.c2lnbmF0dXJl',now+60),('c','mcp_c_eyJ2IjoxfQ.b2xk',now-60)]); db.commit()",
+        join(root, "state/locdoc.sqlite"),
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(seeded.status, 0, seeded.stderr);
+
+    const rolled = run(["rollback"]);
+    assert.equal(rolled.status, 0, rolled.stderr);
+    assert.match(rolled.stderr, /1 MCP connection\(s\) would stop refreshing/);
+    assert.equal(await current(), older);
+
+    const snapshot = join(root, "snapshot");
+    await mkdir(snapshot);
+    const restore = run(["restore", snapshot]);
+    assert.equal(restore.status, 1);
+    assert.match(
+      restore.stderr,
+      /adopted from a build without locdoc --restored/,
+    );
+    assert.equal(await current(), older);
+    assert.ok(existsSync(join(root, "docs")), "nothing moved");
+
+    const forward = run(["rollback", newer]);
+    assert.equal(forward.status, 0, forward.stderr);
+    assert.doesNotMatch(
+      forward.stderr,
+      /MCP/,
+      "only the adopted release warns",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("--no-restart refuses the default release and systemd folders", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-deploy-"));
   try {
