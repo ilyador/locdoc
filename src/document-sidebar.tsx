@@ -1,6 +1,12 @@
-import { useId, useState, type ReactNode } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { Entry } from "./model";
-import type { SidebarView } from "./workspace";
+import type { SidebarScroll, SidebarView } from "./workspace";
 import { documentTitle } from "./document-links";
 import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
@@ -18,6 +24,7 @@ export function DocumentSidebar({
   query,
   view,
   setView,
+  scroll,
   expanded,
   toggleFolder,
   choose,
@@ -32,13 +39,17 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
+  // Where the list was scrolled, kept by the workspace while this sidebar
+  // mounts again for each document.
+  scroll?: SidebarScroll;
   expanded: Set<string>;
   toggleFolder: (path: string) => void;
   choose: (entry: Entry) => void;
   shareFolder?: (path: string) => void;
   actions?: ReactNode;
   label?: string;
-  // File actions, for the owner's own workspace.
+  // The workspace's file actions, offered only when it is the owner's own.
+  // The tree also keeps its focused row through them as documents open.
   fileActions?: FileActions;
   // Stores the open document's drafts before a new document opens.
   prepare?: () => Promise<void>;
@@ -48,6 +59,37 @@ export function DocumentSidebar({
   const [search, setSearch] = useState({ query, collapsed: new Set<string>() });
   if (search.query !== query) setSearch({ query, collapsed: new Set() });
   const needle = query.trim().toLocaleLowerCase();
+  const panel = useRef<HTMLDivElement>(null);
+  const own = useRef<SidebarScroll>({ date: 0, folders: 0, search: 0 }).current;
+  const places = scroll ?? own;
+  // What the list shows: a view's documents or a search's results, and the
+  // position it keeps for them.
+  const showing = needle ? `${view}:${needle}` : view;
+  const slot: keyof SidebarScroll = needle ? "search" : view;
+  const shown = useRef({ showing, slot });
+  // Each view returns to its own position, and each search starts at the
+  // top of its results. A row or name field that has focus, such as a new
+  // folder's name, stays in sight.
+  useLayoutEffect(() => {
+    if (shown.current.showing === showing) return;
+    shown.current = { showing, slot };
+    if (slot === "search") places.search = 0;
+    const list = panel.current!;
+    list.scrollTop = places[slot];
+    const focused = document.activeElement;
+    if (focused && focused !== list && list.contains(focused))
+      focused.scrollIntoView?.({ block: "nearest" });
+  }, [showing]);
+  // Each document's workspace mounts this sidebar again. The list takes its
+  // position back before it paints and keeps it as it goes, so opening a
+  // document leaves the list where it was.
+  useLayoutEffect(() => {
+    const list = panel.current!;
+    list.scrollTop = places[shown.current.slot];
+    return () => {
+      places[shown.current.slot] = list.scrollTop;
+    };
+  }, []);
   const isOpen = (path: string) =>
     needle ? !search.collapsed.has(path) : expanded.has(path);
   const toggle = (path: string) => {
@@ -176,11 +218,15 @@ export function DocumentSidebar({
         </div>
       )}
       <div
+        ref={panel}
         className={`file-tree ${view === "date" ? "date-list" : "folder-tree"}`}
         role="tabpanel"
         id={`${tabId}-panel`}
         aria-labelledby={`${tabId}-${view}`}
         tabIndex={rows.length ? undefined : 0}
+        onScroll={(event) => {
+          places[shown.current.slot] = event.currentTarget.scrollTop;
+        }}
       >
         <nav
           aria-label={view === "date" ? "Recent documents" : "Document folders"}

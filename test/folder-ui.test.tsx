@@ -4,7 +4,7 @@ import { JSDOM } from "jsdom";
 import React from "react";
 
 let dom, render, renderHook, fireEvent, screen, waitFor, cleanup, act;
-let useWorkspace, DocumentSidebar, SidebarResize, FolderShare;
+let useWorkspace, DocumentSidebar, SidebarResize, FolderShare, WorkspaceSidebar;
 const response = (body) =>
   new Response(JSON.stringify(body), {
     headers: { "content-type": "application/json" },
@@ -69,11 +69,13 @@ before(async () => {
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ SidebarResize } = await import("../src/sidebar-resize.tsx"));
   ({ FolderShare } = await import("../src/sharing.tsx"));
+  ({ WorkspaceSidebar } = await import("../src/workspace-sidebar.tsx"));
 });
 afterEach(() => {
   cleanup();
   localStorage.removeItem("locdoc.sidebarView");
   localStorage.removeItem("locdoc.sidebarWidth");
+  localStorage.removeItem("locdoc.sidebar");
 });
 after(() => dom.window.close());
 
@@ -492,4 +494,72 @@ test("failed permission mutations retain the previous grant and allow a retry", 
     ),
   );
   assert.equal(changed, 1);
+});
+
+test("a folder link visitor's tree keeps its place and keyboard focus as the next document opens", async () => {
+  const shared = Array.from({ length: 30 }, (_, n) => ({
+    kind: "file",
+    path: `Shared ${String(n).padStart(2, "0")}.md`,
+    id: `shared-${n}`,
+    shared: true,
+    modified: 1000 + n,
+  }));
+  globalThis.fetch = async (input) =>
+    String(input).startsWith("/api/open/")
+      ? response({
+          owner: false,
+          root: "",
+          guest: "guest",
+          publicUrl: location.origin,
+          folder: { name: "Notes", permission: "view" },
+          entries: shared,
+          document: { id: "shared-29" },
+        })
+      : response({ entries: shared });
+  localStorage.setItem("locdoc.sidebarView", "date");
+  let workspace;
+  // Like WorkspaceView, which mounts a new DocumentWorkspace, and with it the
+  // sidebar, for every document.
+  function Visitor() {
+    workspace = useWorkspace();
+    return (
+      <WorkspaceSidebar
+        key={workspace.id || "empty"}
+        workspace={workspace}
+        doc={null}
+        filename=""
+        searchInput={{ current: null }}
+        choose={(entry) =>
+          void workspace.navigate(workspace.id, entry.id, async () => {})
+        }
+        prepare={async () => {}}
+        onCreate={() => {}}
+        onShareFolder={() => {}}
+        onSettings={() => {}}
+      />
+    );
+  }
+  render(<Visitor />);
+  const row = (path) =>
+    document.querySelector(`[role="treeitem"][data-path="${path}"]`);
+  const list = () => document.querySelector(".file-tree");
+  await waitFor(() => assert.ok(row("Shared 10.md")));
+  assert.equal(document.querySelectorAll(".tree-more").length, 0, "No file actions");
+  row("Shared 10.md").focus();
+  list().scrollTop = 420;
+  fireEvent.keyDown(row("Shared 10.md"), { key: "Enter" });
+  await waitFor(() => assert.equal(workspace.id, "shared-10"));
+  await waitFor(() =>
+    assert.equal(row("Shared 10.md").getAttribute("aria-current"), "page"),
+  );
+  assert.ok(
+    document.activeElement === row("Shared 10.md"),
+    "The opened row keeps keyboard focus",
+  );
+  assert.equal(list().scrollTop, 420, "The list stays where it was");
+  fireEvent.keyDown(row("Shared 10.md"), { key: "ArrowDown" });
+  assert.ok(
+    document.activeElement === row("Shared 09.md"),
+    "The arrow keys go on from there",
+  );
 });

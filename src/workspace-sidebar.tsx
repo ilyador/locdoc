@@ -50,6 +50,7 @@ export function WorkspaceSidebar({
     setExpanded,
     sidebarView,
     setSidebarView,
+    sidebarScroll,
   } = workspace;
   const toggleFolder = (path: string) =>
     setExpanded((prev) => {
@@ -109,13 +110,14 @@ export function WorkspaceSidebar({
             query={query}
             view={sidebarView}
             setView={setSidebarView}
+            scroll={sidebarScroll}
             expanded={expanded}
             toggleFolder={toggleFolder}
             choose={choose}
             prepare={prepare}
-            fileActions={
-              config.owner && !sharedToken ? workspace.files : undefined
-            }
+            // Only the owner's tree offers file actions, but every tree
+            // keeps its focused row through them as documents open.
+            fileActions={workspace.files}
             label={config.folder?.name}
             actions={
               config.owner &&

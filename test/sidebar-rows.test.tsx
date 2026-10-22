@@ -164,6 +164,21 @@ test("on touch and narrow layouts a file title keeps the first line to itself, w
   assert.equal(folder.actions.opacity, "1");
 });
 
+test("the list keeps its scroll offset when an edited document moves to the top of By date", () => {
+  // React keeps the moved row's element and moves the rows above it after it;
+  // the browser's scroll anchoring would then follow that row to the top.
+  for (const css of [stylesheet, touch]) {
+    style.textContent = css;
+    for (const view of ["date", "folders"] as const) {
+      const page = render(<Sidebar view={view} />);
+      const list = page.container.querySelector(".file-tree")!;
+      assert.equal(getComputedStyle(list).overflowY, "auto", view);
+      assert.equal(getComputedStyle(list).overflowAnchor, "none", view);
+      cleanup();
+    }
+  }
+});
+
 test("desktop rows with a fine pointer keep the time beside the title and reveal actions on hover", () => {
   style.textContent = stylesheet;
   for (const view of ["date", "folders"] as const) {
