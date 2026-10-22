@@ -363,6 +363,10 @@ button:hover {
   padding: 0 12px;
   overflow-y: auto;
   overscroll-behavior: contain;
+  /* An edited document moves to the top of By date. React keeps its row and
+     moves the rows above it, and scroll anchoring would follow that row up.
+     The list keeps its offset instead. */
+  overflow-anchor: none;
   flex: 1;
   display: flex;
   flex-direction: column;
