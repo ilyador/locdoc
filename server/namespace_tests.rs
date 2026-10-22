@@ -978,6 +978,105 @@ fn an_unreadable_folder_defers_retirement_until_it_can_be_read() {
     assert_eq!(found.token.as_deref(), Some("hidden-link"));
 }
 
+#[test]
+fn a_folder_nothing_can_move_into_holds_only_the_documents_recorded_inside_it() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let inside = s.create_document("Locked/inside.md").unwrap();
+    let below = s.create_document("Search/below.md").unwrap();
+    let removed = s.create_document("removed.md").unwrap();
+    share_link(&s, &inside.id, "inside-link");
+    share_link(&s, &below.id, "below-link");
+    share(&s, &removed.id);
+    for path in ["Locked/inside.md", "Search/below.md", "removed.md"] {
+        fs::remove_file(s.root.join(path)).unwrap();
+    }
+    // Locked cannot be listed or entered, like a root-owned lost+found;
+    // Search can be entered but not listed. Neither can take a moved file.
+    let (locked, search) = (s.root.join("Locked"), s.root.join("Search"));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::set_permissions(&search, fs::Permissions::from_mode(0o100)).unwrap();
+    let passed = s.retire_missing_documents();
+    let held = [&inside, &below].map(|document| s.doc(&document.id).map(|d| d.token));
+    let retired = s.doc(&removed.id).is_err();
+    for folder in [&locked, &search] {
+        fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    passed.unwrap();
+    assert!(
+        retired,
+        "A file removed elsewhere cannot be in a folder no one could move it into"
+    );
+    let [inside_link, below_link] = held.map(|token| token.unwrap());
+    assert_eq!(inside_link.as_deref(), Some("inside-link"));
+    assert_eq!(below_link.as_deref(), Some("below-link"));
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&inside.id).is_err());
+    assert!(s.doc(&below.id).is_err());
+}
+
+#[test]
+fn a_folder_locdoc_could_move_files_into_but_not_list_holds_every_missing_document() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    let moved = s.create_document("moved.md").unwrap();
+    share(&s, &removed.id);
+    share_link(&s, &moved.id, "moved-link");
+    s.create_folder("Drop").unwrap();
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    fs::rename(s.root.join("moved.md"), s.root.join("Drop/moved.md")).unwrap();
+    let drop = s.root.join("Drop");
+    s.reconciliation.take();
+    // Writable and searchable but not readable: either file could be there.
+    fs::set_permissions(&drop, fs::Permissions::from_mode(0o300)).unwrap();
+    let passed = s.retire_missing_documents();
+    let removed_link = s.doc(&removed.id).map(|d| d.token);
+    let moved_path = s.doc(&moved.id).map(|d| d.path);
+    let retry = s.reconciliation.take();
+    fs::set_permissions(&drop, fs::Permissions::from_mode(0o700)).unwrap();
+    passed.unwrap();
+    assert_eq!(removed_link.unwrap().as_deref(), Some("old-link"));
+    assert_eq!(moved_path.unwrap(), "moved.md");
+    assert!(
+        retry.unwrap() > Instant::now() + Duration::from_secs(10),
+        "A held document must not rescan the tree every second"
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    let found = s.doc(&moved.id).unwrap();
+    assert_eq!(found.path, "Drop/moved.md");
+    assert_eq!(found.token.as_deref(), Some("moved-link"));
+}
+
+#[test]
+fn lost_and_found_at_the_documents_root_never_holds_a_missing_document() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    share(&s, &removed.id);
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    // fsck's folder at the top of a dedicated mount, here even one that
+    // Locdoc could move files into.
+    let found = s.root.join("lost+found");
+    fs::create_dir(&found).unwrap();
+    fs::set_permissions(&found, fs::Permissions::from_mode(0o300)).unwrap();
+    let passed = s.retire_missing_documents();
+    let retired = s.doc(&removed.id).is_err();
+    fs::set_permissions(&found, fs::Permissions::from_mode(0o700)).unwrap();
+    passed.unwrap();
+    assert!(retired, "lost+found must not keep every walk incomplete");
+}
+
 fn share_link(s: &Store, id: &str, token: &str) {
     s.db.lock()
         .unwrap()

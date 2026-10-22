@@ -7,6 +7,7 @@
 use super::documents::{format, relative_path, retire};
 use super::*;
 use std::hash::Hash;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::time::{Duration, Instant};
 
@@ -387,7 +388,8 @@ enum Pass {
     /// Follow moves and record new evidence. Editors briefly remove or swap
     /// files while saving, so missing documents wait for a settled pass.
     Discover,
-    /// Also retire documents that a complete observation could not find.
+    /// Also retire documents that the observation could not find and that
+    /// no folder it could not list may hide.
     Settled,
 }
 
@@ -402,6 +404,36 @@ struct Namespace {
 
 fn sooner(retry: &mut Option<Duration>, delay: Duration) {
     *retry = Some(retry.map_or(delay, |retry| retry.min(delay)));
+}
+
+/// The folders a walk could not list in full. One can hide the file of a
+/// document recorded inside it, and any moved file if this process could
+/// have moved a file into it.
+#[derive(Default)]
+struct Unlisted {
+    folders: Vec<PathBuf>,
+    writable: bool,
+}
+impl Unlisted {
+    fn add(&mut self, folder: &Path) {
+        let path = std::ffi::CString::new(folder.as_os_str().as_bytes());
+        let movable = |path: std::ffi::CString| unsafe {
+            libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0
+        };
+        self.writable |= path.is_ok_and(movable);
+        self.folders.push(folder.to_owned());
+    }
+    fn complete(&self) -> bool {
+        self.folders.is_empty()
+    }
+    /// Whether the file of a document recorded at `path` may be in one.
+    fn may_hide(&self, root: &Path, path: &str) -> bool {
+        self.writable
+            || self
+                .folders
+                .iter()
+                .any(|folder| root.join(path).starts_with(folder))
+    }
 }
 
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
@@ -685,8 +717,8 @@ impl Store {
         for document in &mut tracked {
             document.seen = self.inspect(&document.path);
         }
-        let (files, linked, complete) = self.survey(&mut tracked);
-        if !complete
+        let (files, linked, unlisted) = self.survey(&mut tracked);
+        if !unlisted.complete()
             || tracked
                 .iter()
                 .any(|document| document.seen == Seen::Unknown)
@@ -704,7 +736,7 @@ impl Store {
         }
         // Every restored file is new, so an earlier gap is no evidence here.
         let mut plan = classify(&tracked, &[], &files, &HashSet::new());
-        self.confirm_missing(&mut plan);
+        self.confirm_missing(&mut plan, &unlisted);
         if !plan.undecided.is_empty() {
             return Ok(Some(
                 "Some files changed while the restore pass looked at them. Run locdoc --restored again.".into(),
@@ -730,7 +762,7 @@ impl Store {
             .map(|document| (document.id.as_str(), document.path.as_str()))
             .collect();
         self.refresh_media_identities(&rows)?;
-        self.apply(Pass::Settled, plan, &tracked, &reserved, complete, started)?;
+        self.apply(Pass::Settled, plan, &tracked, &reserved, &unlisted, started)?;
         Ok(None)
     }
 
@@ -774,7 +806,7 @@ impl Store {
             self.observed_in_place(&observed)?;
             return Ok(HashSet::new());
         }
-        let (files, _, complete) = self.survey(&mut tracked);
+        let (files, _, unlisted) = self.survey(&mut tracked);
         let held: Vec<(&str, &Identity)> = pending
             .iter()
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
@@ -790,21 +822,25 @@ impl Store {
             .map(|document| document.id.as_str())
             .collect();
         let mut plan = classify(&tracked, &held, &files, &lapsed);
-        if pass == Pass::Settled && complete {
-            self.confirm_missing(&mut plan);
+        if pass == Pass::Settled {
+            self.confirm_missing(&mut plan, &unlisted);
         }
-        self.apply(pass, plan, &tracked, &reserved, complete, started)
+        self.apply(pass, plan, &tracked, &reserved, &unlisted, started)
     }
 
     /// Walk the tree and settle what each tracked path shows, given what
     /// `inspect` saw there first. Returns the files no other name links to,
-    /// the evidence of files that have other names, and whether every folder
-    /// was listed.
+    /// the evidence of files that have other names, and the folders it could
+    /// not list.
     fn survey(
         &self,
         tracked: &mut [Tracked<Identity>],
-    ) -> (HashMap<String, Option<Identity>>, HashSet<Identity>, bool) {
-        let (mut files, mut linked, complete) = self.walk();
+    ) -> (
+        HashMap<String, Option<Identity>>,
+        HashSet<Identity>,
+        Unlisted,
+    ) {
+        let (mut files, mut linked, unlisted) = self.walk();
         for document in tracked.iter_mut() {
             let walked = files.get(&document.path).cloned();
             document.seen = match (&document.seen, walked) {
@@ -835,30 +871,31 @@ impl Store {
             .iter()
             .filter_map(|path| files.remove(path).flatten())
             .collect();
-        (files, aliased, complete)
+        (files, aliased, unlisted)
     }
 
     /// A file moved between folders during the walk is in neither listing.
-    /// Retire only what a second complete walk cannot find either.
-    fn confirm_missing(&self, plan: &mut Plan<Identity>) {
-        if !plan
-            .missing
-            .iter()
-            .any(|missing| missing.evidence.is_some())
-        {
+    /// Retire only what a second walk cannot find either. A document whose
+    /// file a folder the first walk could not list may hide waits for it.
+    fn confirm_missing(&self, plan: &mut Plan<Identity>, unlisted: &Unlisted) {
+        let candidate = |missing: &Missing<Identity>| {
+            missing.evidence.is_some() && !unlisted.may_hide(&self.root, &missing.path)
+        };
+        if !plan.missing.iter().any(candidate) {
             return;
         }
-        let (again, again_linked, still_complete) = self.walk();
+        let (again, again_linked, still) = self.walk();
         let present: HashSet<&Identity> = again
             .iter()
             .filter(|(path, _)| !again_linked.contains(*path))
             .filter_map(|(_, evidence)| evidence.as_ref())
             .collect();
         plan.missing.retain(|missing| {
-            let gone = missing
-                .evidence
-                .as_ref()
-                .is_none_or(|evidence| still_complete && !present.contains(evidence));
+            // The others retire or wait in `apply` whatever this walk shows.
+            let Some(evidence) = missing.evidence.as_ref().filter(|_| candidate(missing)) else {
+                return true;
+            };
+            let gone = !still.may_hide(&self.root, &missing.path) && !present.contains(evidence);
             if !gone {
                 plan.undecided.push(missing.id.clone());
             }
@@ -965,32 +1002,35 @@ impl Store {
         }
     }
 
-    /// Walk the tree once, never following symlinks or entering dot folders.
-    /// An entry that vanishes is skipped; any other error makes the
-    /// observation incomplete rather than failing the pass. Also returns the
-    /// files that other names link to.
-    fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, bool) {
+    /// Walk the tree once, never following symlinks or entering dot folders
+    /// or the root's lost+found, which fsck owns. An entry that vanishes is
+    /// skipped; a folder that cannot be listed in full is reported rather
+    /// than failing the pass. Also returns the files that other names link to.
+    fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, Unlisted) {
         let mut files = HashMap::new();
         let mut linked = HashSet::new();
-        let mut complete = true;
+        let mut unlisted = Unlisted::default();
         let mut folders = vec![self.root.clone()];
         while let Some(folder) = folders.pop() {
             let children = match walk_step(&folder).and_then(|()| fs::read_dir(&folder)) {
                 Ok(children) => children,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => {
-                    complete = false;
+                    unlisted.add(&folder);
                     continue;
                 }
             };
+            let mut partial = false;
             for child in children {
                 let Ok(child) = child else {
-                    complete = false;
+                    partial = true;
                     continue;
                 };
                 // Document paths are UTF-8 and never hidden.
                 let name = child.file_name();
-                if name.to_str().is_none_or(|name| name.starts_with('.')) {
+                if name.to_str().is_none_or(|name| {
+                    name.starts_with('.') || (name == "lost+found" && folder == self.root)
+                }) {
                     continue;
                 }
                 let path = child.path();
@@ -1009,11 +1049,15 @@ impl Store {
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => complete = false,
+                    // An entry it cannot inspect could be a folder holding anything.
+                    Err(_) => partial = true,
                 }
             }
+            if partial {
+                unlisted.add(&folder);
+            }
         }
-        (files, linked, complete)
+        (files, linked, unlisted)
     }
 
     /// For a restore only: pair each document whose recorded file is found
@@ -1178,7 +1222,7 @@ impl Store {
         plan: Plan<Identity>,
         tracked: &[Tracked<Identity>],
         reserved: &HashSet<String>,
-        complete: bool,
+        unlisted: &Unlisted,
         started: i64,
     ) -> Result<HashSet<String>> {
         let unsettled: HashSet<&str> = plan
@@ -1229,9 +1273,9 @@ impl Store {
         // An unlisted folder can only hide a file whose evidence a later walk
         // could find. Without evidence, waiting would keep a removed
         // document's links alive for whatever file next takes its name.
-        let (waiting, mut retiring): (Vec<_>, Vec<_>) = missing
-            .into_iter()
-            .partition(|missing| !complete && missing.evidence.is_some());
+        let (waiting, mut retiring): (Vec<_>, Vec<_>) = missing.into_iter().partition(|missing| {
+            missing.evidence.is_some() && unlisted.may_hide(&self.root, &missing.path)
+        });
         if !waiting.is_empty() {
             sooner(&mut retry, INCOMPLETE_RETRY);
         }
