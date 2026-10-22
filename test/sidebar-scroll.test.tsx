@@ -228,3 +228,27 @@ test("a new folder's name field stays in sight when it brings up Folders", async
     prototype.scrollIntoView = native;
   }
 });
+
+test("a search starts at the top of its results, and clearing it returns to the list's place", async () => {
+  await open("date", "Doc 47.md");
+  const scrollTo = (top: number) => {
+    list().scrollTop = top;
+    fireEvent.scroll(list());
+  };
+  const find = (text: string) =>
+    fireEvent.change(screen.getByRole("textbox", { name: "Find a document" }), {
+      target: { value: text },
+    });
+  scrollTo(1680);
+  find("doc");
+  assert.equal(list().scrollTop, 0, "The results start at their top");
+  scrollTo(210);
+  find("doc 1");
+  assert.equal(list().scrollTop, 0, "A new search starts again at the top");
+  scrollTo(84);
+  fireEvent.click(row("Doc 12.md"));
+  await opened("Doc 12.md");
+  assert.equal(list().scrollTop, 84, "Opening a result leaves the results where they were");
+  find("");
+  assert.equal(list().scrollTop, 1680, "Without the search the list is back where it was");
+});
