@@ -198,7 +198,9 @@ struct SignedRequest {
     redirect: String,
     scope: String,
     challenge: String,
-    state: String,
+    /// The client's state exactly as received; an empty one is still sent
+    /// back (RFC 6749 4.1.2).
+    state: Option<String>,
     resource: String,
     exp: i64,
 }
@@ -527,8 +529,12 @@ fn begin(s: &Store, request: Authorization) -> OAuthResult<String> {
             "Use an authorization code, S256 PKCE and the Locdoc MCP resource.",
         ));
     }
-    let state = request.state.unwrap_or_default();
-    if state.len() > 2048 || state.chars().any(char::is_control) || !client_id(&request.client_id) {
+    let state = request.state;
+    if state
+        .as_deref()
+        .is_some_and(|state| state.len() > 2048 || state.chars().any(char::is_control))
+        || !client_id(&request.client_id)
+    {
         return Err(oauth("invalid_request", "Invalid authorization request."));
     }
     let scope = scope_string(&scopes(request.scope.as_deref().unwrap_or("locdoc:read"))?);
@@ -646,8 +652,8 @@ fn decide(s: &Store, request: Consent) -> OAuthResult<String> {
     } else {
         url.query_pairs_mut().append_pair("error", "access_denied");
     }
-    if !pending.state.is_empty() {
-        url.query_pairs_mut().append_pair("state", &pending.state);
+    if let Some(state) = &pending.state {
+        url.query_pairs_mut().append_pair("state", state);
     }
     tx.commit()?;
     Ok(url.into())
@@ -1492,6 +1498,35 @@ mod tests {
             url.contains("code="),
             "A flood cannot exhaust owner consent"
         );
+    }
+    #[test]
+    fn consent_returns_exactly_the_state_it_received_even_an_empty_one() {
+        let (_dir, s) = fixture();
+        let client = client(&s);
+        for (state, scope) in [
+            (Some(""), "locdoc:read"),
+            (Some(""), "locdoc:write"),
+            (None, "locdoc:read"),
+            (None, "locdoc:write"),
+        ] {
+            let mut request = authorization(&s, &client);
+            request.state = state.map(Into::into);
+            request.scope = Some(scope.into());
+            let result = decide(
+                &s,
+                Consent {
+                    request: requested(&s, request),
+                    allow: scope == "locdoc:read",
+                },
+            )
+            .unwrap();
+            let url = url::Url::parse(&result).unwrap();
+            let echoed = url
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value.into_owned());
+            assert_eq!(echoed.as_deref(), state, "{result}");
+        }
     }
     #[test]
     fn consent_persists_the_client_and_stored_clients_authorize_while_retained() {
