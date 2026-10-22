@@ -1139,8 +1139,14 @@ fn a_state_folder_kept_inside_the_documents_folder_is_no_part_of_the_namespace()
     fs::create_dir_all(s.data.join("fonts")).unwrap();
     fs::write(s.data.join("fonts/cover.png"), "Not for documents").unwrap();
     fs::write(s.data.join("notes.md"), "Not a document\n").unwrap();
-    // Nothing is created, renamed, duplicated, moved or restored into it.
+    // Nothing is created, renamed, duplicated, moved or restored into it,
+    // and each refusal says why, though the sidebar lists no such folder.
     let attempts = [
+        ("new folder at its name", s.create_folder("state")),
+        (
+            "rename a folder to its name",
+            s.rename_folder("Elsewhere", "state").map(|_| ()),
+        ),
         ("new folder", s.create_folder("state/Notes")),
         (
             "new document",
@@ -1164,11 +1170,15 @@ fn a_state_folder_kept_inside_the_documents_folder_is_no_part_of_the_namespace()
     ];
     for (what, result) in attempts {
         assert_eq!(
-            result.map_err(|error| error.0),
-            Err(StatusCode::BAD_REQUEST),
+            result.map_err(|error| (error.0, error.1)),
+            Err((
+                StatusCode::BAD_REQUEST,
+                "Locdoc keeps its own state in that folder. Choose another destination.".into()
+            )),
             "{what}"
         );
     }
+    assert!(s.root.join("Elsewhere").is_dir());
     for path in ["Notes", "new.md", "Sub", "page.md", "copy.md", "legacy.md"] {
         assert!(!s.data.join(path).exists(), "{path}");
     }

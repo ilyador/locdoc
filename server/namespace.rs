@@ -2783,16 +2783,13 @@ impl Store {
         if !destination.parent().is_some_and(Path::is_dir) {
             return Err(bad("Choose an existing destination folder."));
         }
+        // A folder moved into the state folder could never move out again.
+        // Its own name is taken too, though no listing shows it.
+        self.not_into_state(&destination)?;
         if fs::symlink_metadata(&destination).is_ok() {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "That path already exists.".into(),
-            ));
-        }
-        // A folder moved into the state folder could never move out again.
-        if self.holds_state(&destination) {
-            return Err(bad(
-                "Locdoc keeps its own state in that folder. Choose another destination.",
             ));
         }
         let moving = self.documents_below(&from)?;
