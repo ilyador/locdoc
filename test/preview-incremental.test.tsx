@@ -321,6 +321,108 @@ test("incremental Markdown preview rechecks comment literal context and neighbor
   state = replace(state, "Response]", "Response]]", "complete source record");
 });
 
+test("a line shown in a comment record's line keeps a fresh preview through edits and selections", () => {
+  const source = [
+    "Paragraph.\n[[comment(alex): note]]\n# Heading with **strong** words",
+    "Quote lead.\n[[comment(alex): on the quote]]\n> A quoted line\n> continued",
+    "List lead.\n[[comment(alex): on the list]]\n- [ ] A task\n- An item\n  - Nested",
+    "Code lead.\n[[comment(alex): on the code]]\n```md\n**Literal**\n```",
+    "> Lazy quote\n[[comment(alex): lazy]]\n## Second heading",
+    "- Lazy item\n[[comment(alex): lazy item]]\n### Third heading",
+    "Thread.\n[[comment(alex): first]]\n[[comment(ana): reply]]\nAfter the thread.",
+    "Tail.",
+  ].join("\n\n");
+  let state = create(source);
+  const at = (text: string) => {
+    const index = state.doc.toString().indexOf(text);
+    assert.ok(index >= 0, `fixture text ${text} must exist`);
+    return index;
+  };
+  for (const [text, label] of [
+    ["[[comment(alex): note]]", "caret at the start of a record's line"],
+    ["# Heading", "caret on the line the record shows"],
+    ["- [ ] A task", "caret on a shown task"],
+    ["[[comment(alex): lazy]]", "caret at a lazy quote record"],
+    ["Paragraph.", "caret before the record's line"],
+  ])
+    state = update(state, { selection: { anchor: at(text) } }, label);
+  state = replace(state, "# Heading", "# Heading revised", "edit a shown line");
+  state = update(
+    state,
+    { changes: { from: at("# Heading"), insert: "x" } },
+    "type at the start of a shown line",
+  );
+  state = replace(state, "x# Heading", "# Heading", "restore the heading");
+  state = update(
+    state,
+    { changes: { from: at("> A quoted"), insert: "\n" } },
+    "a blank line between a record and its shown line",
+  );
+  state = replace(
+    state,
+    "[[comment(alex): on the quote]]\n\n",
+    "[[comment(alex): on the quote]]\n",
+    "the quote shows in the record's line again",
+  );
+  state = replace(
+    state,
+    "[[comment(alex): note]]",
+    "[[comment(alex): note]]\n[[comment(ana): a reply]]",
+    "a reply joins the record",
+  );
+  state = replace(
+    state,
+    "[[comment(alex): on the list]]\n",
+    "",
+    "remove a record before a list",
+  );
+  state = replace(
+    state,
+    "List lead.\n",
+    "List lead.\n[[comment(ben): a new record]]\n",
+    "add a record before a list",
+  );
+  state = replace(
+    state,
+    "[[comment(alex): on the code]]",
+    "\\[[comment(alex): on the code]]",
+    "escape a record before a fence",
+  );
+  state = replace(
+    state,
+    "\\[[comment(alex): on the code]]",
+    "[[comment(alex): on the code]]",
+    "unescape a record before a fence",
+  );
+  let seed = 0x7ec0d;
+  const random = (limit: number) => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed % limit;
+  };
+  const insertions = [
+    "x",
+    "\n",
+    "# ",
+    "> ",
+    "- ",
+    "```",
+    "\\",
+    "[[comment(ana): x]]\n",
+  ];
+  for (let index = 0; index < 60; index++) {
+    const from = random(state.doc.length + 1);
+    const to = Math.min(state.doc.length, from + random(3));
+    state = update(
+      state,
+      {
+        changes: { from, to, insert: insertions[random(insertions.length)] },
+        selection: { anchor: from },
+      },
+      `edit beside shown lines ${index}`,
+    );
+  }
+});
+
 test("selection changes reveal exactly the affected Markdown lines and blocks", () => {
   let state = create(richSource);
   for (const phrase of [

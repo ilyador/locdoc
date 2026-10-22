@@ -215,6 +215,22 @@ test("a Hebrew line after a comment record on its own line reads right to left",
   }
 });
 
+test("Hebrew after a reply on the line below its record reads right to left", () => {
+  const editor = mount(
+    "Notes/comment.md",
+    "English line\n[[comment(alex): A note]]\n[[comment(ana): A reply]] שורה אחרי התגובה\nEnglish line again",
+  );
+  try {
+    assert.deepEqual(lines(editor.view), [
+      "ltr: English line",
+      "rtl:  שורה אחרי התגובה",
+      "ltr: English line again",
+    ]);
+  } finally {
+    editor.close();
+  }
+});
+
 test("Fountain and plain text lines follow the text they show", () => {
   const fountain = mount(
     "Script.fountain",

@@ -1,6 +1,7 @@
 import type { ChangeDesc, EditorState, Transaction } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import { Tree, type TreeBuffer } from "@lezer/common";
+import { shownLines } from "./editor-comments";
 
 export type PreviewRange = { from: number; to: number };
 
@@ -99,12 +100,51 @@ export function previewRanges(tr: Transaction): PreviewRange[] {
       };
     })
     .sort((a, b) => a.from - b.from || a.to - b.to);
+  return coverShownLines(tr.state, merge(expanded));
+}
+
+// Sorted ranges, with overlapping and adjacent ones joined.
+function merge(ranges: PreviewRange[]) {
   const merged: PreviewRange[] = [];
-  for (const range of expanded) {
+  for (const range of ranges) {
     const previous = merged.at(-1);
     if (previous && range.from <= previous.to + 1)
       previous.to = Math.max(previous.to, range.to);
     else merged.push(range);
   }
   return merged;
+}
+
+// A record on a line of its own shows the next line's text, and its styles,
+// in the record's line (editor-comments.ts). Preview both lines, and their
+// blocks, together. Ranges start at line starts.
+function coverShownLines(state: EditorState, ranges: PreviewRange[]) {
+  const lines = [...shownLines(state).at];
+  for (let grown = lines.length > 0; grown;) {
+    grown = false;
+    for (const range of ranges) {
+      let low = 0,
+        high = lines.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (lines[middle][0] < range.from) low = middle + 1;
+        else high = middle;
+      }
+      for (let i = low; i < lines.length && lines[i][1] <= range.to; i++) {
+        const [line, start] = lines[i];
+        const end = state.doc.lineAt(line).to;
+        if (start >= range.from && end <= range.to) continue;
+        const a = blockAt(state, start, 1);
+        const b = blockAt(state, end, -1);
+        range.from = Math.min(
+          range.from,
+          state.doc.lineAt(Math.min(start, a.from)).from,
+        );
+        range.to = Math.max(range.to, state.doc.lineAt(Math.max(end, b.to)).to);
+        grown = true;
+      }
+    }
+    if (grown) ranges = merge(ranges.sort((a, b) => a.from - b.from));
+  }
+  return ranges;
 }

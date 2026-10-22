@@ -14,7 +14,12 @@ import {
 } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 import { commentMarkdown } from "./comment-syntax";
-import { visibleTextRanges } from "./editor-comments";
+import {
+  sameSourceComments,
+  shownLines,
+  sourceCommentRanges,
+  visibleTextRanges,
+} from "./editor-comments";
 import { resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
@@ -71,8 +76,22 @@ export function livePreview(
       from: state.doc.lineAt(r.from).from,
       to: state.doc.lineAt(r.to).to,
     }));
-    const inactive = (from: number, to = from) =>
-      !active.some((r) => from <= r.to && to >= r.from);
+    // A record on a line of its own shows the next line's text in its line
+    // (editor-comments.ts). Both lines reveal their source as that one line.
+    const shown = shownLines(state);
+    const inactive = (from: number, to = from) => {
+      if (shown.at.size) {
+        from = shown.at.get(state.doc.lineAt(from).from) ?? from;
+        const line = shown.of.get(state.doc.lineAt(to).from);
+        if (line !== undefined) to = state.doc.lineAt(line).to;
+      }
+      return !active.some((r) => from <= r.to && to >= r.from);
+    };
+    // Line styles are placed last, at the line their text shows in.
+    const lineStyles: { at: number; style: Decoration }[] = [];
+    const lineStyle = (at: number, style: Decoration) =>
+      lineStyles.push({ at, style });
+    const blockStarts = new Set<number>();
     // Inline media reveals its source only when a selection touches it, so
     // writing elsewhere on a long line keeps the picture in place.
     const touched = (from: number, to: number) =>
@@ -104,6 +123,7 @@ export function livePreview(
               !state.sliceDoc(to, line.to).trim()
             ) {
               if (!inactive(line.from, line.to)) return;
+              blockStarts.add(line.from);
               decorations.push(
                 Decoration.replace({
                   widget: new MediaWidget(src, image.alt, image.title),
@@ -130,6 +150,7 @@ export function livePreview(
                 line++
               )
                 tableLines.add(line);
+              blockStarts.add(state.doc.lineAt(from).from);
               decorations.push(
                 Decoration.replace({
                   widget: new TableWidget(source, !state.readOnly),
@@ -143,15 +164,24 @@ export function livePreview(
             for (let pos = from; pos <= to;) {
               const line = state.doc.lineAt(pos);
               codeLines.add(line.number);
-              decorations.push(
-                Decoration.line({ class: "md-code-line" }).range(line.from),
-              );
+              lineStyle(line.from, Decoration.line({ class: "md-code-line" }));
               if (line.to >= to) break;
               pos = line.to + 1;
             }
           }
-          if (name === "ListItem" || name === "Task")
-            blockEnds.add(state.doc.lineAt(Math.max(from, to - 1)).from);
+          // A list item ends at its last line with visible text, not at
+          // records that continue it.
+          if (name === "ListItem" || name === "Task") {
+            let line = state.doc.lineAt(Math.max(from, to - 1));
+            while (
+              line.from > from &&
+              !visibleTextRanges(state, line.from, line.to).some((range) =>
+                state.sliceDoc(range.from, range.to).trim(),
+              )
+            )
+              line = state.doc.lineAt(line.from - 1);
+            blockEnds.add(line.from);
+          }
           if (name === "Paragraph") {
             let list = n.node.parent;
             while (list && list.name !== "ListItem") list = list.parent;
@@ -170,10 +200,9 @@ export function livePreview(
           }
           const heading = name.match(/^ATXHeading(\d)$/);
           if (heading)
-            decorations.push(
-              Decoration.line({ class: `md-h${heading[1]}` }).range(
-                state.doc.lineAt(from).from,
-              ),
+            lineStyle(
+              state.doc.lineAt(from).from,
+              Decoration.line({ class: `md-h${heading[1]}` }),
             );
           if (name === "StrongEmphasis" || name === "Emphasis") {
             const content = emphasisContentRange(n);
@@ -236,10 +265,9 @@ export function livePreview(
             const marker = n.node.parent?.parent?.getChild("ListMark");
             const checked =
               state.sliceDoc(from + 1, from + 2).toLowerCase() === "x";
-            decorations.push(
-              Decoration.line({
-                class: checked ? "md-task done" : "md-task",
-              }).range(line.from),
+            lineStyle(
+              line.from,
+              Decoration.line({ class: checked ? "md-task done" : "md-task" }),
             );
             if (marker)
               decorations.push(Decoration.replace({}).range(marker.from, from));
@@ -311,16 +339,19 @@ export function livePreview(
           }
         },
       });
+    // The record's line shows the next line's text with its styles, in place
+    // of its own, unless a figure or table replaces that next line.
+    const displayedAt = (at: number) =>
+      blockStarts.has(at) ? at : (shown.at.get(at) ?? at);
     // Code and tables inside a quote keep their own presentation.
     for (const line of quoteLines)
       if (!codeLines.has(line) && !tableLines.has(line))
-        decorations.push(
-          Decoration.line({ class: "md-quote" }).range(
-            state.doc.line(line).from,
-          ),
+        lineStyle(
+          state.doc.line(line).from,
+          Decoration.line({ class: "md-quote" }),
         );
     for (const from of blockEnds)
-      decorations.push(Decoration.line({ class: "md-block-end" }).range(from));
+      lineStyle(from, Decoration.line({ class: "md-block-end" }));
     for (const [from, { content, indent }] of listPrefixes) {
       // A conversation can split one source line into several display blocks.
       // Share its indent across text fragments while leaving the host full-width.
@@ -328,7 +359,7 @@ export function livePreview(
         BlockWrapper.create({
           tagName: "div",
           attributes: { class: "md-list", style: `--list-indent: ${indent}` },
-        }).range(from, state.doc.lineAt(from).to),
+        }).range(displayedAt(from), state.doc.lineAt(from).to),
       );
       decorations.push(
         Decoration.mark({ class: "md-list-prefix" }).range(from, content),
@@ -343,10 +374,13 @@ export function livePreview(
         const line = state.doc.line(i);
         if (codeLines.has(i) || tableLines.has(i)) continue;
         if (/^\s*[-*_]{3,}\s*$/.test(line.text) && inactive(line.from, line.to))
-          decorations.push(
-            Decoration.line({ class: "md-rule" }).range(line.from),
-          );
+          lineStyle(line.from, Decoration.line({ class: "md-rule" }));
       }
+    for (const { at, style } of lineStyles) {
+      const line = shown.of.get(at);
+      if (line === undefined || blockStarts.has(line))
+        decorations.push(style.range(displayedAt(at)));
+    }
     return {
       decorations,
       wrappers,
@@ -376,10 +410,22 @@ export function livePreview(
         syntaxTree(tr.state) === syntaxTree(tr.startState)
       )
         return value;
+      // A new, removed or reinterpreted comment can change which lines show
+      // their text in another line, and which lines have visible text at all:
+      // then everything parsed so far is previewed again.
+      const reread =
+        tr.docChanged &&
+        !sameSourceComments(
+          sourceCommentRanges(tr.startState),
+          sourceCommentRanges(tr.state),
+          tr.changes,
+        );
       let decorations = value.decorations.map(tr.changes);
       let wrappers = value.wrappers.map(tr.changes);
       let images = value.images.map(tr.changes);
-      const ranges = previewRanges(tr);
+      const ranges = reread
+        ? [{ from: 0, to: tr.state.doc.lineAt(syntaxTree(tr.state).length).to }]
+        : previewRanges(tr);
       // Range-limited filtering keeps untouched branches and block widgets,
       // including those outside the viewport, intact during editing/scrolling.
       for (const { from, to } of ranges) {

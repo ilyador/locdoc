@@ -6,7 +6,7 @@ import {
 } from "@codemirror/state";
 import { BlockWrapper, Decoration, EditorView } from "@codemirror/view";
 import { commentParser } from "./comment-syntax";
-import { sourceCommentRanges, visibleTextRanges } from "./editor-comments";
+import { shownLines, visibleTextRanges } from "./editor-comments";
 import { parseFountain, type FountainScript } from "./fountain";
 import { emphasisContentRange } from "./emphasis-range";
 import { directionSyntax } from "./text-direction";
@@ -49,15 +49,13 @@ export function fountainPreview() {
             from: state.doc.lineAt(r.from).from,
             to: state.doc.lineAt(r.to).to,
           }));
-    const inactive = (from: number, to: number) =>
-      !active.some((r) => r.from <= to && r.to >= from);
-    const visibleLineStarts = new Map<number, number>();
-    for (const hidden of sourceCommentRanges(state))
-      if (
-        state.doc.lineAt(hidden.from).from === hidden.from &&
-        state.doc.lineAt(hidden.to).from === hidden.to
-      )
-        visibleLineStarts.set(hidden.to, hidden.from);
+    // A line whose text shows in a record's line reveals its markers as
+    // that one displayed line.
+    const visibleLineStarts = shownLines(state).at;
+    const inactive = (from: number, to: number) => {
+      const start = visibleLineStarts.get(from) ?? from;
+      return !active.some((r) => r.from <= to && r.to >= start);
+    };
     for (const line of script.lines) {
       // Standalone comments hide their trailing newline. An empty wrapper at
       // that position would take the following visible line's formatting.

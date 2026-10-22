@@ -6,6 +6,7 @@ import {
   Facet,
   StateEffect,
   StateField,
+  type ChangeDesc,
   type Line,
   type Transaction,
 } from "@codemirror/state";
@@ -191,6 +192,50 @@ function parseSourceComments(state: EditorState) {
   }
   cache.set(state.doc, hidden);
   return hidden;
+}
+
+// Whether a transaction only moved the hidden records, so every one of them
+// still hides the same source.
+export function sameSourceComments(
+  before: Range[],
+  after: Range[],
+  changes: ChangeDesc,
+) {
+  return (
+    before.length === after.length &&
+    before.every(
+      (range, i) =>
+        changes.mapPos(range.from, 1) === after[i].from &&
+        changes.mapPos(range.to, -1) === after[i].to,
+    )
+  );
+}
+
+// A record that starts its line and hides the line break after it, alone or
+// with replies, makes the text of the line where it ends show in the line
+// where it starts: one displayed line, which takes that text's styling.
+// `at` maps the start of each line whose text shows elsewhere to the start
+// of the record's line, and `of` maps back. Both follow document order.
+export type ShownLines = {
+  at: Map<number, number>;
+  of: Map<number, number>;
+};
+const shownLineCache = new WeakMap<Range[], ShownLines>();
+export function shownLines(state: EditorState): ShownLines {
+  const hidden = sourceCommentRanges(state);
+  let lines = shownLineCache.get(hidden);
+  if (lines) return lines;
+  lines = { at: new Map(), of: new Map() };
+  for (const range of hidden) {
+    const first = state.doc.lineAt(range.from);
+    if (first.from !== range.from) continue;
+    const last = state.doc.lineAt(range.to);
+    if (last.number === first.number) continue;
+    lines.at.set(last.from, range.from);
+    lines.of.set(range.from, last.from);
+  }
+  shownLineCache.set(hidden, lines);
+  return lines;
 }
 
 // Most typing cannot change which source records are annotations. Keep their
@@ -502,6 +547,16 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
         position =
           hidden.find((range) => range.from <= position && position < range.to)
             ?.to ?? position;
+        // A record that starts its line shows the next line's text in that
+        // line: the conversation opens before that line, not inside it.
+        const start = shownLines(tr.state).at.get(
+          tr.state.doc.lineAt(position).from,
+        );
+        if (
+          start !== undefined &&
+          hidden.some((range) => range.from === start && range.to >= position)
+        )
+          position = start;
         ranges.push(
           Decoration.widget({
             block: true,
