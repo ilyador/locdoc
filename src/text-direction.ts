@@ -80,8 +80,9 @@ const lookBack = 500;
 // before it, so writing on a new line under Hebrew starts at its right edge.
 export function lineDirections(state: EditorState, from: number, to: number) {
   const directions: { from: number; direction: TextDirection }[] = [];
-  // A comment record on a line of its own hides that line with its line break.
-  // The next line's text then shows in the line where the record starts.
+  // A comment record that starts its line hides it with its line break. The
+  // text of the line where the record ends then shows in the line where the
+  // record starts (editor-comments.ts).
   const merged = new Map<number, number>();
   const hidden = new Set<number>();
   for (const range of sourceCommentRanges(state)) {
@@ -89,7 +90,7 @@ export function lineDirections(state: EditorState, from: number, to: number) {
     const first = state.doc.lineAt(range.from);
     if (first.from !== range.from) continue;
     const next = state.doc.lineAt(range.to);
-    if (next.from !== range.to || next.number === first.number) continue;
+    if (next.number === first.number) continue;
     merged.set(next.from, range.from);
     for (let n = first.number; n < next.number; n++) hidden.add(n);
   }

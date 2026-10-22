@@ -120,22 +120,15 @@ function plainState(doc: string) {
 }
 
 test("plain-text paragraph spacing follows visible lines through edits", () => {
-  let state = plainState(
-    "First line\n\n[[comment(ana): only a record]]\nSecond [[comment(ben): inline]] line\n   \nLast",
+  const source =
+    "First line\n\n[[comment(ana): only a record]]\nSecond [[comment(ben): inline]] line\n   \nLast";
+  let state = plainState(source);
+  // The record's line hides its line break, so the next line shows in the
+  // record's line and ends its paragraph there.
+  assert.equal(
+    layoutRows(state),
+    [0, source.indexOf("[[comment(ana)"), source.indexOf("Last")].join(","),
   );
-  const lineStarts = (text: string) =>
-    text
-      .split("\n")
-      .map((line, index, lines) => ({
-        line,
-        from: lines.slice(0, index).join("\n").length + (index ? 1 : 0),
-      }))
-      .filter(({ line }) =>
-        line.replace(/\[\[comment\([^)]*\): [^\]]*\]\]/g, "").trim(),
-      )
-      .map(({ from }) => from)
-      .join(",");
-  assert.equal(layoutRows(state), lineStarts(state.doc.toString()));
   const edit = (spec: TransactionSpec, label: string) => {
     state = state.update(spec).state;
     assert.equal(

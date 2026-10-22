@@ -123,6 +123,17 @@ impl Heartbeat {
             self.pending = None;
         }
     }
+    /// The editor's y-websocket client closes a connection that brought it no
+    /// message for 30 seconds, and a protocol ping is not a message. A peer
+    /// alone in a document never gets its own presence back (`outgoing`), so
+    /// every interval also sends it an empty presence update, which changes
+    /// nothing it holds.
+    pub(super) fn alive() -> Vec<u8> {
+        Message::Awareness(AwarenessUpdate {
+            clients: Default::default(),
+        })
+        .encode_v1()
+    }
 }
 
 #[derive(Default)]

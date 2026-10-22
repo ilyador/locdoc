@@ -1,20 +1,26 @@
-import { EditorState, StateField, type ChangeSet } from "@codemirror/state";
+import { EditorState, StateField } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   placeholder,
   type DecorationSet,
 } from "@codemirror/view";
-import { plainCommentRecords, sourceCommentRanges } from "./editor-comments";
+import {
+  plainCommentRecords,
+  sameSourceComments,
+  shownLines,
+  sourceCommentRanges,
+} from "./editor-comments";
 
-type Range = { from: number; to: number };
 const paragraphEnd = Decoration.line({ class: "text-block-end" });
 
 // Every explicit line break ends a plain-text paragraph, as in Markdown prose;
 // natural wrapping does not. Lines holding only hidden comment records stay
-// tight, so a conversation adds no visible gap.
+// tight, so a conversation adds no visible gap. A line whose text shows in a
+// record's line (editor-comments.ts) ends its paragraph there.
 function paragraphEnds(state: EditorState, from: number, to: number) {
   const hidden = sourceCommentRanges(state);
+  const shown = shownLines(state).at;
   const ends: ReturnType<typeof paragraphEnd.range>[] = [];
   let next = 0;
   while (next < hidden.length && hidden[next].to <= from) next++;
@@ -37,21 +43,10 @@ function paragraphEnds(state: EditorState, from: number, to: number) {
       visible ||
       (start < line.to && /\S/.test(state.sliceDoc(start, line.to)))
     )
-      ends.push(paragraphEnd.range(line.from));
+      ends.push(paragraphEnd.range(shown.get(line.from) ?? line.from));
     pos = line.to + 1;
   }
   return ends;
-}
-
-function sameHidden(before: Range[], after: Range[], changes: ChangeSet) {
-  return (
-    before.length === after.length &&
-    before.every(
-      (range, i) =>
-        changes.mapPos(range.from, 1) === after[i].from &&
-        changes.mapPos(range.to, -1) === after[i].to,
-    )
-  );
 }
 
 const plainTextLayout = StateField.define<DecorationSet>({
@@ -62,7 +57,7 @@ const plainTextLayout = StateField.define<DecorationSet>({
     // A new, removed or reinterpreted comment can change which other lines
     // have visible text. Otherwise only the edited lines need measuring.
     if (
-      !sameHidden(
+      !sameSourceComments(
         sourceCommentRanges(tr.startState),
         sourceCommentRanges(tr.state),
         tr.changes,
@@ -72,10 +67,14 @@ const plainTextLayout = StateField.define<DecorationSet>({
         paragraphEnds(tr.state, 0, tr.state.doc.length),
         true,
       );
+    // A record's line and the line whose text it shows are measured together.
+    const shown = shownLines(tr.state);
     let next = value.map(tr.changes);
     tr.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
-      const from = tr.state.doc.lineAt(fromB).from;
-      const to = tr.state.doc.lineAt(toB).to;
+      const first = tr.state.doc.lineAt(fromB).from;
+      const last = tr.state.doc.lineAt(toB).from;
+      const from = shown.at.get(first) ?? first;
+      const to = tr.state.doc.lineAt(shown.of.get(last) ?? last).to;
       next = next.update({
         filterFrom: from,
         filterTo: to,
