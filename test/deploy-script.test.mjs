@@ -916,6 +916,20 @@ test("restore refuses a snapshot that fails its checks and a state folder in use
     assert.match(keyless.stderr, /has no state\/owner\.key/);
     assert.equal(fingerprint(fixture.live), live, "nothing moved");
 
+    // A snapshot that links to a database elsewhere holds no copy of it, and
+    // restoring the link would let the restore write through it.
+    const linked = join(root, "linked");
+    assert.equal(spawnSync("cp", ["-a", fixture.snapshot, linked]).status, 0);
+    const elsewhere = join(root, "elsewhere.sqlite");
+    await rename(join(linked, "state/locdoc.sqlite"), elsewhere);
+    await symlink(elsewhere, join(linked, "state/locdoc.sqlite"));
+    const target = await readFile(elsewhere);
+    const symlinked = fixture.restore(linked);
+    assert.equal(symlinked.status, 1);
+    assert.match(symlinked.stderr, /state\/locdoc\.sqlite is a symbolic link/);
+    assert.ok((await readFile(elsewhere)).equals(target), "target unchanged");
+    assert.equal(fingerprint(fixture.live), live, "nothing moved");
+
     // Another process holds the state folder: the script moves nothing, and
     // the binary fails fast in either mode.
     holder = spawn(

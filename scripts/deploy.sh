@@ -665,6 +665,11 @@ preflight() { # snapshot
   for name in state/locdoc.sqlite state/owner.key; do
     [[ -f $snap/$name ]] || die "$snapshot has no $name"
   done
+  # A link is no copy, and a restored one would let Locdoc write through it.
+  for name in locdoc.sqlite locdoc.sqlite-wal owner.key root.identity fonts; do
+    [[ ! -L $snap/state/$name ]] ||
+      die "$snapshot/state/$name is a symbolic link; restore from a snapshot that holds the file itself"
+  done
   [[ -s $snap/state/owner.key ]] || die "$snapshot/state/owner.key is empty"
   [[ -d $snap/docs && ! -L $snap/docs ]] || die "$snapshot has no docs folder"
   mkdir -- "$work/snapshot"
