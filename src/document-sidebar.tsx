@@ -48,7 +48,8 @@ export function DocumentSidebar({
   shareFolder?: (path: string) => void;
   actions?: ReactNode;
   label?: string;
-  // File actions, for the owner's own workspace.
+  // The workspace's file actions, offered only when it is the owner's own.
+  // The tree also keeps its focused row through them as documents open.
   fileActions?: FileActions;
   // Stores the open document's drafts before a new document opens.
   prepare?: () => Promise<void>;

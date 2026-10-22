@@ -115,9 +115,9 @@ export function WorkspaceSidebar({
             toggleFolder={toggleFolder}
             choose={choose}
             prepare={prepare}
-            fileActions={
-              config.owner && !sharedToken ? workspace.files : undefined
-            }
+            // Only the owner's tree offers file actions, but every tree
+            // keeps its focused row through them as documents open.
+            fileActions={workspace.files}
             label={config.folder?.name}
             actions={
               config.owner &&
