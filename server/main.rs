@@ -21,6 +21,7 @@ mod peers;
 mod persistence_adversarial_tests;
 #[cfg(test)]
 mod persistence_tests;
+mod profile;
 mod projection;
 mod restored;
 mod routes;
@@ -188,7 +189,7 @@ struct Store {
     key: String,
     public_url: String,
     bind: String,
-    owner_name: String,
+    owner_name: profile::OwnerName,
     http: reqwest::Client,
     rates: Mutex<HashMap<String, (i64, u32)>>,
     document_files: Mutex<()>,
@@ -337,7 +338,9 @@ impl Store {
         folders::migrate(&db)?;
         mcp_access::migrate(&db)?;
         mcp_auth::migrate(&db)?;
+        profile::migrate(&db)?;
         let sessions = browser_auth::Sessions::load(&db)?;
+        let owner_name = profile::OwnerName::load(&db, std::env::var("LOCDOC_OWNER_NAME").ok())?;
         let mcp_credentials = mcp_auth::Credentials::load(&db)?;
         let store = Arc::new(Self {
             root,
@@ -360,11 +363,7 @@ impl Store {
             key,
             public_url: public_url.trim_end_matches('/').into(),
             bind: std::env::var("LOCDOC_BIND").unwrap_or_else(|_| "127.0.0.1:3477".into()),
-            owner_name: std::env::var("LOCDOC_OWNER_NAME")
-                .ok()
-                .filter(|name| !name.trim().is_empty())
-                .map(|name| name.trim().chars().take(60).collect())
-                .unwrap_or_else(|| "Owner".into()),
+            owner_name,
             rates: Mutex::new(HashMap::new()),
             document_files: Mutex::new(()),
             reconciliation: namespace::Requests::default(),
@@ -694,7 +693,7 @@ fn configuration_extra(s: &Store, h: &HeaderMap, extra: Value) -> Response {
     let owner = s.owner(h);
     let mut value = json!({"owner":owner,"root":if owner{s.root.to_string_lossy().to_string()}else{String::new()},"guest":hash(&guest),"publicUrl":s.public_url,"limits":{"image":5*MB,"video":20*MB,"document":DOC_LIMIT}});
     if owner {
-        value["ownerName"] = json!(s.owner_name);
+        value["ownerName"] = json!(s.owner_name.get());
     }
     value
         .as_object_mut()

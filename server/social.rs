@@ -67,7 +67,7 @@ fn flush(text: &mut String, kind: &Kind, depth: usize, quote: bool, blocks: &mut
 
 impl Preview {
     pub fn new(source: &str, path: &str) -> Self {
-        let source = comments::reading_source(source);
+        let source = comments::reading(source, comments::plain(path));
         let end = source
             .char_indices()
             .nth(32_000)

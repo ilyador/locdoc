@@ -58,7 +58,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     id,
     navigate,
     name,
-    setName,
+    saveName,
     sidebar,
     setSidebar,
     sidebarWidth,
@@ -180,6 +180,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     endpoint,
     ready: !!doc,
     source: session?.ydoc.getText("content"),
+    plain: format === "text",
     name,
     action,
   });
@@ -556,7 +557,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   session={session}
                   endpoint={endpoint}
                   name={name}
-                  setName={setName}
+                  saveName={saveName}
                   files={files}
                   toggleAppearance={toggleAppearance}
                   lock={() =>

@@ -249,6 +249,7 @@ pub(super) fn router(s: App) -> Router {
         .route("/api/ticket", post(issue_ticket))
         .route("/api/redeem", post(redeem))
         .route("/api/config", get(config))
+        .route("/api/profile", patch(profile::update))
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route(

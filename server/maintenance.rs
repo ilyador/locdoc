@@ -459,7 +459,10 @@ fn rebuild_document(store: &Store, id: &str, choice: RebuildSource) -> Result<Re
     let restored = live
         .as_deref()
         .filter(|old| security::validate_document(old.awareness.doc()).is_ok())
-        .map(|old| comments::rebuild_metadata(old, &fresh, &chosen, &metadata))
+        .map(|old| {
+            let plain = comments::plain(&document.path);
+            comments::rebuild_metadata(old, &fresh, &chosen, &metadata, plain)
+        })
         .unwrap_or_default();
     let mut db = store.db.lock().unwrap();
     let tx = db.transaction()?;

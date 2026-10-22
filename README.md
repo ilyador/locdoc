@@ -59,7 +59,7 @@ LOCDOC_PUBLIC_URL=http://127.0.0.1:3477
 LOCDOC_OWNER_NAME=Your name
 ```
 
-`npm start` and `npm run owner` load `.env`; environment variables override it. If you run the binary directly, export these variables yourself. Keep one server process per document/state directory. Files must be writable by the user running Locdoc.
+`npm start` and `npm run owner` load `.env`; environment variables override it. If you run the binary directly, export these variables yourself. Keep one server process per document/state directory. Files must be writable by the user running Locdoc. `LOCDOC_OWNER_NAME` is your display name until you save another under **Your workspace → Your display name**; that name is stored in the state folder, so every device shows it, and comments already written keep the name they were written with.
 
 ### Start automatically
 
@@ -173,10 +173,15 @@ Name a document `.txt`, or place a `.txt` file in your documents folder, for
 plain text. It edits as text, without Markdown formatting, the format bar, the
 link picker or media: image syntax such as `![x](y.png)` is text in a `.txt`
 file, so it never approves, serves or uploads an image. Comments use the same
-`[[comment(...)]]` records as Markdown and Fountain. A rename can change a
-document between `.md`, `.fountain` and `.txt`; it keeps its links, comments and
-history. A plain text document renamed to Markdown shows its image syntax as
-images to you, and to link visitors only once you approve them.
+`[[comment(...)]]` records as Markdown and Fountain, without Markdown rules: a
+record in backticks, a fence, an indented line, HTML or a link is a comment too,
+and only an escaped `\[[` stays text. Every line is a paragraph, so a new
+comment goes at the end of the line where its passage ends; another one on that
+line starts after a blank line the editor hides with the records. Adding a
+comment never shows an empty line. A rename can change a document between `.md`,
+`.fountain` and `.txt`; it keeps its links, comments and history. A plain text
+document renamed to Markdown shows its image syntax as images to you, and to
+link visitors only once you approve them.
 
 ## ChatGPT and MCP
 
@@ -213,7 +218,7 @@ Choose **Share** in a document, or switch to the **Folders** tab and use the sha
 - Folder access and individual document links are independent. Turning off a document's own link does not remove access granted through a shared parent folder. To remove that access, change the folder link or move the file outside the folder; access ends as soon as Locdoc finds the file outside, even while its new name is still being recorded.
 - A document's own links, comments and history follow a move between folders. Folder access is recalculated from its current location; it is never copied onto the document.
 - Turn a link private to revoke it, or choose **Replace link** to invalidate the old URL. Removing or replacing a shared folder invalidates its capability. A folder renamed or moved in Locdoc keeps its link, as do its subfolders' links; deleting it suspends them until it is restored. A folder share does not follow a rename made by another application; share the new location again.
-- Visitors choose a display name without signing in. Names are labels, not verified identities.
+- Visitors choose a display name without signing in and can change it under **Your workspace**; their browser remembers it. Names are labels, not verified identities.
 
 ## Writing and comments
 
@@ -228,7 +233,7 @@ The passage being discussed[[comment(alex): this is my comment]]
 [[comment(ana): this is a response]]
 ```
 
-Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. The web editor inserts records after the complete paragraph, list, table or other containing block, keeping the selected passage anchored separately so comments do not split Markdown syntax. Records inside code examples, HTML or Markdown link/image syntax remain literal.
+Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. In Markdown and Fountain, the web editor inserts records after the complete paragraph, list, table or other containing block, keeping the selected passage anchored separately so comments do not split Markdown syntax, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
 
 Each record occupies one physical line. Escape backslashes as `\\`, literal `]` as `\]`, `)` in names as `\)`, and message line breaks as `\n` or `\r`. Names allow 1–60 characters; messages allow 1–4,000. Comment text belongs to the file; SQLite retains anchors, timestamps and resolved state. File-added comments have no invented timestamp. Cutting and reinserting an unchanged conversation within the same document preserves its timestamps and resolved state when the entire conversation is unique and its original records were removed. Copies, altered conversations and ambiguous duplicates receive independent metadata; recreated raw text never inherits author permissions or posting receipts.
 

@@ -5,7 +5,7 @@ import {
   placeholder,
   type DecorationSet,
 } from "@codemirror/view";
-import { sourceCommentRanges } from "./editor-comments";
+import { plainCommentRecords, sourceCommentRanges } from "./editor-comments";
 
 type Range = { from: number; to: number };
 const paragraphEnd = Decoration.line({ class: "text-block-end" });
@@ -91,8 +91,9 @@ const plainTextLayout = StateField.define<DecorationSet>({
 
 // Plain text is edited as it is stored: no Markdown parser, preview widgets,
 // media, link or formatting commands. Comments and permissions come from the
-// shared editor extensions.
+// shared editor extensions, reading records without Markdown rules.
 export const plainTextSupport = [
+  plainCommentRecords.of(true),
   plainTextLayout,
   EditorView.editorAttributes.of({ class: "text-editor" }),
   placeholder("Start writing."),

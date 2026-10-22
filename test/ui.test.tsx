@@ -6,6 +6,7 @@ import React, { useState } from "react";
 import * as Y from "yjs";
 import { countMarkdownWords } from "../src/word-count";
 import { sourceComments } from "../src/comment-syntax";
+import { documentFormat } from "../src/document-format";
 import { readFileSync } from "node:fs";
 import { NamePrompt } from "../src/name-prompt";
 import {
@@ -279,7 +280,9 @@ function WorkspaceFixture() {
           initialDocument: null,
           error: "",
           name: "Reviewer",
-          setName() {},
+          async saveName(name: string) {
+            return name;
+          },
           sidebar: true,
           setSidebar() {},
           sidebarWidth: null,
@@ -3056,7 +3059,9 @@ test("file comment syntax matches the backend fixtures and does not count as pro
   );
   for (const c of cases)
     assert.deepEqual(
-      sourceComments(c.source).map((t) => t.messages),
+      sourceComments(c.source, documentFormat(c.path) === "text").map(
+        (t) => t.messages,
+      ),
       c.threads,
       c.name,
     );
@@ -3138,6 +3143,209 @@ test("the owner uses the configured name even when an old browser stored You", a
     hook.unmount();
   } finally {
     globalThis.fetch = fetchBefore;
+  }
+});
+
+test("a saved owner name reaches the server, presence and new comments at once; a failed save keeps the field", async () => {
+  const { createDecoder, readVarUint, readVarUint8Array } =
+    await import("lib0/decoding");
+  const { Awareness, applyAwarenessUpdate } =
+    await import("y-protocols/awareness");
+  const fetchBefore = globalThis.fetch;
+  const previousUrl = location.href;
+  const remembered = localStorage.getItem("locdoc.document");
+  let profileFails = true;
+  globalThis.fetch = async (input, init = {}) => {
+    const path = new URL(String(input), location.href).pathname;
+    if (path === "/api/config")
+      return response({
+        owner: true,
+        ownerName: "alex",
+        root: "/tmp/docs",
+        guest: "owner",
+        publicUrl: location.origin,
+      });
+    if (path === "/api/tree")
+      return response({
+        entries: [{ id: "a", path: "a.md", kind: "file", modified: 1 }],
+      });
+    if (path === "/api/profile") {
+      const body = JSON.parse(String(init.body));
+      requests.push({ path, body });
+      return profileFails
+        ? new Response(JSON.stringify({ error: "Storage is busy." }), {
+            status: 503,
+          })
+        : response({ name: body.name });
+    }
+    return fetchBefore(input, init);
+  };
+  docs = { a: makeDoc("a") };
+  history.replaceState(null, "", "/");
+  localStorage.setItem("locdoc.document", "a");
+  function Live() {
+    return <WorkspaceView workspace={useWorkspace()} />;
+  }
+  const page = render(<Live />);
+  try {
+    await screen.findByRole("textbox", { name: "Markdown document" });
+    // Presence leaves through the document socket once it is connected.
+    const socket = sockets.at(-1);
+    const sent: Uint8Array[] = [];
+    socket.send = (data: Uint8Array) => sent.push(new Uint8Array(data));
+    await act(async () => {
+      socket.readyState = socket.OPEN = 1;
+      socket.onopen();
+    });
+    const presence = () =>
+      sent.flatMap((data) => {
+        const decoder = createDecoder(data);
+        if (readVarUint(decoder) !== 1) return [];
+        const remote = new Awareness(new Y.Doc());
+        applyAwarenessUpdate(remote, readVarUint8Array(decoder), null);
+        const names = [...remote.getStates().values()].map(
+          (state) => state.user?.name,
+        );
+        remote.destroy();
+        return names;
+      });
+    const profile = () => page.container.querySelector(".profile strong")!;
+    await waitFor(() => assert.equal(profile().textContent, "alex"));
+    fireEvent.click(page.container.querySelector(".profile")!);
+    const field = screen.getByLabelText(
+      "Your display name",
+    ) as HTMLInputElement;
+    const save = screen.getByRole("button", { name: "Save" });
+    assert.equal(field.value, "alex");
+    assert.equal(save.disabled, true, "nothing to save yet");
+    fireEvent.change(field, { target: { value: "  Ilya  " } });
+    fireEvent.click(save);
+    await screen.findByText("Storage is busy.");
+    assert.equal(field.value, "  Ilya  ", "a failed save keeps the text");
+    assert.equal(profile().textContent, "alex");
+    assert.deepEqual(
+      requests.filter((r) => r.path === "/api/profile").map((r) => r.body),
+      [{ name: "Ilya" }],
+      "the name is checked like a presence name before it is sent",
+    );
+    profileFails = false;
+    fireEvent.click(save);
+    await waitFor(() => assert.equal(profile().textContent, "Ilya"));
+    assert.equal(field.value, "Ilya");
+    assert.equal(screen.queryByText("Storage is busy."), null);
+    await waitFor(() => assert.equal(presence().at(-1), "Ilya"));
+    fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add comment (Ctrl Alt M)" }),
+    );
+    fireEvent.change(await screen.findByLabelText("New comment"), {
+      target: { value: "Named at once" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Post" }));
+    await waitFor(() =>
+      assert.equal(
+        requests.find((r) => r.path === "/api/docs/a/comments" && r.body?.body)
+          ?.body.name,
+        "Ilya",
+      ),
+    );
+  } finally {
+    page.unmount();
+    globalThis.fetch = fetchBefore;
+    history.replaceState(null, "", previousUrl);
+    if (remembered) localStorage.setItem("locdoc.document", remembered);
+    else localStorage.removeItem("locdoc.document");
+  }
+});
+
+test("an owner tab coming back shows a name chosen elsewhere, unless a newer save follows", async () => {
+  const fetchBefore = globalThis.fetch;
+  let ownerName = "alex";
+  let holdConfig = false;
+  const held: (() => void)[] = [];
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), location.href).pathname;
+    if (path === "/api/config") {
+      const value = ownerName;
+      if (holdConfig) await new Promise<void>((resolve) => held.push(resolve));
+      return response({
+        owner: true,
+        ownerName: value,
+        root: "/tmp/docs",
+        guest: "owner",
+        publicUrl: location.origin,
+      });
+    }
+    if (path === "/api/tree") return response({ entries: [] });
+    if (path === "/api/profile")
+      return response({ name: JSON.parse(String(init.body)).name });
+    return fetchBefore(input, init);
+  };
+  const hook = renderHook(() => useWorkspace());
+  try {
+    await waitFor(() => assert.equal(hook.result.current.name, "alex"));
+    ownerName = "Ilya";
+    await act(async () => {
+      window.dispatchEvent(new window.Event("focus"));
+    });
+    await waitFor(() => assert.equal(hook.result.current.name, "Ilya"));
+    // A read that started before this tab saved must not undo the save.
+    ownerName = "Stale";
+    holdConfig = true;
+    await act(async () => {
+      window.dispatchEvent(new window.Event("focus"));
+    });
+    await act(async () => {
+      assert.equal(await hook.result.current.saveName(" Bea "), "Bea");
+    });
+    await act(async () => {
+      held.splice(0).forEach((release) => release());
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(hook.result.current.name, "Bea");
+  } finally {
+    hook.unmount();
+    globalThis.fetch = fetchBefore;
+  }
+});
+
+test("a guest's name saved in Settings stays in this browser and follows the presence rules", async () => {
+  const fetchBefore = globalThis.fetch;
+  const stored = localStorage.getItem("locdoc.guestName");
+  globalThis.fetch = async (input, init) => {
+    const path = new URL(String(input), location.href).pathname;
+    if (path === "/api/config")
+      return response({ owner: false, root: "", guest: "g", publicUrl: "" });
+    return fetchBefore(input, init);
+  };
+  try {
+    localStorage.setItem("locdoc.guestName", "First name");
+    const first = renderHook(() => useWorkspace());
+    await waitFor(() =>
+      assert.equal(first.result.current.config?.owner, false),
+    );
+    assert.equal(first.result.current.name, "First name");
+    await act(async () => {
+      await assert.rejects(first.result.current.saveName(" \u0007 "));
+    });
+    assert.equal(localStorage.getItem("locdoc.guestName"), "First name");
+    await act(async () => {
+      assert.equal(await first.result.current.saveName("  Ana\u0007  "), "Ana");
+    });
+    assert.equal(first.result.current.name, "Ana");
+    assert.equal(localStorage.getItem("locdoc.guestName"), "Ana");
+    assert.ok(
+      !requests.some((request) => request.path === "/api/profile"),
+      "a guest's name is never sent as the owner's",
+    );
+    first.unmount();
+    const reloaded = renderHook(() => useWorkspace());
+    assert.equal(reloaded.result.current.name, "Ana", "kept after a reload");
+    reloaded.unmount();
+  } finally {
+    globalThis.fetch = fetchBefore;
+    if (stored === null) localStorage.removeItem("locdoc.guestName");
+    else localStorage.setItem("locdoc.guestName", stored);
   }
 });
 

@@ -857,7 +857,7 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
             let b: Commenting = arguments(input)?;
             check_revision(&b.expected_revision)?;
             let body = arguments(json!({
-                "body":b.body,"name":b.name.unwrap_or_else(||s.owner_name.clone()),
+                "body":b.body,"name":b.name.unwrap_or_else(||s.owner_name.get()),
                 "quote":b.quote,"requestId":b.request_id,
             }))?;
             let actor = grant.id.clone();
@@ -874,7 +874,7 @@ async fn execute(s: App, grant: mcp_auth::Grant, name: &str, input: Value) -> Re
                 return Err(bad("request_id must be a UUID."));
             }
             let body = arguments(json!({
-                "body":b.body,"name":b.name.unwrap_or_else(||s.owner_name.clone()),"requestId":b.request_id,
+                "body":b.body,"name":b.name.unwrap_or_else(||s.owner_name.get()),"requestId":b.request_id,
             }))?;
             let actor = grant.id.clone();
             document_job(s, grant, b.doc_id, required, move |s, d| {

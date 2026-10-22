@@ -238,5 +238,204 @@
         }
       ]
     ]
+  },
+  {
+    "name": "plain text has no Markdown code: records in backticks, fences and indented lines are conversations",
+    "path": "notes.txt",
+    "source": "`[[comment(alex): inline]]`\n\n```md\n[[comment(ana): fenced]]\n```\n\n    [[comment(alex): indented]]",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "inline"
+        }
+      ],
+      [
+        {
+          "name": "ana",
+          "body": "fenced"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "indented"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "plain text has no HTML or links: records inside their syntax are conversations",
+    "path": "notes.txt",
+    "source": "<span title=\"[[comment(ana): attribute]]\">hi</span>\n\n[label[[comment(alex): label]]](https://example.test)",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "attribute"
+        }
+      ],
+      [
+        {
+          "name": "alex",
+          "body": "label"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "an unclosed fence in plain text is text, and a reply still joins its conversation",
+    "path": "notes.txt",
+    "source": "Before\n```\nunclosed[[comment(ana): still a conversation]]\n[[comment(alex): and a reply]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "still a conversation"
+        },
+        {
+          "name": "alex",
+          "body": "and a reply"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "an escape still keeps a plain text record literal",
+    "path": "notes.txt",
+    "source": "\\[[comment(alex): literal]] and [[comment(ana): real]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "real"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "plain text: a new comment ends the line of its passage",
+    "path": "notes.txt",
+    "source": "Buy milk\nBuy eggs\nBuy bread",
+    "threads": [],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk[[comment(ana): A note]]\nBuy eggs\nBuy bread"
+    }
+  },
+  {
+    "name": "plain text: a new comment on the last line",
+    "path": "notes.txt",
+    "source": "Buy milk\nBuy eggs",
+    "threads": [],
+    "comment": {
+      "after": "eggs",
+      "expected": "Buy milk\nBuy eggs[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "plain text: another conversation on a line that has one starts after a blank line",
+    "path": "notes.txt",
+    "source": "Buy milk[[comment(alex): Which brand?]]\nBuy eggs",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "Which brand?"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk[[comment(alex): Which brand?]]\n\n[[comment(ana): A note]]\nBuy eggs"
+    }
+  },
+  {
+    "name": "plain text: another conversation follows the replies of the first",
+    "path": "notes.txt",
+    "source": "Buy milk[[comment(alex): Which brand?]]\n[[comment(ben): Oat]]\nBuy eggs",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "Which brand?"
+        },
+        {
+          "name": "ben",
+          "body": "Oat"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk[[comment(alex): Which brand?]]\n[[comment(ben): Oat]]\n\n[[comment(ana): A note]]\nBuy eggs"
+    }
+  },
+  {
+    "name": "plain text: a record on the next line stays its own conversation",
+    "path": "notes.txt",
+    "source": "Buy milk\n[[comment(alex): Which brand?]]\nBuy eggs",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "Which brand?"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk\n[[comment(alex): Which brand?]]\n\n[[comment(ana): A note]]\nBuy eggs"
+    }
+  },
+  {
+    "name": "plain text: an unclosed fence does not stop a comment",
+    "path": "notes.txt",
+    "source": "Notes\n```\nunclosed fence",
+    "threads": [],
+    "comment": {
+      "after": "fence",
+      "expected": "Notes\n```\nunclosed fence[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "plain text: a line ending in a backslash cannot escape the record",
+    "path": "notes.txt",
+    "source": "Save to C:\\Users\\\nNext",
+    "threads": [],
+    "comment": {
+      "after": "Users\\",
+      "expected": "Save to C:\\Users[[comment(ana): A note]]\\\nNext"
+    }
+  },
+  {
+    "name": "plain text: a passage on an empty line goes with the text before it",
+    "path": "notes.txt",
+    "source": "Buy milk\n\nBuy eggs",
+    "threads": [],
+    "comment": {
+      "after": "milk\n",
+      "expected": "Buy milk[[comment(ana): A note]]\n\nBuy eggs"
+    }
+  },
+  {
+    "name": "plain text: an empty document",
+    "path": "notes.txt",
+    "source": "",
+    "threads": [],
+    "comment": {
+      "after": "",
+      "expected": "[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a new comment still follows its whole block",
+    "path": "notes.md",
+    "source": "Buy milk\nBuy eggs",
+    "threads": [],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk\nBuy eggs\n\n[[comment(ana): A note]]"
+    }
   }
 ]

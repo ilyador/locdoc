@@ -63,14 +63,16 @@ const literalNodes = new Set([
   "Autolink",
 ]);
 const allMessages = new RegExp(messagePattern.source.slice(1), "g");
-export function sourceComments(source: string): SourceThread[] {
+export function sourceComments(source: string, plain = false): SourceThread[] {
   if (!source.includes("[[comment(")) return [];
   const literals: { from: number; to: number }[] = [];
-  const tree = commentParser.parse(source);
+  // Markdown leaves records in code, HTML and links literal. Plain text has
+  // no such syntax: only an escape keeps a record literal there.
+  const tree = plain ? null : commentParser.parse(source);
   const labels = new Set<string>();
   const labelKey = (value: string) =>
     value.trim().replace(/\s+/g, " ").toUpperCase().toLowerCase();
-  tree.iterate({
+  tree?.iterate({
     enter(node) {
       if (node.name !== "LinkReference") return;
       const label = node.node.getChild("LinkLabel");
@@ -79,7 +81,7 @@ export function sourceComments(source: string): SourceThread[] {
       return false;
     },
   });
-  tree.iterate({
+  tree?.iterate({
     enter(node) {
       if (node.name === "Link" || node.name === "Image") {
         const marks = node.node.getChildren("LinkMark");
@@ -139,9 +141,9 @@ export function sourceComments(source: string): SourceThread[] {
   return threads;
 }
 
-export function commentReadingText(source: string) {
+export function commentReadingText(source: string, plain = false) {
   const ranges: { from: number; to: number }[] = [];
-  for (const thread of sourceComments(source)) {
+  for (const thread of sourceComments(source, plain)) {
     const previous = ranges.at(-1);
     if (previous && !source.slice(previous.to, thread.from).trim())
       previous.to = thread.to;

@@ -1,4 +1,9 @@
-import type { Dispatch, ReactNode, SetStateAction } from "react";
+import {
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
 import {
   ArrowCounterClockwise,
   CaretRight,
@@ -22,6 +27,7 @@ import {
 import type { DocumentSession } from "./document-session";
 import type { FileActions } from "./file-actions";
 import type { Config, Document } from "./model";
+import { normalizePresence } from "./presence";
 import { RecentlyDeleted } from "./trash";
 
 export function panelTitle(panel: string | null) {
@@ -145,6 +151,58 @@ async function disconnectSession(session: DocumentSession | null) {
   });
 }
 
+// The field keeps what was typed until the name is saved.
+function DisplayName({
+  name,
+  save,
+}: {
+  name: string;
+  save: (name: string) => Promise<string>;
+}) {
+  const [draft, setDraft] = useState(name);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const chosen = normalizePresence({ name: draft })?.name;
+  return (
+    <form
+      onSubmit={async (event) => {
+        event.preventDefault();
+        setPending(true);
+        setError("");
+        try {
+          setDraft(await save(draft));
+        } catch (error) {
+          setError((error as Error).message);
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      <label className="field-label" htmlFor="your-name">
+        Your display name
+      </label>
+      <div className="inline-form">
+        <input
+          id="your-name"
+          className="text-input"
+          maxLength={60}
+          value={draft}
+          disabled={pending}
+          onChange={(e) => setDraft(e.target.value)}
+        />
+        <button
+          className="button quiet"
+          disabled={pending || !chosen || chosen === name}
+        >
+          {pending ? "Saving…" : "Save"}
+        </button>
+      </div>
+      <p className="field-help">Shown beside your cursor and comments.</p>
+      {error && <p role="alert">{error}</p>}
+    </form>
+  );
+}
+
 export function WorkspaceSettings({
   config,
   id,
@@ -152,7 +210,7 @@ export function WorkspaceSettings({
   session,
   endpoint,
   name,
-  setName,
+  saveName,
   files,
   toggleAppearance,
   lock,
@@ -163,24 +221,14 @@ export function WorkspaceSettings({
   session: DocumentSession | null;
   endpoint: (suffix?: string) => string;
   name: string;
-  setName: (name: string) => void;
+  saveName: (name: string) => Promise<string>;
   files: FileActions;
   toggleAppearance: () => void;
   lock: () => void;
 }) {
   return (
     <>
-      <label className="field-label" htmlFor="your-name">
-        Your display name
-      </label>
-      <input
-        id="your-name"
-        className="text-input"
-        maxLength={60}
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-      />
-      <p className="field-help">Shown beside your cursor and comments.</p>
+      <DisplayName name={name} save={saveName} />
       {config?.owner && (
         <div className="settings-folder">
           <Folder />
