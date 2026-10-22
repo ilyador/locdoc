@@ -15,6 +15,7 @@ import {
   isDocumentPath,
 } from "../src/document-format";
 import { resolveDocumentLink } from "../src/document-links";
+import { uploadAttachment } from "../src/document-upload";
 import { sourceCommentLayer } from "../src/editor-comments";
 import { plainTextSupport } from "../src/plain-text";
 import { countDocumentWords } from "../src/word-count";
@@ -63,6 +64,37 @@ test("plain-text word counts read every visible word, not Markdown syntax", () =
     "Markdown hides media destinations and link targets",
   );
   assert.equal(countDocumentWords("", "empty.txt"), 0);
+});
+
+test("uploads never reach a plain-text document", async () => {
+  const ydoc = new Y.Doc();
+  ydoc.getText("content").insert(0, "notes");
+  const fetches: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetches.push(String(input));
+    return new Response("{}");
+  }) as typeof fetch;
+  try {
+    for (const path of ["Notes/plain.txt", "Script.fountain"])
+      await assert.rejects(
+        uploadAttachment(new Blob(["png"], { type: "image/png" }) as File, {
+          doc: { id: "doc", path, edit: true } as any,
+          session: { id: "doc", ydoc } as any,
+          editor: { current: null },
+          accessQuery: "",
+          setDoc: () => {},
+          tell: () => {},
+        }),
+        /Use a Markdown document for images and videos\./,
+        path,
+      );
+  } finally {
+    globalThis.fetch = realFetch;
+    ydoc.destroy();
+  }
+  assert.deepEqual(fetches, [], "no upload request is sent");
+  assert.equal(ydoc.getText("content").toString(), "notes");
 });
 
 function layoutRows(state: EditorState) {
