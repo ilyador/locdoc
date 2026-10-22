@@ -343,7 +343,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             openSidebar={() => setSidebar(true)}
             commentsOpen={thread.commentsOpen}
             toggleComments={thread.toggle}
-            share={() => setPanel("share")}
+            share={trashed ? undefined : () => setPanel("share")}
           />
           {storageWarning && (
             <div className="storage-notice" role="status">
@@ -520,7 +520,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   }}
                 />
               )}
-              {panel === "share" && doc && (
+              {panel === "share" && doc && !trashed && (
                 <DocumentSharePanel
                   doc={doc}
                   filename={filename}

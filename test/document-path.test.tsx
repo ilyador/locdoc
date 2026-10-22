@@ -233,6 +233,8 @@ test("deleting the open document keeps its text readable until Undo reopens it",
   );
   assert.equal(editor()!.getAttribute("contenteditable"), "false");
   assert.match(editor()!.textContent!, /Plan text/);
+  // Its links are suspended, so sharing waits for the restore.
+  assert.equal(screen.queryByRole("button", { name: "Share" }), null);
   assert.match(
     document.querySelector(".toast-slot")!.textContent!,
     /Plan\.md moved to Recently deleted\./,
@@ -246,4 +248,5 @@ test("deleting the open document keeps its text readable until Undo reopens it",
     assert.equal(editor()?.getAttribute("contenteditable"), "true"),
   );
   assert.ok(row("Notes/Plan.md"));
+  assert.ok(screen.getByRole("button", { name: "Share" }));
 });

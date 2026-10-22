@@ -30,7 +30,8 @@ export function DocumentTopbar({
   openSidebar: () => void;
   commentsOpen: boolean;
   toggleComments: () => void;
-  share: () => void;
+  // Absent while the document is in the trash: its links are suspended.
+  share?: () => void;
 }) {
   return (
     <header className="topbar">
@@ -81,10 +82,15 @@ export function DocumentTopbar({
               <span>Comments</span>
             </button>
             {doc.owner ? (
-              <button className="button primary share-button" onClick={share}>
-                <ShareNetwork size={17} />
-                <span>Share</span>
-              </button>
+              share && (
+                <button
+                  className="button primary share-button"
+                  onClick={share}
+                >
+                  <ShareNetwork size={17} />
+                  <span>Share</span>
+                </button>
+              )
             ) : (
               <span className="access-badge">
                 {doc.edit ? (
