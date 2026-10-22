@@ -8,9 +8,8 @@ fn media_references_match_the_editor_fixtures() {
     let cases: Vec<Value> =
         serde_json::from_str(include_str!("../test/fixtures/media-references.json")).unwrap();
     for case in cases {
-        let mut actual: Vec<String> = Store::references(case["source"].as_str().unwrap())
-            .into_iter()
-            .collect();
+        let source = case["source"].as_str().unwrap();
+        let mut actual: Vec<String> = Store::references(source).into_iter().collect();
         actual.sort();
         let mut expected: Vec<String> = case["references"]
             .as_array()
@@ -20,8 +19,7 @@ fn media_references_match_the_editor_fixtures() {
             .collect();
         expected.sort();
         assert_eq!(actual, expected, "{}", case["name"]);
-        // Only references the editor treats as local files can be listed
-        // to the owner as images link visitors cannot see.
+        // References the editor treats as local files.
         let local: Vec<&String> = actual
             .iter()
             .filter(|reference| media::local_reference(reference))
@@ -34,10 +32,21 @@ fn media_references_match_the_editor_fixtures() {
             .collect();
         wanted.sort();
         assert_eq!(local, wanted, "{}: local references", case["name"]);
-        for rendered in case["rendered"].as_array().unwrap() {
-            let path = rendered["path"].as_str().unwrap();
+        // The owner is told about exactly the images the editor previews:
+        // none it never shows, and every one it does.
+        let mut previewed: Vec<String> = media::previewed(source).into_iter().collect();
+        previewed.sort();
+        let mut rendered: Vec<String> = case["rendered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rendered| rendered["path"].as_str().unwrap().to_string())
+            .collect();
+        rendered.sort();
+        assert_eq!(previewed, rendered, "{}: previewed images", case["name"]);
+        for path in &rendered {
             assert!(
-                expected.iter().any(|reference| reference == path),
+                expected.contains(path),
                 "{}: the editor previews {path}, which the server never serves",
                 case["name"]
             );

@@ -246,16 +246,60 @@ pub(super) fn local_reference(reference: &str) -> bool {
     });
     !reference.is_empty() && !scheme && !reference.starts_with(['/', '#'])
 }
-/// The local media references of a document that link visitors cannot see,
-/// for its owner: `missing` when no file inside the documents folder is
-/// there, `unapproved` when the file is there but not approved for them.
-/// Remote links, data URLs and fragments are not local media, and a file
-/// Locdoc cannot serve as an image or video is hidden from the owner too.
-pub(super) fn hidden_media(s: &Store, d: &Document, references: &HashSet<String>) -> Vec<Value> {
+/// The media references of Markdown source that the editor previews: inline
+/// images with a local destination, outside tables and inline links
+/// (`[label](destination)`), and not part of the description of an image it
+/// previews. Reference-style and linked images stay source text there.
+/// `previewedImage` in src/markdown-media.ts is the same rule, and
+/// test/fixtures/media-references.json holds both. The source is parsed as
+/// `Store::references` parses it, so each is a reference the document serves.
+pub(super) fn previewed(content: &str) -> HashSet<String> {
+    use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
+    let mut previewed = HashSet::new();
+    // Whether each open table, link or image keeps the images inside it from
+    // previewing, as a table, an inline link and a previewed image do.
+    let mut open: Vec<bool> = Vec::new();
+    for event in pulldown_cmark::Parser::new_ext(
+        &comments::reading_source(content),
+        pulldown_cmark::Options::all(),
+    ) {
+        match event {
+            Event::Start(Tag::Table(_)) => open.push(true),
+            Event::Start(Tag::Link { link_type, .. }) => open.push(link_type == LinkType::Inline),
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                ..
+            }) => {
+                let shown = link_type == LinkType::Inline
+                    && !open.contains(&true)
+                    && local_reference(&dest_url);
+                if shown {
+                    previewed.insert(dest_url.to_string());
+                }
+                open.push(shown);
+            }
+            Event::End(TagEnd::Table | TagEnd::Link | TagEnd::Image) => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    previewed
+}
+/// The media references the owner's editor previews in `content` that link
+/// visitors cannot see: `missing` when no file inside the documents folder
+/// is there, `unapproved` when the file is there but not approved for them.
+/// A file Locdoc cannot serve as an image or video is hidden from the owner
+/// too.
+pub(super) fn hidden_media(s: &Store, d: &Document, content: &str) -> Vec<Value> {
+    if !documents::has_media(&d.path) {
+        return Vec::new();
+    }
     let approvals = s.approvals(d);
-    let mut hidden: Vec<(&String, &str)> = references
+    let previewed = previewed(content);
+    let mut hidden: Vec<(&String, &str)> = previewed
         .iter()
-        .filter(|reference| local_reference(reference))
         .filter_map(|reference| {
             let path = match s.media_path(d, reference) {
                 Ok(path) => path,
@@ -715,6 +759,36 @@ mod tests {
             "refusals"
         );
         assert_eq!(approvals(&s, &page), 0);
+    }
+
+    #[test]
+    fn images_the_editor_never_previews_are_never_listed_as_hidden() {
+        let (_dir, s) = store();
+        fs::write(s.root.join("page.md"), "# Page\n").unwrap();
+        let page = s.index_document("page.md").unwrap();
+        let room = s.room(&page).unwrap();
+        // Typed in the owner's browser: nothing here is approved, and only
+        // the first image previews there.
+        let typed = concat!(
+            "![shown](shown.png)\n\n![reference][photo]\n\n",
+            "[![linked](linked.png)](https://example.test) [![near](near.png)](notes)\n\n",
+            "| Photo |\n| --- |\n| ![cell](cell.png) |\n\n[photo]: reference.png\n",
+        );
+        process_frame(
+            &s,
+            &page,
+            &room,
+            &peer_update(&room, typed),
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        let payload = document_payload(&s, &owner(&s), &page, &Access::default()).unwrap();
+        assert_eq!(
+            payload["hiddenMedia"],
+            json!([{"path": "shown.png", "reason": "missing"}])
+        );
     }
 
     #[tokio::test]

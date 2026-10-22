@@ -83,6 +83,25 @@ export function imageReference(
   };
 }
 
+// An image the preview shows as media: an inline local image outside tables
+// and inline links ([label](destination)), and not part of the description of
+// an image it shows. Reference-style and linked images stay source text. The
+// server lists exactly these as images link visitors cannot see; both read
+// test/fixtures/media-references.json.
+export function previewedImage(
+  source: (from: number, to: number) => string,
+  node: SyntaxNode,
+): ImageReference | null {
+  for (let parent = node.parent; parent; parent = parent.parent)
+    if (
+      parent.name === "Table" ||
+      (parent.name === "Link" && parent.getChild("URL")) ||
+      (parent.name === "Image" && previewedImage(source, parent))
+    )
+      return null;
+  return imageReference(source, node);
+}
+
 // A line that is exactly one local image (optionally followed by spaces) is
 // shown as a block figure. Comment placement uses this line-local rule so a
 // conversation never splits a figure, whether or not the figure is revealed.

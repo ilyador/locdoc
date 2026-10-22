@@ -142,10 +142,47 @@
   },
   {
     "name": "reference-style and linked images are not previewed",
-    "source": "![r][ref]\n\n[![l](linked.png)](https://example.test)\n\n[ref]: ref.png",
-    "references": ["linked.png", "ref.png"],
-    "local": ["linked.png", "ref.png"],
+    "source": "![r][ref]\n\n![c][]\n\n![ref]\n\n[![l](linked.png)](https://example.test)\n\n[![n](near.png)](notes)\n\n[ref]: ref.png\n[c]: c.png",
+    "references": ["c.png", "linked.png", "near.png", "ref.png"],
+    "local": ["c.png", "linked.png", "near.png", "ref.png"],
     "rendered": []
+  },
+  {
+    "name": "an image inside a reference link or brackets is previewed",
+    "source": "[![x](x.png)][ref]\n\n[![s](shortcut.png)]\n\n[ref]: https://example.test",
+    "references": ["shortcut.png", "x.png"],
+    "local": ["shortcut.png", "x.png"],
+    "rendered": [
+      { "path": "x.png", "alt": "x", "title": "", "block": false },
+      { "path": "shortcut.png", "alt": "s", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "images in table cells are not previewed",
+    "source": "| Photo | Note |\n| --- | --- |\n| ![t](table.png) | x |",
+    "references": ["table.png"],
+    "local": ["table.png"],
+    "rendered": []
+  },
+  {
+    "name": "an image in a previewed image's description is part of its alt text",
+    "source": "![outer ![inner](in.png)](out.png)\n\n![web ![local](local.png)](https://example.test/w.png)",
+    "references": [
+      "https://example.test/w.png",
+      "in.png",
+      "local.png",
+      "out.png"
+    ],
+    "local": ["in.png", "local.png", "out.png"],
+    "rendered": [
+      {
+        "path": "out.png",
+        "alt": "outer ![inner](in.png)",
+        "title": "",
+        "block": true
+      },
+      { "path": "local.png", "alt": "local", "title": "", "block": false }
+    ]
   },
   {
     "name": "comment records are not part of an image",
