@@ -29,7 +29,7 @@ import {
   TaskWidget,
   mediaUrl,
 } from "./markdown-widgets";
-import { imageReference, mediaPreview } from "./markdown-media";
+import { mediaPreview, previewedImage } from "./markdown-media";
 import { plainTextSupport } from "./plain-text";
 import type { Entry } from "./model";
 
@@ -89,13 +89,11 @@ export function livePreview(
           const { name, from, to } = n;
           if (name === "LocdocComment") return false;
           if (name === "Image") {
-            const image = imageReference(
+            const image = previewedImage(
               (a, b) => state.sliceDoc(a, b),
               n.node,
             );
-            let cell = n.node.parent;
-            while (cell && cell.name !== "Table") cell = cell.parent;
-            if (!image || cell) return;
+            if (!image) return;
             const line = state.doc.lineAt(from);
             const src = mediaUrl(id, image.path, token);
             if (

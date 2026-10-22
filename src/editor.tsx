@@ -48,6 +48,7 @@ import {
   lineEndingError,
 } from "./line-endings";
 import { documentPreview } from "./markdown-preview";
+import { explainMedia, retryUnavailableMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
 import type { Comment, Entry } from "./model";
 
@@ -59,6 +60,11 @@ export const MarkdownEditor = forwardRef<
     editable: boolean;
     id: string;
     token?: string;
+    // The owner's editor says why the server refuses media.
+    owner?: boolean;
+    // Grows each time the server says more of the document's media may be
+    // served: media this view could not load is requested once more.
+    mediaRetry?: number;
     onChange?: (text: string) => void;
     onIntegrityError?: (message: string) => void;
     onComment: () => void;
@@ -81,6 +87,8 @@ export const MarkdownEditor = forwardRef<
     editable,
     id,
     token,
+    owner,
+    mediaRetry,
     onChange,
     onIntegrityError,
     onComment,
@@ -229,7 +237,10 @@ export const MarkdownEditor = forwardRef<
           findExtension(),
           layer.extension,
           access.current.of(editorAccess(editable)),
-          preview.current.of(documentPreview(id, token, path, entries)),
+          preview.current.of([
+            documentPreview(id, token, path, entries),
+            explainMedia.of(!!owner),
+          ]),
           yCollab(text, provider.awareness, { undoManager: undo }),
           keymap.of([
             {
@@ -333,16 +344,20 @@ export const MarkdownEditor = forwardRef<
     documentFormat(path) === "markdown" ? entries : undefined;
   useEffect(() => {
     view.current?.dispatch({
-      effects: preview.current.reconfigure(
+      effects: preview.current.reconfigure([
         documentPreview(id, token, path, previewEntries),
-      ),
+        explainMedia.of(!!owner),
+      ]),
     });
-  }, [id, token, path, previewEntries]);
+  }, [id, token, path, previewEntries, owner]);
   useEffect(() => {
     view.current?.dispatch({
       effects: access.current.reconfigure(editorAccess(editable)),
     });
   }, [editable]);
+  useEffect(() => {
+    if (mediaRetry && view.current) retryUnavailableMedia(view.current.dom);
+  }, [mediaRetry]);
   return (
     <>
       <div className="markdown-editor" ref={host} />

@@ -685,7 +685,12 @@ impl Approvals<'_> {
             .collect()
     }
     /// Whether the document may serve this canonical file to link visitors.
+    /// No approval reaches a file in a `media::private_location`, however it
+    /// was recorded.
     pub(super) fn approves(&self, path: &std::path::Path) -> bool {
+        if super::media::private_location(self.store, path).is_some() {
+            return false;
+        }
         let exact = path.to_string_lossy();
         if self.grants.iter().any(|(pinned, _)| *pinned == exact) {
             return true;

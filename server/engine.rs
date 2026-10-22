@@ -60,6 +60,10 @@ impl std::ops::DerefMut for DocumentEngine {
     }
 }
 
+/// The custom collaboration message that tells a view to request once more
+/// the media it could not load. Its payload is empty.
+pub(super) const MEDIA_APPROVED: u8 = 119;
+
 struct StoredRoom {
     state: Option<Vec<u8>>,
     baseline: Option<Vec<u8>>,
@@ -500,6 +504,8 @@ impl Store {
             line_ending = text::ending(&raw, &line_ending);
             let disk = text::canonical(&raw);
             apply_text(&doc, "", &disk);
+            // No view of the document can be open before its first load, so
+            // nobody waits for media this approves.
             self.grant_new_references(d, "", &disk)?;
         }
         for update in &updates {
@@ -1021,7 +1027,8 @@ impl Store {
                 self.snapshot(d, &room_text(r), true)?;
                 r.engine.state.protect();
             }
-            self.grant_desktop_references(d, r.engine.state.source(), &room_text(r), &disk)?;
+            let approved =
+                self.grant_desktop_references(d, r.engine.state.source(), &room_text(r), &disk)?;
             let baseline = Doc::with_options(Options {
                 offset_kind: OffsetKind::Utf16,
                 ..Options::default()
@@ -1054,6 +1061,9 @@ impl Store {
             );
             // Source and causal baseline must survive before peers see imports.
             self.commit_pending(d, r)?;
+            if approved {
+                r.media_approved();
+            }
         }
         let source = room_text(r);
         self.settle_uploads(d, &source)?;
@@ -1353,6 +1363,7 @@ impl Room {
                 )?;
             }
             tx.commit()?;
+            self.media_approved();
         }
         Ok((
             approved
@@ -1361,6 +1372,15 @@ impl Room {
                 .collect(),
             refused,
         ))
+    }
+    /// Tells every open view of the document, link visitors' included, that
+    /// an approval it has just committed may let it serve media they could
+    /// not load, so each requests that media once more. The signal names
+    /// nothing a visitor could not already see.
+    fn media_approved(&self) {
+        let _ = self
+            .tx
+            .send(Message::Custom(MEDIA_APPROVED, Vec::new()).encode_v1());
     }
     pub(super) fn detach(&mut self, peer: &Peer) {
         self.engine.state.receipts.remove(&peer.id);

@@ -416,3 +416,18 @@ test("opening accepted text with a pending projection cannot report Saved to dis
   await act(async () => serverMessage(session, 121, "0"));
   assert.equal(result.current.status, "Saved to disk");
 });
+
+test("each media approval signal asks the editor once to request failed media again", async () => {
+  const doc = fixture(false);
+  respond(doc);
+  const { result } = renderHook(() => useDocument(doc.id, true, doc));
+  await waitFor(() => assert.ok(result.current.session));
+  const session = result.current.session!;
+  assert.equal(result.current.mediaRetry, 0);
+  await act(async () => serverMessage(session, 119, ""));
+  assert.equal(result.current.mediaRetry, 1);
+  await act(async () => serverMessage(session, 119, ""));
+  assert.equal(result.current.mediaRetry, 2);
+  assert.ok(result.current.session === session, "the session stays open");
+  assert.equal(fetchCount, 0, "the signal loads nothing itself");
+});

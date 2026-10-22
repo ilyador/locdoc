@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { commentParser } from "../src/comment-syntax.ts";
 import {
   decodeMarkdownText,
-  imageReference,
   isLocalMediaPath,
+  previewedImage,
   wholeLineImage,
 } from "../src/markdown-media.ts";
 import {
@@ -24,13 +24,14 @@ const fixtures = JSON.parse(
   ),
 );
 
-function parsedImages(source) {
+// The images the editor previews, in document order, by its own rule.
+function previewedImages(source) {
   const images = [];
   commentParser.parse(source).iterate({
     enter(node) {
       if (node.name === "LocdocComment") return false;
       if (node.name !== "Image") return;
-      const image = imageReference(
+      const image = previewedImage(
         (from, to) => source.slice(from, to),
         node.node,
       );
@@ -40,33 +41,31 @@ function parsedImages(source) {
   return images;
 }
 
-test("previewed fixture images are parser images with the server's destination", () => {
+test("the editor previews exactly the fixture images, with the server's destination", () => {
   for (const fixture of fixtures) {
-    const images = parsedImages(fixture.source);
-    for (const rendered of fixture.rendered) {
-      const image = images.find(
-        (candidate) => candidate.path === rendered.path,
-      );
-      assert.ok(image, `${fixture.name}: ${rendered.path} is an image`);
-      assert.equal(image.alt, rendered.alt, `${fixture.name}: alt`);
-      assert.equal(image.title, rendered.title, `${fixture.name}: title`);
-      assert.ok(
-        fixture.references.includes(image.path),
-        `${fixture.name}: the server serves ${image.path}`,
-      );
+    // Bounded scalar rows in both directions: nothing previewed is missing
+    // from the fixture and nothing in it goes unpreviewed.
+    const previewed = previewedImages(fixture.source).map((image) => {
       const start = fixture.source.lastIndexOf("\n", image.from) + 1;
       const end = fixture.source.indexOf("\n", image.to);
       const line = fixture.source.slice(start, end < 0 ? undefined : end);
-      assert.equal(
-        wholeLineImage(line)?.path === image.path,
-        rendered.block,
-        `${fixture.name}: ${image.path} figure placement`,
+      return {
+        path: image.path,
+        alt: image.alt,
+        title: image.title,
+        block: wholeLineImage(line)?.path === image.path,
+      };
+    });
+    assert.deepEqual(previewed, fixture.rendered, `${fixture.name}: previewed`);
+    for (const { path } of previewed)
+      assert.ok(
+        fixture.references.includes(path),
+        `${fixture.name}: the server serves ${path}`,
       );
-    }
   }
 });
 
-test("the server lists as hidden files only the references the editor treats as local", () => {
+test("the server and the editor agree on which references are local files", () => {
   for (const fixture of fixtures)
     assert.deepEqual(
       fixture.references.filter(isLocalMediaPath),

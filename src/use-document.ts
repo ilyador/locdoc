@@ -52,6 +52,7 @@ export function useDocument(
   const [storageWarning, setStorageWarning] = useState("");
   const [trashed, setTrashed] = useState<Trashed | null>(null);
   const [reload, setReload] = useState(0);
+  const [mediaRetry, setMediaRetry] = useState(0);
   const recoveryJournal = useRef<DraftJournal | null>(null);
   const verify = useRef<(() => void) | null>(null);
   const accessQuery = sharedToken
@@ -291,6 +292,11 @@ export function useDocument(
           }
           updateStatus();
         };
+        // An approval may let the server serve media this view could not
+        // load, so the editor requests it once more. The signal names nothing.
+        provider.messageHandlers[119] = () => {
+          if (active) setMediaRetry((count) => count + 1);
+        };
         provider.messageHandlers[123] = (_encoder, decoder) => {
           const usage = Number(readVarString(decoder));
           if (active && Number.isSafeInteger(usage) && usage >= 0)
@@ -393,6 +399,7 @@ export function useDocument(
     clearRecovery,
     storageWarning,
     trashed,
+    mediaRetry,
     // Open the document again, as after a restore or a change of format.
     reload: () => setReload((value) => value + 1),
     // Ask whether the open document went to the trash.

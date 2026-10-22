@@ -17,7 +17,12 @@ import { Awareness } from "y-protocols/awareness";
 import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
 import { livePreview } from "../src/markdown-preview";
-import { InlineMediaWidget, MediaWidget } from "../src/markdown-widgets";
+import {
+  InlineMediaWidget,
+  MediaWidget,
+  explainMedia,
+  retryUnavailableMedia,
+} from "../src/markdown-widgets";
 import { isLocalMediaPath, wholeLineImage } from "../src/markdown-media";
 import type { Comment } from "../src/model";
 
@@ -498,6 +503,197 @@ test("media the server refuses shows its alt text instead of a broken image", ()
     );
   } finally {
     fixture.close();
+  }
+});
+
+test("the owner's editor says why the server refuses media, a visitor's never asks", async () => {
+  const source =
+    "![Chart](big.png)\n\nSee ![](gone.png) and ![clip](huge.mp4)\n\n![odd](odd.png)\n\n![later](fine.png)";
+  // The media endpoint's refusals, as it answers the owner.
+  const reasons: Record<string, string> = {
+    "big.png": "too-large",
+    "gone.png": "missing",
+    "huge.mp4": "too-large",
+    "odd.png": "<b>new</b>",
+  };
+  const asked: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), "http://localhost").searchParams.get(
+      "path",
+    )!;
+    asked.push(path);
+    return path === "fine.png"
+      ? new Response("image bytes", { status: 200 })
+      : new Response(
+          JSON.stringify({ error: "Refused", reason: reasons[path] }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+  }) as typeof fetch;
+  const placeholders = async (owner: boolean) => {
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const view = new EditorView({
+      parent,
+      state: parsed(
+        EditorState.create({
+          doc: source,
+          extensions: [
+            language,
+            sourceCommentLayer,
+            preview,
+            EditorState.readOnly.of(true),
+            explainMedia.of(owner),
+          ],
+        }),
+      ),
+    });
+    try {
+      for (const media of Array.from(
+        view.dom.querySelectorAll<HTMLElement>("img, video"),
+      ))
+        media.dispatchEvent(new dom.window.Event("error"));
+      for (let turn = 0; turn < 5; turn++)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      return Array.from(
+        view.dom.querySelectorAll<HTMLElement>(".media-missing"),
+        (holder) =>
+          [
+            holder.getAttribute("aria-label"),
+            holder.title,
+            holder.textContent,
+          ].join("|"),
+      );
+    } finally {
+      view.destroy();
+      parent.remove();
+    }
+  };
+  try {
+    assert.deepEqual(await placeholders(false), [
+      "Chart (image unavailable)|Image unavailable|Chart",
+      "Image unavailable|Image unavailable|Image unavailable",
+      "clip (video unavailable)|Video unavailable|clip",
+      "odd (image unavailable)|Image unavailable|odd",
+      "later (image unavailable)|Image unavailable|later",
+    ]);
+    assert.deepEqual(asked, [], "a link visitor's view never asks why");
+    const limit = "Over the 5 MB image or 20 MB video limit";
+    assert.deepEqual(await placeholders(true), [
+      `Chart (image unavailable: ${limit})|Image unavailable: ${limit}|Chart · ${limit}`,
+      "Image unavailable: File not found|Image unavailable: File not found|File not found",
+      `clip (video unavailable: ${limit})|Video unavailable: ${limit}|clip · ${limit}`,
+      // An unknown reason, or none, leaves the plain placeholder.
+      "odd (image unavailable)|Image unavailable|odd",
+      "later (image unavailable)|Image unavailable|later",
+    ]);
+    assert.deepEqual(asked.sort(), [
+      "big.png",
+      "fine.png",
+      "gone.png",
+      "huge.mp4",
+      "odd.png",
+    ]);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("media a view could not load is requested once more each time, and only it", () => {
+  const source =
+    "Look ![a](a.png) and ![b](b.png)\n\n![c](c.png)\n\n![clip](clip.mp4)";
+  const fixture = mountView(source, true);
+  try {
+    // Media and placeholders, never the editor's own widget buffers.
+    const media = () =>
+      Array.from(
+        fixture.view.dom.querySelectorAll<HTMLElement>(
+          ".embed > img, .embed > video, .embed-inline > img, .embed-inline > video, .media-missing",
+        ),
+      );
+    const fail = (path: string) =>
+      media()
+        .find((item) => item.getAttribute("src")?.includes(`path=${path}`))!
+        .dispatchEvent(new dom.window.Event("error"));
+    const shown = () =>
+      media().map((item) =>
+        item.classList.contains("media-missing")
+          ? `missing:${item.textContent}`
+          : new URL(
+              item.getAttribute("src")!,
+              "http://localhost",
+            ).searchParams.get("path"),
+      );
+    for (const path of ["a.png", "c.png", "clip.mp4"]) fail(path);
+    const loaded = media()[1];
+    assert.deepEqual(shown(), [
+      "missing:a",
+      "b.png",
+      "missing:c",
+      "missing:clip",
+    ]);
+    retryUnavailableMedia(fixture.view.dom);
+    assert.deepEqual(shown(), ["a.png", "b.png", "c.png", "clip.mp4"]);
+    assert.ok(media()[1] === loaded, "loaded media is not requested again");
+    assert.ok(
+      media()[3] instanceof HTMLVideoElement,
+      "a video is requested as a video",
+    );
+    // Still refused, it is a placeholder until the next signal; one that
+    // loads stays.
+    fail("a.png");
+    assert.deepEqual(shown(), ["missing:a", "b.png", "c.png", "clip.mp4"]);
+    const again = media();
+    retryUnavailableMedia(fixture.view.dom);
+    assert.deepEqual(shown(), ["a.png", "b.png", "c.png", "clip.mp4"]);
+    assert.ok(media()[0] !== again[0], "the placeholder is requested again");
+    assert.ok(media()[2] === again[2], "only failed media is requested");
+    retryUnavailableMedia(fixture.view.dom);
+    assert.deepEqual(shown(), ["a.png", "b.png", "c.png", "clip.mp4"]);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("the editor requests failed media once more each time its retry count grows", async () => {
+  const { MarkdownEditor } = await import("../src/editor");
+  const ydoc = new Y.Doc();
+  ydoc.getText("content").insert(0, "![photo](photo.png)\n\nText");
+  const awareness = new Awareness(ydoc);
+  // One provider, as a session keeps: a new one would make a new view.
+  const provider = { awareness } as any;
+  const editor = (mediaRetry: number) => (
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={provider}
+      editable={false}
+      id="retry-media"
+      path="Notes/Retry.md"
+      mediaRetry={mediaRetry}
+      onComment={() => {}}
+      onUpload={() => {}}
+    />
+  );
+  const page = render(editor(0));
+  try {
+    await act(async () => {});
+    const image = () => page.container.querySelector(".embed > img");
+    image()!.dispatchEvent(new dom.window.Event("error"));
+    assert.equal(image(), null, "a refused image is a placeholder");
+    page.rerender(editor(1));
+    await act(async () => {});
+    assert.ok(image(), "a grown count requests it once more");
+    image()!.dispatchEvent(new dom.window.Event("error"));
+    page.rerender(editor(1));
+    await act(async () => {});
+    assert.equal(image(), null, "the same count requests nothing");
+    page.rerender(editor(2));
+    await act(async () => {});
+    assert.ok(image());
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
   }
 });
 
