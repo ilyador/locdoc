@@ -432,7 +432,10 @@ async function killRestore(fixture, root, extra) {
       } catch {}
     }
   } finally {
-    process.kill(-child.pid, "SIGKILL");
+    // The group is gone if the restore ended before it held.
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {}
     if (child.exitCode === null && child.signalCode === null)
       await once(child, "exit");
   }
@@ -450,7 +453,7 @@ async function refusedStartup(state, docs) {
     encoding: "utf8",
     timeout: 20000,
   });
-  assert.equal(started.status, 1, `startup was refused: ${started.stderr}`);
+  assert.equal(started.status, 1, `startup refuses: ${started.stderr}`);
   return started.stderr;
 }
 
