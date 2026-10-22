@@ -986,23 +986,25 @@ fn a_folder_nothing_can_move_into_holds_only_the_documents_recorded_inside_it() 
     }
     let (_directory, s) = store();
     let inside = s.create_document("Locked/inside.md").unwrap();
-    let below = s.create_document("Search/below.md").unwrap();
+    let below = s.create_document("Names/below.md").unwrap();
     let removed = s.create_document("removed.md").unwrap();
     share_link(&s, &inside.id, "inside-link");
     share_link(&s, &below.id, "below-link");
     share(&s, &removed.id);
-    for path in ["Locked/inside.md", "Search/below.md", "removed.md"] {
+    for path in ["Locked/inside.md", "Names/below.md", "removed.md"] {
         fs::remove_file(s.root.join(path)).unwrap();
     }
+    fs::write(s.root.join("Names/notes.txt"), "").unwrap();
     // Locked cannot be listed or entered, like a root-owned lost+found;
-    // Search can be entered but not listed. Neither can take a moved file.
-    let (locked, search) = (s.root.join("Locked"), s.root.join("Search"));
+    // Names lists its entries but cannot be entered to inspect them.
+    // Neither can take a moved file.
+    let (locked, names) = (s.root.join("Locked"), s.root.join("Names"));
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-    fs::set_permissions(&search, fs::Permissions::from_mode(0o100)).unwrap();
+    fs::set_permissions(&names, fs::Permissions::from_mode(0o400)).unwrap();
     let passed = s.retire_missing_documents();
     let held = [&inside, &below].map(|document| s.doc(&document.id).map(|d| d.token));
     let retired = s.doc(&removed.id).is_err();
-    for folder in [&locked, &search] {
+    for folder in [&locked, &names] {
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
     }
     passed.unwrap();
@@ -1052,6 +1054,49 @@ fn a_folder_locdoc_could_move_files_into_but_not_list_holds_every_missing_docume
     assert!(s.doc(&removed.id).is_err());
     let found = s.doc(&moved.id).unwrap();
     assert_eq!(found.path, "Drop/moved.md");
+    assert_eq!(found.token.as_deref(), Some("moved-link"));
+}
+
+#[test]
+fn a_folder_locdoc_can_enter_but_not_list_holds_every_missing_document() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (_directory, s) = store();
+    let moved = s.create_document("moved.md").unwrap();
+    share_link(&s, &moved.id, "moved-link");
+    s.create_folder("Search/Inbox").unwrap();
+    fs::rename(
+        s.root.join("moved.md"),
+        s.root.join("Search/Inbox/moved.md"),
+    )
+    .unwrap();
+    // Search cannot be listed or written, but a subfolder the walk cannot
+    // see may still take files.
+    let search = s.root.join("Search");
+    fs::set_permissions(&search, fs::Permissions::from_mode(0o100)).unwrap();
+    let passed = s.retire_missing_documents();
+    let moved_link = s.doc(&moved.id).map(|d| d.token);
+    fs::set_permissions(&search, fs::Permissions::from_mode(0o700)).unwrap();
+    passed.unwrap();
+    assert_eq!(moved_link.unwrap().as_deref(), Some("moved-link"));
+    s.retire_missing_documents().unwrap();
+    let found = s.doc(&moved.id).unwrap();
+    assert_eq!(found.path, "Search/Inbox/moved.md");
+    assert_eq!(found.token.as_deref(), Some("moved-link"));
+}
+
+#[test]
+fn a_readable_lost_and_found_at_the_documents_root_is_still_searched() {
+    let (_directory, s) = store();
+    let moved = s.create_document("moved.md").unwrap();
+    share_link(&s, &moved.id, "moved-link");
+    fs::create_dir(s.root.join("lost+found")).unwrap();
+    fs::rename(s.root.join("moved.md"), s.root.join("lost+found/moved.md")).unwrap();
+    s.retire_missing_documents().unwrap();
+    let found = s.doc(&moved.id).unwrap();
+    assert_eq!(found.path, "lost+found/moved.md");
     assert_eq!(found.token.as_deref(), Some("moved-link"));
 }
 

@@ -411,19 +411,18 @@ fn sooner(retry: &mut Option<Duration>, delay: Duration) {
 
 /// The folders a walk could not list in full. One can hide the file of a
 /// document recorded inside it, and any moved file if this process could
-/// have moved a file into it.
+/// enter it: a subfolder the walk cannot see may take files.
 #[derive(Default)]
 struct Unlisted {
     folders: Vec<PathBuf>,
-    writable: bool,
+    enterable: bool,
 }
 impl Unlisted {
     fn add(&mut self, folder: &Path) {
         let path = std::ffi::CString::new(folder.as_os_str().as_bytes());
-        let movable = |path: std::ffi::CString| unsafe {
-            libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0
-        };
-        self.writable |= path.is_ok_and(movable);
+        let enterable =
+            |path: std::ffi::CString| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 };
+        self.enterable |= path.is_ok_and(enterable);
         self.folders.push(folder.to_owned());
     }
     fn complete(&self) -> bool {
@@ -431,7 +430,7 @@ impl Unlisted {
     }
     /// Whether the file of a document recorded at `path` may be in one.
     fn may_hide(&self, root: &Path, path: &str) -> bool {
-        self.writable
+        self.enterable
             || self
                 .folders
                 .iter()
@@ -1036,21 +1035,25 @@ impl Store {
         }
     }
 
-    /// Walk the tree once, never following symlinks or entering dot folders
-    /// or the root's lost+found, which fsck owns. An entry that vanishes is
-    /// skipped; a folder that cannot be listed in full is reported rather
-    /// than failing the pass. Also returns the files that other names link to.
+    /// Walk the tree once, never following symlinks or entering dot folders.
+    /// An entry that vanishes is skipped; a folder that cannot be listed in
+    /// full is reported rather than failing the pass, except the root's
+    /// lost+found, which fsck owns. Also returns the files that other names
+    /// link to.
     fn walk(&self) -> (HashMap<String, Option<Identity>>, HashSet<String>, Unlisted) {
         let mut files = HashMap::new();
         let mut linked = HashSet::new();
         let mut unlisted = Unlisted::default();
+        let fsck = self.root.join("lost+found");
         let mut folders = vec![self.root.clone()];
         while let Some(folder) = folders.pop() {
             let children = match walk_step(&folder).and_then(|()| fs::read_dir(&folder)) {
                 Ok(children) => children,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => {
-                    unlisted.add(&folder);
+                    if folder != fsck {
+                        unlisted.add(&folder);
+                    }
                     continue;
                 }
             };
@@ -1062,9 +1065,7 @@ impl Store {
                 };
                 // Document paths are UTF-8 and never hidden.
                 let name = child.file_name();
-                if name.to_str().is_none_or(|name| {
-                    name.starts_with('.') || (name == "lost+found" && folder == self.root)
-                }) {
+                if name.to_str().is_none_or(|name| name.starts_with('.')) {
                     continue;
                 }
                 let path = child.path();
@@ -1087,7 +1088,7 @@ impl Store {
                     Err(_) => partial = true,
                 }
             }
-            if partial {
+            if partial && folder != fsck {
                 unlisted.add(&folder);
             }
         }
