@@ -2370,10 +2370,11 @@ impl Store {
             let mut room = room.lock().unwrap();
             let document = documents.iter().find(|document| &document.id == id);
             room.ensure_committed(self, document.unwrap())?;
-            live.push(room);
+            live.push((id, room));
         }
         let closed = self.trash_entry(&movement, &source)?;
-        for room in &live {
+        // A document whose file left the folder first was not deleted.
+        for (_, room) in live.iter().filter(|(id, _)| closed.contains(id)) {
             let _ = room.tx.send(vec![126]);
         }
         drop(live);
@@ -2782,7 +2783,7 @@ impl Store {
     ) -> Result<Vec<String>> {
         match movement.action {
             Action::Rename => self.apply_rename(tx, movement, committing),
-            Action::Trash => self.apply_trash(tx, movement),
+            Action::Trash => self.apply_trash(tx, movement, committing),
             Action::Restore => self.apply_restore(tx, movement, committing),
         }
     }
@@ -2825,20 +2826,34 @@ impl Store {
         &self,
         tx: &rusqlite::Transaction<'_>,
         movement: &EntryMove,
+        committing: bool,
     ) -> Result<Vec<String>> {
         let (original, location) = (movement.source.as_str(), movement.destination.as_str());
-        let documents: Vec<Document> = active_documents(tx)?
-            .into_iter()
-            .filter(|document| match movement.entry {
-                EntryKind::Document => {
+        // Each document with the path it had and its file's path in the trash.
+        let documents: Vec<(Document, String, String)> = match movement.entry {
+            EntryKind::Document => active_documents(tx)?
+                .into_iter()
+                .filter(|document| {
                     movement.document.as_deref() == Some(document.id.as_str())
                         && document.path == original
-                }
-                EntryKind::Folder => below(&document.path, original).is_some(),
-            })
-            .collect();
-        for document in &documents {
-            let trashed = rebase(&document.path, original, location).unwrap();
+                })
+                .map(|document| {
+                    let path = document.path.clone();
+                    (document, path, location.to_owned())
+                })
+                .collect(),
+            EntryKind::Folder if committing => self.carried_documents(tx, original, location)?,
+            // Rehearsing, before anything moved: the folder's rows.
+            EntryKind::Folder => active_documents(tx)?
+                .into_iter()
+                .filter_map(|document| {
+                    let trashed = rebase(&document.path, original, location)?;
+                    let path = document.path.clone();
+                    Some((document, path, trashed))
+                })
+                .collect(),
+        };
+        for (document, path, trashed) in &documents {
             // A new incarnation: no room loaded before the delete accepts
             // anything once it is back.
             let updated = tx.execute(
@@ -2852,10 +2867,14 @@ impl Store {
             tx.execute(
                 "INSERT INTO trashed_documents(doc,trash,path) VALUES(?,?,?)
                  ON CONFLICT(doc) DO UPDATE SET trash=excluded.trash,path=excluded.path",
-                params![document.id, movement.id, document.path],
+                params![document.id, movement.id, path],
             )?;
             tx.execute("DELETE FROM document_gaps WHERE doc=?", [&document.id])?;
         }
+        let documents: Vec<Document> = documents
+            .into_iter()
+            .map(|(document, ..)| document)
+            .collect();
         if movement.entry == EntryKind::Folder {
             // Hidden paths open nothing, so these stay suspended until the
             // restore brings them back.
@@ -2874,6 +2893,85 @@ impl Store {
             ],
         )?;
         Ok(documents.into_iter().map(|document| document.id).collect())
+    }
+
+    /// The documents a folder delete carried into the trash, once the folder
+    /// is there. The pass before the delete placed every document, but a
+    /// desktop application may move or remove files until the rename, so the
+    /// moved folder decides, as a pass would: a document whose own recorded
+    /// file is inside goes wherever its row was, and one recorded below the
+    /// folder goes when its name still holds its own file or one no other
+    /// document records. A document whose file left the folder first stays
+    /// active for passes to place or retire. A name that cannot be read
+    /// still goes with its folder. Returns each document with the path it
+    /// had and where its file is in the trash.
+    fn carried_documents(
+        &self,
+        tx: &Connection,
+        original: &str,
+        location: &str,
+    ) -> Result<Vec<(Document, String, String)>> {
+        let recorded: HashMap<String, Identity> = tx
+            .prepare(
+                "SELECT f.doc,f.identity FROM document_identities f
+                 JOIN docs d ON d.id=f.doc WHERE d.active=1",
+            )?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, Identity(row.get(1)?)))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        // Evidence recorded for two documents identifies neither.
+        let mut owners: HashMap<&Identity, usize> = HashMap::new();
+        for identity in recorded.values() {
+            *owners.entry(identity).or_default() += 1;
+        }
+        let inside = match self.entry_path(location)? {
+            Some(folder) => carried_files(&folder),
+            None => HashMap::new(),
+        };
+        let mut carried = Vec::new();
+        for document in active_documents(tx)? {
+            let own = recorded.get(&document.id);
+            if let Some(relative) = own
+                .filter(|identity| owners[identity] == 1)
+                .and_then(|identity| inside.get(identity))
+            {
+                carried.push((
+                    document,
+                    format!("{original}/{relative}"),
+                    format!("{location}/{relative}"),
+                ));
+                continue;
+            }
+            let Some(trashed) = rebase(&document.path, original, location) else {
+                continue;
+            };
+            let went = match self.entry_path(&trashed)? {
+                Some(path) => match fs::symlink_metadata(path) {
+                    Ok(metadata) => {
+                        metadata.is_file()
+                            && Identity::of(&metadata).is_none_or(|identity| {
+                                own == Some(&identity) || !owners.contains_key(&identity)
+                            })
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(_) => true,
+                },
+                None => true,
+            };
+            if went {
+                let path = document.path.clone();
+                carried.push((document, path, trashed));
+            }
+        }
+        Ok(carried)
     }
 
     fn apply_restore(
@@ -3197,6 +3295,43 @@ impl Store {
 struct Held {
     _loads: Vec<work::LoadGuard>,
     rooms: Vec<(String, Arc<Mutex<Room>>)>,
+}
+
+/// Document files with a single name inside `folder`, by the evidence each
+/// carries, with their paths relative to it. Like a walk it never follows
+/// links or enters dot folders, and a file with other names shows whose file
+/// it is but not where it moved.
+fn carried_files(folder: &Path) -> HashMap<Identity, String> {
+    let mut files = HashMap::new();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(current) = folders.pop() {
+        let Ok(children) = fs::read_dir(&current) else {
+            continue;
+        };
+        for child in children.flatten() {
+            if child
+                .file_name()
+                .to_str()
+                .is_none_or(|name| name.starts_with('.'))
+            {
+                continue;
+            }
+            let path = child.path();
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => folders.push(path),
+                Ok(metadata) if metadata.is_file() && metadata.nlink() == 1 => {
+                    if let Some(relative) = path.strip_prefix(folder).ok().and_then(Path::to_str)
+                        && format(relative).is_some()
+                        && let Some(identity) = Identity::of(&metadata)
+                    {
+                        files.insert(identity, relative.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    files
 }
 
 fn active_documents(db: &Connection) -> Result<Vec<Document>> {

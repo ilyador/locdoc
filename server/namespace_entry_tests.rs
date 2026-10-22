@@ -1107,3 +1107,79 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
     assert_eq!(s.doc(&kept.id).unwrap().path, "Kept/page.md");
     s.trash_folder("Kept").unwrap();
 }
+
+#[test]
+fn a_document_moved_out_of_a_folder_while_it_is_deleted_stays_active_and_found() {
+    use std::time::Duration;
+    let (_directory, s) = store();
+    let busy_page = s.create_document("Drafts/busy.md").unwrap();
+    let kept = s.create_document("Drafts/keep.md").unwrap();
+    share(&s, &kept.id);
+    let room = s.room(&busy_page).unwrap();
+    // A socket's frame holds one room, so the delete waits after its pass.
+    let busy = room.lock().unwrap();
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.trash_folder("Drafts"))
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!worker.is_finished(), "the delete waits for the room");
+    // Meanwhile a desktop application moves one document out of the folder.
+    fs::rename(s.root.join("Drafts/keep.md"), s.root.join("keep.md")).unwrap();
+    drop(busy);
+    worker.join().unwrap().unwrap();
+    assert!(!s.root.join("Drafts").exists());
+    // The document whose file never went to the trash is not trashed: a
+    // pass finds it where the desktop put it, with its link.
+    s.retire_missing_documents().unwrap();
+    let found = s.doc(&kept.id).unwrap();
+    assert_eq!(found.path, "keep.md");
+    assert_eq!(found.token.as_deref(), Some("old-link"));
+    assert_eq!(s.index_document("keep.md").unwrap().id, kept.id);
+    assert_eq!(active(&s, &busy_page.id), 2);
+}
+
+#[test]
+fn a_document_moved_into_a_folder_while_it_is_deleted_goes_and_returns_with_it() {
+    use std::time::Duration;
+    let (_directory, s) = store();
+    let busy_page = s.create_document("Drafts/busy.md").unwrap();
+    let arriving = s.create_document("arriving.md").unwrap();
+    share(&s, &arriving.id);
+    let room = s.room(&busy_page).unwrap();
+    let busy = room.lock().unwrap();
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.trash_folder("Drafts"))
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!worker.is_finished(), "the delete waits for the room");
+    // A desktop application moves a document into the folder meanwhile.
+    fs::rename(
+        s.root.join("arriving.md"),
+        s.root.join("Drafts/arriving.md"),
+    )
+    .unwrap();
+    drop(busy);
+    let trash = worker.join().unwrap().unwrap();
+    // Its file went to the trash with the folder, so it is trashed too
+    // rather than retired as missing.
+    s.retire_missing_documents().unwrap();
+    assert_eq!(active(&s, &arriving.id), 2);
+    assert_eq!(
+        crate::actions::items(&s).unwrap()[0].documents,
+        2,
+        "the item counts both documents"
+    );
+    let (path, documents) = s.restore_trash(&trash).unwrap();
+    assert_eq!(path, "Drafts");
+    assert!(documents.contains(&arriving.id));
+    let back = s.doc(&arriving.id).unwrap();
+    assert_eq!(back.path, "Drafts/arriving.md");
+    assert_eq!(back.token.as_deref(), Some("old-link"));
+    assert_eq!(
+        s.index_document("Drafts/arriving.md").unwrap().id,
+        arriving.id
+    );
+    assert_eq!(s.doc(&busy_page.id).unwrap().path, "Drafts/busy.md");
+}
