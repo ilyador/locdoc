@@ -711,3 +711,51 @@ test("reused media, table and task controls act at their mapped source positions
       else delete (globalThis as unknown as Record<string, unknown>)[key];
   }
 });
+
+// The line numbers that carry a line class, as short scalar rows.
+function linesWithClass(state: EditorState, name: string) {
+  const lines = new Set<number>();
+  for (const set of state.facet(EditorView.decorations)) {
+    if (typeof set === "function") continue;
+    for (let cursor = set.iter(); cursor.value; cursor.next())
+      if (
+        String(cursor.value.spec.class ?? "")
+          .split(" ")
+          .includes(name)
+      )
+        lines.add(state.doc.lineAt(cursor.from).number);
+  }
+  return [...lines].sort((a, b) => a - b);
+}
+
+test("every line of a block quote reads as quoted, while code inside one stays code", () => {
+  const source = [
+    "> A quote that runs",
+    "> across two lines",
+    "lazily continued",
+    "",
+    "After.",
+    "",
+    "> ```",
+    "> code",
+    "> ```",
+  ].join("\n");
+  let state = create(source, { anchor: source.indexOf("After") }, true);
+  assert.deepEqual(
+    linesWithClass(state, "md-quote"),
+    [1, 2, 3],
+    "each line of the quote, its lazy continuation included",
+  );
+  assert.deepEqual(linesWithClass(state, "md-code-line"), [7, 8, 9]);
+  state = create(source, { anchor: source.indexOf("After") });
+  state = replace(state, "across two", "across three", "edit a later line");
+  state = replace(state, "lazily continued", "> lazily", "mark the lazy line");
+  state = replace(state, "\nAfter.", "After.", "join the next paragraph");
+  assert.deepEqual(linesWithClass(state, "md-quote"), [1, 2, 3, 4]);
+  state = replace(state, "> A quote", "A quote", "remove the first marker");
+  assert.deepEqual(
+    linesWithClass(state, "md-quote"),
+    [2, 3, 4],
+    "the quote now starts on the second line",
+  );
+});
