@@ -762,3 +762,49 @@ fn edits_waiting_for_projection_in_the_database_backup_are_applied_once() {
             .unwrap();
     assert!(kept > 0, "The accepted text is in version history");
 }
+
+#[test]
+fn a_file_replaced_after_the_pass_placed_it_is_never_compared() {
+    let (_directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let replaced = written(&s, "replaced.md", "Replaced text\n");
+    for document in [&kept, &replaced] {
+        let room = s.room(document).unwrap();
+        let frame = append_frame(&room, "Accepted browser edit\n");
+        process_frame(
+            &s,
+            document,
+            &room,
+            &frame,
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+    }
+    // Both files now hold their accepted text: one written in place, the
+    // other a new file renamed over the placed one.
+    fs::write(s.root.join("kept.md"), "Kept text\nAccepted browser edit\n").unwrap();
+    let incoming = s.root.join(".replaced.md.new");
+    fs::write(&incoming, "Replaced text\nAccepted browser edit\n").unwrap();
+    fs::rename(&incoming, s.root.join("replaced.md")).unwrap();
+    let baseline = |document: &Document| -> Option<Vec<u8>> {
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT disk_state FROM docs WHERE id=?",
+                [&document.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let before = [baseline(&kept), baseline(&replaced)];
+    for document in [&kept, &replaced] {
+        s.rebase_restored(&s.doc(&document.id).unwrap()).unwrap();
+    }
+    assert!(baseline(&kept) != before[0], "the placed file is compared");
+    assert!(
+        baseline(&replaced) == before[1],
+        "a file the pass never placed is not"
+    );
+}

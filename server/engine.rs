@@ -613,6 +613,10 @@ impl Store {
                 "The file is busy or cannot be read.".into(),
             )
         })?;
+        // Only the file the pass placed for this document is compared.
+        if self.unmatched_file(&d.id, &file.metadata()?)? {
+            return Ok(());
+        }
         // An import refuses such a file anyway.
         let Ok(raw) = file.read() else {
             return Ok(());
