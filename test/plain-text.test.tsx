@@ -225,6 +225,69 @@ test("comments the server adds to plain text show no new line, as in the shared 
   }
 });
 
+test("typing at the end of a plain-text line with conversations writes on that line of the file", () => {
+  const sources = [
+    "Buy milk[[comment(alex): Which brand?]]\n\n[[comment(ana): A note]]\nBuy eggs",
+    "Buy milk[[comment(alex): Which brand?]]\n[[comment(ben): Oat]]\nBuy eggs",
+  ];
+  for (const source of sources) {
+    const [hidden] = sourceCommentRanges(plainState(source));
+    const records = (doc: string) => sourceComments(doc, true).length;
+    // Both sides of the hidden records show at the end of "Buy milk".
+    for (const side of [hidden.from, hidden.to]) {
+      const type = (insert: string) =>
+        plainState(source)
+          .update({ selection: { anchor: side } })
+          .state.update({
+            changes: { from: side, insert },
+            selection: { anchor: side + insert.length },
+            userEvent: "input.type",
+          }).state;
+      const label = `${JSON.stringify(source)} at ${side}`;
+      let state = type("s");
+      assert.equal(
+        state.doc.toString(),
+        source.replace("Buy milk", "Buy milks"),
+        label,
+      );
+      assert.equal(state.selection.main.head, hidden.from + 1, label);
+      assert.deepEqual(
+        displayedLines(state),
+        displayedLines(plainState(source.replace("Buy milk", "Buy milks"))),
+        label,
+      );
+      // A new line starts after the records, before the next line.
+      state = type("\n");
+      assert.equal(
+        state.doc.toString(),
+        source.replace(/\nBuy eggs$/, "\n\nBuy eggs"),
+        label,
+      );
+      assert.deepEqual(
+        displayedLines(state),
+        ["paragraph: Buy milk", "line: ", "paragraph: Buy eggs"],
+        label,
+      );
+      state = type("s\nBuy bread");
+      assert.equal(
+        state.doc.toString(),
+        source
+          .replace("Buy milk", "Buy milks")
+          .replace(/\nBuy eggs$/, "\nBuy bread\nBuy eggs"),
+        label,
+      );
+      // A backslash before the first record would make it text.
+      state = type("\\");
+      assert.equal(records(state.doc.toString()), records(source), label);
+      assert.equal(
+        state.doc.toString(),
+        source.replace(/\nBuy eggs$/, "\\\nBuy eggs"),
+        label,
+      );
+    }
+  }
+});
+
 let dom: JSDOM;
 let render: typeof import("@testing-library/react").render;
 let cleanup: typeof import("@testing-library/react").cleanup;

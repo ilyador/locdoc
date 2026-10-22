@@ -58,32 +58,60 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
         )
           return tr;
         const hidden = sourceCommentRanges(tr.startState);
+        const plain = tr.startState.facet(plainCommentRecords);
+        const doc = tr.startState.doc;
         const moves: {
           from: number;
-          fromB: number;
-          toB: number;
-          target: number;
-          insert: string;
+          changes: { from: number; to?: number; insert: string }[];
+          cursor: number;
         }[] = [];
         tr.changes.iterChanges((from, to, fromB, toB, inserted) => {
-          const range = hidden.find((r) => r.from === from);
-          if (range && from === to && inserted.length)
-            moves.push({
-              from,
-              fromB,
-              toB,
-              target: tr.changes.mapPos(range.to, 1),
-              insert: inserted.toString(),
-            });
+          const range = hidden.find((r) => r.from === from || r.to === from);
+          if (!range || from !== to || !inserted.length) return;
+          // Both sides of an invisible record occupy the same visible text
+          // position. Type on its trailing side so a backslash cannot escape
+          // the delimiter. Plain text records that follow text on its line
+          // and hide later line breaks show at the end of that text, so its
+          // line keeps what is typed up to a line break, unless that ends in
+          // an odd run of backslashes.
+          const insert = inserted.toString();
+          let lead = "";
+          if (
+            plain &&
+            doc.lineAt(range.from).from < range.from &&
+            doc.lineAt(range.to).from > range.from
+          ) {
+            const line = insert.split("\n", 1)[0];
+            if ((line.length - line.replace(/\\+$/, "").length) % 2 === 0)
+              lead = line;
+          }
+          const trail = insert.slice(lead.length);
+          if (from === range.from ? !trail : !lead) return;
+          const start = tr.changes.mapPos(range.from, 1),
+            end = tr.changes.mapPos(range.to, 1);
+          moves.push(
+            from === range.from
+              ? {
+                  from,
+                  changes: [
+                    { from: fromB, to: toB, insert: lead },
+                    { from: end, insert: trail },
+                  ],
+                  cursor: end,
+                }
+              : {
+                  from,
+                  changes: [
+                    { from: start, insert: lead },
+                    { from: fromB, to: toB, insert: trail },
+                  ],
+                  cursor: trail ? toB : start,
+                },
+          );
         });
         if (!moves.length) return tr;
-        // Both sides of an invisible record occupy the same visible text position.
-        // Type on its trailing side so a backslash cannot escape the delimiter.
         const correction = ChangeSet.of(
-          moves.flatMap((m) => [
-            { from: m.fromB, to: m.toB },
-            { from: m.target, insert: m.insert },
-          ]),
+          moves.flatMap((m) => m.changes),
           tr.newDoc.length,
         );
         return [
@@ -96,7 +124,7 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
                   (m) => m.from === tr.startState.selection.ranges[i].head,
                 );
                 return move
-                  ? EditorSelection.cursor(correction.mapPos(move.target, 1))
+                  ? EditorSelection.cursor(correction.mapPos(move.cursor, 1))
                   : r.map(correction);
               }),
               tr.newSelection.mainIndex,
