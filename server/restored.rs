@@ -128,16 +128,23 @@ fn summary(report: &Value, path: &Path) -> String {
         ),
     }];
     let documents = report["documents"].as_array().cloned().unwrap_or_default();
-    let counts: Vec<String> = ["identity", "content", "path", "retired", "undecided"]
-        .into_iter()
-        .filter_map(|evidence| {
-            let count = documents
-                .iter()
-                .filter(|document| document["evidence"] == evidence)
-                .count();
-            (count > 0).then(|| format!("{count} {evidence}"))
-        })
-        .collect();
+    let counts: Vec<String> = [
+        "identity",
+        "content",
+        "path",
+        "retired",
+        "trashed",
+        "undecided",
+    ]
+    .into_iter()
+    .filter_map(|evidence| {
+        let count = documents
+            .iter()
+            .filter(|document| document["evidence"] == evidence)
+            .count();
+        (count > 0).then(|| format!("{count} {evidence}"))
+    })
+    .collect();
     lines.push(format!(
         "Documents by evidence: {}.",
         if counts.is_empty() {

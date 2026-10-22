@@ -420,6 +420,22 @@ fn normal_passes_never_follow_a_copy_by_its_content() {
     let copy = s.index_document("q.md").unwrap();
     assert_ne!(copy.id, a.id);
     assert_eq!(copy.permission, "private");
+    // Nor does a text in the trash, or a trashed one outside it.
+    let b = written(&s, "b.md", "Text of B\n");
+    let t = written(&s, "t.md", "Text of T\n");
+    let item = s.trash_document(&t.id).unwrap();
+    let trash = s.root.join(crate::namespace::TRASH);
+    fs::create_dir(trash.join("copy")).unwrap();
+    fs::copy(s.root.join("b.md"), trash.join("copy/b.md")).unwrap();
+    fs::remove_file(s.root.join("b.md")).unwrap();
+    fs::copy(trash.join(&item).join("t.md"), s.root.join("t.md")).unwrap();
+    fs::remove_file(trash.join(&item).join("t.md")).unwrap();
+    s.retire_missing_documents().unwrap();
+    for document in [&b, &t] {
+        assert!(s.doc(&document.id).is_err());
+        assert!(crate::actions::holding(&s, &document.id).unwrap().is_none());
+    }
+    assert_ne!(s.index_document("t.md").unwrap().id, t.id);
 }
 
 #[test]
@@ -809,27 +825,38 @@ fn a_file_replaced_after_the_pass_placed_it_is_never_compared() {
     );
 }
 
+/// The trash items Recently deleted lists: id, kind, path and documents.
+fn trash_items(s: &Store) -> Vec<(String, &'static str, String, i64)> {
+    crate::actions::items(s)
+        .unwrap()
+        .into_iter()
+        .map(|item| (item.id, item.kind, item.path, item.documents))
+        .collect()
+}
+
 #[test]
 fn a_restored_backup_keeps_deleted_documents_in_the_trash_ready_to_put_back() {
     let (directory, s) = store();
     let kept = written(&s, "kept.md", "Kept text\n");
     let deleted = written(&s, "Notes/deleted.md", "Deleted text\n");
+    let inside = written(&s, "Old/inside.md", "Inside text\n");
     share(&s, &deleted.id);
     let trash = s.trash_document(&deleted.id).unwrap();
+    let folder = s.trash_folder("Old").unwrap();
+    let items = trash_items(&s);
     let backup = directory.path().join("backup");
+    // Nothing moves between the backup steps.
     back_up(&s, &backup, |_| {});
     let (s, report) = restored(s, &backup);
     assert_eq!(report["completed"], true);
     assert_eq!(placement(&report, &kept)["restoredPath"], "kept.md");
-    // The pass places active documents only; the trashed one is no file
-    // to match and none to retire.
-    assert!(
-        report["documents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|placed| placed["id"] != deleted.id.as_str())
-    );
+    // The copy holds each trashed file where the database names it, so
+    // both items stay as they were.
+    for document in [&deleted, &inside] {
+        assert_eq!(placement(&report, document)["evidence"], "trashed");
+        assert!(placement(&report, document)["restoredPath"].is_null());
+    }
+    assert_eq!(trash_items(&s), items);
     assert_eq!(report["unclaimedFiles"], json!([]));
     let (root, data) = (s.root.clone(), s.data.clone());
     drop(s);
@@ -844,6 +871,329 @@ fn a_restored_backup_keeps_deleted_documents_in_the_trash_ready_to_put_back() {
         Some("Deleted text\n")
     );
     assert_eq!(s.index_document("Notes/deleted.md").unwrap().id, deleted.id);
+    assert_eq!(s.restore_trash(&folder).unwrap().0, "Old");
+    assert_eq!(s.index_document("Old/inside.md").unwrap().id, inside.id);
+}
+
+#[test]
+fn a_document_deleted_between_the_backup_steps_goes_back_to_the_trash() {
+    let (directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let deleted = written(
+        &s,
+        "Notes/deleted.md",
+        "Deleted after the database backup\n",
+    );
+    share(&s, &deleted.id);
+    let backup = directory.path().join("backup");
+    let mut item = String::new();
+    back_up(&s, &backup, |_| {
+        item = s.trash_document(&deleted.id).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &kept)["evidence"], "content");
+    // The database had it active; the copy holds its text only in the
+    // trash, so it is in the trash again, under the item that holds it.
+    let placed = placement(&report, &deleted);
+    assert_eq!(placed["evidence"], "trashed");
+    assert_eq!(placed["recordedPath"], "Notes/deleted.md");
+    assert!(placed["restoredPath"].is_null());
+    assert_eq!(
+        trash_items(&s),
+        [(item.clone(), "document", "Notes/deleted.md".into(), 1)]
+    );
+    assert_eq!(report["unclaimedFiles"], json!([]));
+    assert!(shared_text(&s, "old-link").is_none());
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    // Recently deleted puts it back with its link.
+    assert_eq!(s.restore_trash(&item).unwrap().0, "Notes/deleted.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Deleted after the database backup\n")
+    );
+    assert_eq!(s.index_document("Notes/deleted.md").unwrap().id, deleted.id);
+}
+
+#[test]
+fn a_document_restored_between_the_backup_steps_comes_back_from_the_trash() {
+    let (directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let page = written(&s, "page.md", "Restored after the database backup\n");
+    share(&s, &page.id);
+    let item = s.trash_document(&page.id).unwrap();
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |_| {
+        s.restore_trash(&item).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &kept)["evidence"], "content");
+    // The database had it in the trash; the copy holds its text back at its
+    // path, so it is back there and its emptied item is gone.
+    let placed = placement(&report, &page);
+    assert_eq!(placed["evidence"], "content");
+    assert_eq!(
+        placed["recordedPath"],
+        format!(".locdoc-trash/{item}/page.md")
+    );
+    assert_eq!(placed["restoredPath"], "page.md");
+    assert!(trash_items(&s).is_empty());
+    assert_eq!(report["unclaimedFiles"], json!([]));
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Restored after the database backup\n")
+    );
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.index_document("page.md").unwrap().id, page.id);
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Restored after the database backup\n")
+    );
+}
+
+/// Share a document by a link with this token.
+fn link(s: &Store, document: &Document, token: &str) {
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='view',token=? WHERE id=?",
+            params![token, document.id],
+        )
+        .unwrap();
+}
+
+#[test]
+fn documents_trading_a_path_through_the_trash_between_the_backup_steps_keep_their_links() {
+    let (directory, s) = store();
+    let returned = written(&s, "p.md", "Text of the returning page\n");
+    link(&s, &returned, "returned-link");
+    let item = s.trash_document(&returned.id).unwrap();
+    let deleted = written(&s, "p.md", "Text of the deleted page\n");
+    link(&s, &deleted, "deleted-link");
+    let moving = written(&s, "q.md", "Text of the moving page\n");
+    link(&s, &moving, "moving-link");
+    let other = s.trash_document(&moving.id).unwrap();
+    let away = written(&s, "q.md", "Text of the page moving away\n");
+    link(&s, &away, "away-link");
+    let backup = directory.path().join("backup");
+    let mut trash = String::new();
+    // One page goes to the trash for the other to come back at its path,
+    // and one moves away for another to come back at its path.
+    back_up(&s, &backup, |_| {
+        trash = s.trash_document(&deleted.id).unwrap();
+        s.restore_trash(&item).unwrap();
+        s.rename_document(&away.id, "r.md").unwrap();
+        s.restore_trash(&other).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    for (document, path, token, text) in [
+        (
+            &returned,
+            "p.md",
+            "returned-link",
+            "Text of the returning page\n",
+        ),
+        (&moving, "q.md", "moving-link", "Text of the moving page\n"),
+        (&away, "r.md", "away-link", "Text of the page moving away\n"),
+    ] {
+        assert_eq!(placement(&report, document)["evidence"], "content");
+        assert_eq!(placement(&report, document)["restoredPath"], path);
+        assert_eq!(shared_text(&s, token).as_deref(), Some(text));
+    }
+    assert_eq!(placement(&report, &deleted)["evidence"], "trashed");
+    assert!(shared_text(&s, "deleted-link").is_none());
+    assert_eq!(trash_items(&s), [(trash, "document", "p.md".into(), 1)]);
+    assert_eq!(report["unclaimedFiles"], json!([]));
+}
+
+#[test]
+fn folders_deleted_or_restored_between_the_backup_steps_keep_their_documents_together() {
+    let (directory, s) = store();
+    let a = written(&s, "Drafts/a.md", "Text of A\n");
+    let b = written(&s, "Drafts/Sub/b.md", "Text of B\n");
+    let c = written(&s, "Archive/c.md", "Text of C\n");
+    let d = written(&s, "Archive/Old/d.md", "Text of D\n");
+    share(&s, &a.id);
+    let archive = s.trash_folder("Archive").unwrap();
+    let backup = directory.path().join("backup");
+    let mut drafts = String::new();
+    back_up(&s, &backup, |_| {
+        drafts = s.trash_folder("Drafts").unwrap();
+        s.restore_trash(&archive).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    // Drafts went to the trash after the database backup: both of its
+    // documents are back under its item, which keeps the folder's path.
+    for document in [&a, &b] {
+        assert_eq!(placement(&report, document)["evidence"], "trashed");
+    }
+    assert_eq!(
+        trash_items(&s),
+        [(drafts.clone(), "folder", "Drafts".into(), 2)]
+    );
+    // Archive came back after it: its documents are where the copy holds
+    // them and its item is gone.
+    for (document, path) in [(&c, "Archive/c.md"), (&d, "Archive/Old/d.md")] {
+        assert_eq!(placement(&report, document)["evidence"], "content");
+        assert_eq!(placement(&report, document)["restoredPath"], path);
+    }
+    assert_eq!(report["unclaimedFiles"], json!([]));
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.restore_trash(&drafts).unwrap().0, "Drafts");
+    assert_eq!(s.index_document("Drafts/a.md").unwrap().id, a.id);
+    assert_eq!(s.index_document("Drafts/Sub/b.md").unwrap().id, b.id);
+    assert_eq!(shared_text(&s, "old-link").as_deref(), Some("Text of A\n"));
+}
+
+/// Journal a folder move, delete or restore as it starts, with the identity
+/// of its file or folder.
+fn journal(s: &Store, id: &str, action: &str, document: Option<&str>, paths: (&str, &str)) {
+    let metadata = fs::symlink_metadata(s.root.join(paths.0)).unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO entry_moves(id,action,kind,document,source,destination,device,inode)
+             VALUES(?,?,?,?,?,?,?,?)",
+            params![
+                id,
+                action,
+                if metadata.is_dir() {
+                    "folder"
+                } else {
+                    "document"
+                },
+                document,
+                paths.0,
+                paths.1,
+                metadata.dev().to_string(),
+                metadata.ino().to_string()
+            ],
+        )
+        .unwrap();
+}
+
+fn journaled(s: &Store) -> i64 {
+    s.db.lock()
+        .unwrap()
+        .query_row("SELECT count(*) FROM entry_moves", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn moves_the_database_backup_caught_half_done_settle_without_moving_a_file() {
+    let (directory, s) = store();
+    // Documents never opened in Locdoc have no text to follow.
+    for path in ["deleted.md", "returned.md", "From/moved.md"] {
+        fs::create_dir_all(s.root.join(path).parent().unwrap()).unwrap();
+        fs::write(s.root.join(path), format!("Text at {path}\n")).unwrap();
+    }
+    let [deleted, returned, moved] =
+        ["deleted.md", "returned.md", "From/moved.md"].map(|path| s.index_document(path).unwrap());
+    let returning = s.trash_document(&returned.id).unwrap();
+    let deleting = uuid::Uuid::new_v4().to_string();
+    let trashed = format!("{}/{deleting}/deleted.md", crate::namespace::TRASH);
+    let location = format!("{}/{returning}/returned.md", crate::namespace::TRASH);
+    journal(
+        &s,
+        &deleting,
+        "trash",
+        Some(&deleted.id),
+        ("deleted.md", &trashed),
+    );
+    journal(
+        &s,
+        &returning,
+        "restore",
+        Some(&returned.id),
+        (&location, "returned.md"),
+    );
+    journal(
+        &s,
+        &uuid::Uuid::new_v4().to_string(),
+        "rename",
+        None,
+        ("From", "To"),
+    );
+    let backup = directory.path().join("backup");
+    // The database backup holds the three intents; each rename then happens
+    // before the documents folder is copied.
+    back_up(&s, &backup, |root| {
+        fs::create_dir_all(root.join(&trashed).parent().unwrap()).unwrap();
+        disk::rename_new(&root.join("deleted.md"), &root.join(&trashed)).unwrap();
+        disk::rename_new(&root.join(&location), &root.join("returned.md")).unwrap();
+        disk::rename_new(&root.join("From"), &root.join("To")).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(journaled(&s), 0);
+    // Each settles where the copy holds its entry; no file moved back.
+    assert_eq!(placement(&report, &deleted)["evidence"], "trashed");
+    assert!(s.root.join(&trashed).is_file() && !s.root.join("deleted.md").exists());
+    assert_eq!(placement(&report, &returned)["restoredPath"], "returned.md");
+    assert_eq!(placement(&report, &moved)["restoredPath"], "To/moved.md");
+    assert_eq!(
+        trash_items(&s),
+        [(deleting.clone(), "document", "deleted.md".into(), 1)]
+    );
+    assert_eq!(report["unclaimedFiles"], json!([]));
+    drop(s);
+    let s = Store::open(
+        directory.path().join("docs"),
+        directory.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    assert_eq!(s.restore_trash(&deleting).unwrap().0, "deleted.md");
+    assert_eq!(s.index_document("deleted.md").unwrap().id, deleted.id);
+}
+
+#[test]
+fn a_move_the_restored_database_journaled_never_runs_again() {
+    // A pass over a folder whose files kept their identities, as when the
+    // owner restores only the state files and runs the pass.
+    let (_directory, s) = store();
+    let page = written(&s, "page.md", "Text of the page\n");
+    share(&s, &page.id);
+    s.create_folder("Kept").unwrap();
+    // A delete and a folder move journaled before their renames, which
+    // never happened.
+    let item = uuid::Uuid::new_v4().to_string();
+    let trashed = format!("{}/{item}/page.md", crate::namespace::TRASH);
+    fs::create_dir_all(s.root.join(&trashed).parent().unwrap()).unwrap();
+    journal(&s, &item, "trash", Some(&page.id), ("page.md", &trashed));
+    journal(
+        &s,
+        &uuid::Uuid::new_v4().to_string(),
+        "rename",
+        None,
+        ("Kept", "Moved"),
+    );
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open_restored(root, data, "http://localhost".into()).unwrap();
+    let report = restore(&s).unwrap();
+    assert_eq!(report["completed"], true);
+    assert_eq!(journaled(&s), 0);
+    assert_eq!(placement(&report, &page)["restoredPath"], "page.md");
+    assert!(s.root.join("page.md").is_file() && s.root.join("Kept").is_dir());
+    assert!(!s.root.join(&trashed).exists() && !s.root.join("Moved").exists());
+    assert!(trash_items(&s).is_empty());
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Text of the page\n")
+    );
 }
 
 #[test]
