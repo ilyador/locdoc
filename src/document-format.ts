@@ -8,7 +8,7 @@ export function documentName(path: string) {
   return path
     .split("/")
     .pop()!
-    .replace(/\.(md|fountain)$/i, "");
+    .replace(/\.(md|fountain|txt)$/i, "");
 }
 
 export function documentPath(path: string, format: DocumentFormat) {
@@ -18,5 +18,5 @@ export function documentPath(path: string, format: DocumentFormat) {
 }
 
 export function documentExtension(path: string) {
-  return /\.(md|fountain)$/i.exec(path)?.[0].toLowerCase() || "";
+  return /\.(md|fountain|txt)$/i.exec(path)?.[0].toLowerCase() || "";
 }

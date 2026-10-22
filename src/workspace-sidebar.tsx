@@ -21,6 +21,7 @@ export function WorkspaceSidebar({
   filename,
   searchInput,
   choose,
+  prepare,
   onCreate,
   onShareFolder,
   onSettings,
@@ -30,6 +31,7 @@ export function WorkspaceSidebar({
   filename: string;
   searchInput: RefObject<HTMLInputElement | null>;
   choose: (entry: Entry) => void;
+  prepare: () => Promise<void>;
   onCreate: (kind: "file" | "folder") => void;
   onShareFolder: (path: string) => void;
   onSettings: () => void;
@@ -87,6 +89,16 @@ export function WorkspaceSidebar({
               placeholder="Find a document…"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(event) => {
+                // Down moves from search into the first visible row.
+                if (event.key !== "ArrowDown") return;
+                const row = event.currentTarget
+                  .closest(".sidebar")
+                  ?.querySelector<HTMLElement>('.file-tree [role="treeitem"][tabindex]');
+                if (!row) return;
+                event.preventDefault();
+                row.focus();
+              }}
               aria-label="Find a document"
             />
             <kbd>Ctrl K</kbd>
@@ -100,6 +112,10 @@ export function WorkspaceSidebar({
             expanded={expanded}
             toggleFolder={toggleFolder}
             choose={choose}
+            prepare={prepare}
+            fileActions={
+              config.owner && !sharedToken ? workspace.files : undefined
+            }
             label={config.folder?.name}
             actions={
               config.owner &&

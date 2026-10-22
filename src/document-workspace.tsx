@@ -19,24 +19,29 @@ import { useDocument } from "./use-document";
 import { AppearancePanel, documentFontFamily } from "./appearance";
 import { VersionHistory } from "./version-history";
 import { IconButton } from "./ui";
-import { documentFormat, documentName, documentPath } from "./document-format";
+import { documentFormat, documentName } from "./document-format";
 import { NamePrompt } from "./name-prompt";
 import { CommentConversation, useConversation } from "./document-conversation";
 import { DocumentFooter } from "./document-footer";
 import { DocumentFormatbar } from "./document-formatbar";
 import { DocumentTopbar } from "./document-topbar";
 import { uploadAttachment } from "./document-upload";
-import { Toast, useAction, useToast } from "./workspace-feedback";
 import {
-  CreateEntryForm,
+  FileActionToast,
+  Toast,
+  useAction,
+  useToast,
+} from "./workspace-feedback";
+import {
   DocumentOptions,
   DocumentSharePanel,
   OwnerLoginForm,
   WorkspaceSettings,
   downloadDocument,
   panelTitle,
-  useCreateForm,
 } from "./workspace-panels";
+import { baseName, entryFormat, within } from "./file-names";
+import { TrashedDocument, TrashedNotice } from "./trash";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import {
   EmptyWorkspace,
@@ -58,6 +63,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setSidebar,
     sidebarWidth,
     loadTree,
+    files,
   } = workspace;
   const {
     doc,
@@ -70,11 +76,66 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     clearRecovery,
     storageWarning,
     setError,
+    trashed,
+    reload,
+    checkTrashed,
   } = useDocument(
     id,
     !!config && (config.owner || !!sharedToken),
     workspace.initialDocument,
   );
+  // The tree follows renames made here, in other tabs and on the desktop, so
+  // the open document takes its current path from there.
+  const entry = id
+    ? entries.find((item) => item.kind === "file" && item.id === id)
+    : undefined;
+  // Visitors see names only; folder links list paths below the shared folder.
+  const listed = entry
+    ? (doc ? doc.owner : config?.owner)
+      ? entry.path
+      : baseName(entry.path)
+    : null;
+  const path = listed ?? doc?.path ?? trashed?.path ?? null;
+  useEffect(() => {
+    if (path) document.title = `${documentName(path)} · locdoc`;
+  }, [path]);
+  const reopenedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!doc?.owner || !entry || entry.path === doc.path) return;
+    if (entryFormat(entry.path) === entryFormat(doc.path)) {
+      setDoc((value) =>
+        value && value.id === entry.id ? { ...value, path: entry.path } : value,
+      );
+      return;
+    }
+    // A different format needs a different editor, so the document reopens,
+    // once for each new name.
+    if (reopenedFor.current === entry.path) return;
+    reopenedFor.current = entry.path;
+    void (session?.drafts.flush() ?? Promise.resolve()).then(reload, () =>
+      setError(
+        "Could not store unsaved changes. Keep this document open until connected.",
+      ),
+    );
+  }, [entry?.path, doc?.path]);
+  // Restoring brings the document back into the tree; open it again then.
+  const trashedTree = useRef<typeof entries | null>(null);
+  useEffect(() => {
+    if (!trashed) {
+      trashedTree.current = null;
+      return;
+    }
+    if (!trashedTree.current) trashedTree.current = entries;
+    else if (entries !== trashedTree.current && entry) reload();
+  }, [trashed, entries, entry]);
+  // Deleting the open document, or a folder holding it, from this sidebar.
+  const trashEvent = files.trashed;
+  const handledTrash = useRef(trashEvent?.seq ?? 0);
+  useEffect(() => {
+    if (!trashEvent || trashEvent.seq === handledTrash.current) return;
+    handledTrash.current = trashEvent.seq;
+    if (doc && within(doc.path, trashEvent.item.path)) checkTrashed();
+  }, [trashEvent?.seq]);
   const appearance = workspace.appearance.forFormat(documentFormat(doc?.path));
   const {
     font,
@@ -90,7 +151,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const { toast, tell, dismiss } = useToast();
   const { busy, action } = useAction(tell);
   const error = documentError || workspace.error;
-  const create = useCreateForm();
   const [apiKey, setApiKey] = useState("");
   const editor = useRef<EditorHandle>(null);
   const [linkSelection, setLinkSelection] = useState<Selection | null>(null);
@@ -181,23 +241,17 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         tell,
       }),
     );
-  const openCreate = (kind: "file" | "folder") => {
-    create.reset(kind);
-    setPanel("create");
-  };
-  const createFile = () =>
-    action(async () => {
-      let path = create.path.trim();
-      if (create.kind === "file") path = documentPath(path, create.format);
-      const result = await api<{ id?: string }>(
-        "/api/files",
-        send("POST", { path, kind: create.kind }),
-      );
-      setPanel(null);
-      create.setPath("");
-      await loadTree();
-      if (result.id) await openDocument(result.id);
-    });
+  const openCreate = (kind: "file" | "folder") => files.startCreate(kind);
+  const prepareNavigation = () =>
+    session?.drafts.flush() || Promise.resolve();
+  // A document created from the sidebar opens ready for writing.
+  useEffect(() => {
+    if (!session || !doc || !files.takeEditorFocus(doc.id)) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !active.closest(".sidebar"))
+      return;
+    requestAnimationFrame(() => editor.current?.focus());
+  }, [session]);
   const shareFolder = (path: string) => {
     setShareFolderPath(path);
     setPanel("folder-share");
@@ -218,7 +272,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     });
   const toggleAppearance = () =>
     setPanel((current) => (current === "appearance" ? null : "appearance"));
-  const filename = doc ? documentName(doc.path) : "Your workspace";
+  const filename = path ? documentName(path) : "Your workspace";
   const fountain = documentFormat(doc?.path) === "fountain";
   const formattingTools = (expanded = false) =>
     doc && (
@@ -272,6 +326,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           filename={filename}
           searchInput={searchInput}
           choose={choose}
+          prepare={prepareNavigation}
           onCreate={openCreate}
           onShareFolder={shareFolder}
           onSettings={() => setPanel("settings")}
@@ -279,6 +334,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         <main className="workspace">
           <DocumentTopbar
             doc={doc}
+            path={path}
             filename={filename}
             people={people}
             sidebar={sidebar}
@@ -292,6 +348,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               {storageWarning}
             </div>
           )}
+          {trashed && doc && <TrashedNotice files={files} item={trashed} />}
           <DraftRecoveryNotice
             records={recovery}
             dismiss={clearRecovery}
@@ -333,10 +390,12 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                 }}
               />
             )}
-            {!config ||
-            (!doc &&
-              !error &&
-              Boolean((sharedToken && !config.folder) || id)) ? (
+            {trashed && !doc ? (
+              <TrashedDocument files={files} item={trashed} />
+            ) : !config ||
+              (!doc &&
+                !error &&
+                Boolean((sharedToken && !config.folder) || id)) ? (
               <OpeningDocument />
             ) : !config.owner && !sharedToken ? (
               <OwnerWelcome onOpen={() => setPanel("login")} />
@@ -433,7 +492,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           >
             <div className="dialog-content">
               <div className="dialog-heading">
-                <h2 id="panel-title">{panelTitle(panel, create.kind)}</h2>
+                <h2 id="panel-title">{panelTitle(panel)}</h2>
                 <IconButton label="Close dialog" onClick={() => setPanel(null)}>
                   <X size={18} />
                 </IconButton>
@@ -470,14 +529,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   onChanged={loadTree}
                 />
               )}
-              {panel === "create" && (
-                <CreateEntryForm
-                  form={create}
-                  busy={busy}
-                  onSubmit={createFile}
-                  onCancel={() => setPanel(null)}
-                />
-              )}
               {panel === "login" && (
                 <OwnerLoginForm
                   apiKey={apiKey}
@@ -495,6 +546,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   endpoint={endpoint}
                   name={name}
                   setName={setName}
+                  files={files}
                   toggleAppearance={toggleAppearance}
                   lock={() =>
                     action(async () => {
@@ -528,7 +580,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                   onHistory={() => setPanel("history")}
                   onRename={(path) => {
                     setDoc((doc) => (doc ? { ...doc, path } : doc));
-                    void loadTree();
+                    files.renamed(doc.id, path);
                     setPanel(null);
                   }}
                 />
@@ -557,7 +609,13 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             }}
           />
         )}
-        <Toast message={toast} onDismiss={dismiss} />
+        <div className="toast-region">
+          <Toast message={toast} onDismiss={dismiss} />
+          <FileActionToast files={files} />
+        </div>
+        <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+          <span key={files.announcement.seq}>{files.announcement.text}</span>
+        </div>
       </div>
     </IconContext.Provider>
   );

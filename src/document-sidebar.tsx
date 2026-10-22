@@ -1,25 +1,16 @@
 import { useId, useState, type ReactNode } from "react";
-import {
-  CaretDown,
-  CaretRight,
-  FileText,
-  Folder,
-  FolderOpen,
-  LinkSimple,
-  ShareNetwork,
-} from "@phosphor-icons/react";
-import { IconButton } from "./ui";
 import type { Entry } from "./model";
 import type { SidebarView } from "./workspace";
 import { documentTitle } from "./document-links";
-import { documentExtension } from "./document-format";
-import { recentDocuments, sidebarTimestamp } from "./recent-documents";
+import type { FileActions } from "./file-actions";
+import { FileTree, type TreeRow } from "./file-tree";
+import { parentPath } from "./file-names";
+import { recentDocuments } from "./recent-documents";
 
 const views = [
   { value: "date", label: "By date" },
   { value: "folders", label: "Folders" },
 ] as const;
-const parentPath = (path: string) => path.split("/").slice(0, -1).join("/");
 
 export function DocumentSidebar({
   entries,
@@ -33,6 +24,8 @@ export function DocumentSidebar({
   shareFolder,
   actions,
   label,
+  fileActions,
+  prepare,
 }: {
   entries: Entry[];
   id: string | null;
@@ -45,6 +38,10 @@ export function DocumentSidebar({
   shareFolder?: (path: string) => void;
   actions?: ReactNode;
   label?: string;
+  // File actions, for the owner's own workspace.
+  fileActions?: FileActions;
+  // Stores the open document's drafts before a new document opens.
+  prepare?: () => Promise<void>;
 }) {
   const tabId = useId();
   // Search reveals matches inside closed folders without changing the normal tree.
@@ -64,7 +61,7 @@ export function DocumentSidebar({
     `${documentTitle(entry)} ${entry.path}`
       .toLocaleLowerCase()
       .includes(needle);
-  const files = entries.filter((e) => e.kind === "file" && matches(e));
+  const documents = entries.filter((e) => e.kind === "file" && matches(e));
   const visible = new Set<string>();
   for (const entry of entries) {
     if (!matches(entry)) continue;
@@ -92,89 +89,43 @@ export function DocumentSidebar({
         }) ||
         a.path.localeCompare(b.path),
     );
-
-  const item = (e: Entry, depth?: number) => {
-    const nested = depth !== undefined;
-    const stamp = e.kind === "file" ? sidebarTimestamp(e.modified) : null;
-    const row = (
-      <button
-        className={`tree-item ${e.id === id && e.kind === "file" ? "active" : ""} ${e.kind}`}
-        aria-expanded={e.kind === "folder" ? isOpen(e.path) : undefined}
-        aria-current={e.id === id && e.kind === "file" ? "page" : undefined}
-        title={e.path}
-        style={
-          nested
-            ? { paddingLeft: 12 + depth * 16 + (e.kind === "file" ? 18 : 0) }
-            : undefined
-        }
-        onClick={() => (e.kind === "folder" ? toggle(e.path) : choose(e))}
-      >
-        {e.kind === "folder" ? (
-          <>
-            {!isOpen(e.path) ? (
-              <CaretRight size={12} />
-            ) : (
-              <CaretDown size={12} />
-            )}
-            {!isOpen(e.path) ? <Folder size={17} /> : <FolderOpen size={17} />}
-          </>
-        ) : (
-          <FileText size={16} />
-        )}
-        <span className="doc-name">
-          <span className="doc-label">
-            <span className="doc-title">{documentTitle(e)}</span>{" "}
-            {e.kind === "file" && (
-              <span className="doc-extension">{documentExtension(e.path)}</span>
-            )}
-          </span>
-          {!nested && parentPath(e.path) && (
-            <small>{parentPath(e.path).replaceAll("/", " / ")}</small>
-          )}
-        </span>
-        {e.kind === "file" && (
-          <span className="doc-meta">
-            {e.shared && <LinkSimple size={12} className="shared-indicator" />}
-            {stamp && (
-              <time
-                className="doc-time"
-                dateTime={stamp.dateTime}
-                title={stamp.title}
-              >
-                {stamp.label}
-              </time>
-            )}
-          </span>
-        )}
-      </button>
+  // A new entry's name field opens first inside its folder, or at the top of
+  // By date, where new documents appear once they exist.
+  const edit = fileActions?.edit;
+  const creating =
+    edit?.mode === "create" && edit.view === view ? edit.parent : null;
+  const rows: TreeRow[] = [];
+  if (view === "date") {
+    if (creating !== null) rows.push({ type: "create", depth: 0, parent: "" });
+    const recent = recentDocuments(documents);
+    recent.forEach((entry, index) =>
+      rows.push({
+        type: "entry",
+        entry,
+        depth: 0,
+        setsize: recent.length,
+        posinset: index + 1,
+      }),
     );
-    return e.kind === "folder" && shareFolder ? (
-      <div className="folder-row">
-        {row}
-        <IconButton
-          label={`Share folder ${e.path}`}
-          onClick={() => shareFolder(e.path)}
-        >
-          <ShareNetwork size={16} />
-        </IconButton>
-      </div>
-    ) : (
-      row
-    );
-  };
-  const branch = (parent = "", depth = 0): ReactNode => (
-    <ul>
-      {(children.get(parent) || []).map((entry) => (
-        <li key={entry.path}>
-          {item(entry, depth)}
-          {entry.kind === "folder" &&
-            isOpen(entry.path) &&
-            branch(entry.path, depth + 1)}
-        </li>
-      ))}
-    </ul>
-  );
-  const empty = view === "date" ? !files.length : !children.size;
+  } else {
+    const walk = (parent: string, depth: number) => {
+      if (creating === parent) rows.push({ type: "create", depth, parent });
+      const list = children.get(parent) || [];
+      list.forEach((entry, index) => {
+        rows.push({
+          type: "entry",
+          entry,
+          depth,
+          setsize: list.length,
+          posinset: index + 1,
+        });
+        if (entry.kind === "folder" && isOpen(entry.path))
+          walk(entry.path, depth + 1);
+      });
+    };
+    walk("", 0);
+  }
+  const empty = view === "date" ? !documents.length : !children.size;
   return (
     <>
       <div className="sidebar-views">
@@ -229,28 +180,34 @@ export function DocumentSidebar({
         role="tabpanel"
         id={`${tabId}-panel`}
         aria-labelledby={`${tabId}-${view}`}
-        tabIndex={0}
+        tabIndex={rows.length ? undefined : 0}
       >
         <nav
           aria-label={view === "date" ? "Recent documents" : "Document folders"}
         >
-          {view === "date" ? (
-            <ul>
-              {recentDocuments(files).map((entry) => (
-                <li key={entry.path}>{item(entry)}</li>
-              ))}
-            </ul>
-          ) : (
-            branch()
-          )}
+          <FileTree
+            view={view}
+            rows={rows}
+            entries={entries}
+            id={id}
+            label={view === "date" ? "Documents by date" : "Folders"}
+            files={fileActions}
+            isOpen={isOpen}
+            toggle={toggle}
+            choose={choose}
+            shareFolder={shareFolder}
+            prepare={prepare}
+            empty={
+              empty && (
+                <div className="tree-empty">
+                  {needle
+                    ? "No matching documents."
+                    : "Create a document, or add a .md, .fountain or .txt file to your docs folder."}
+                </div>
+              )
+            }
+          />
         </nav>
-        {empty && (
-          <div className="tree-empty">
-            {needle
-              ? "No matching documents."
-              : "Create a document, or add a .md or .fountain file to your docs folder."}
-          </div>
-        )}
       </div>
     </>
   );

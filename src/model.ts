@@ -8,6 +8,15 @@ export type Entry = {
   modified?: number;
   title?: string;
   url?: string;
+  format?: "markdown" | "fountain" | "text";
+};
+// A document or folder in Locdoc's trash. `deleted` is in seconds.
+export type TrashItem = {
+  id: string;
+  kind: "document" | "folder";
+  path: string;
+  deleted: number;
+  documents: number;
 };
 export type Document = {
   id: string;
