@@ -157,17 +157,33 @@ test("hidden images list their reason and are shown to link visitors on request"
   const show = screen.getByRole("button", {
     name: "Show a.png to link visitors",
   }) as HTMLButtonElement;
+  show.focus();
   fireEvent.click(show);
-  await waitFor(() => assert.equal(show.disabled, true));
+  await waitFor(() => assert.equal(show.getAttribute("aria-disabled"), "true"));
   assert.equal(show.textContent, "Showing…");
+  assert.ok(
+    document.activeElement === show,
+    "a request in flight keeps keyboard focus on its button",
+  );
+  fireEvent.click(show);
   const post = requests.find((request) => request.method === "POST")!;
   assert.equal(post.url, "/api/docs/doc-a/media/share");
   assert.deepEqual(post.body, { paths: ["pics/a.png"] });
+  assert.equal(
+    requests.filter((request) => request.method === "POST").length,
+    1,
+    "a busy button sends nothing more",
+  );
   await act(async () => release());
   await waitFor(() => assert.equal(screen.queryByText("pics/a.png"), null));
   assert.equal(
     screen.getByRole("status").textContent,
     "Link visitors can now see this image.",
+  );
+  assert.ok(
+    document.activeElement ===
+      screen.getByRole("button", { name: "Show b.png to link visitors" }),
+    "focus moves to the next image instead of leaving the dialog",
   );
 
   share = (request) =>
@@ -202,7 +218,11 @@ test("hidden images list their reason and are shown to link visitors on request"
       "Media approval is unavailable.",
     ),
   );
-  assert.equal(retry.disabled, false, "a failed request can be retried");
+  assert.equal(
+    retry.getAttribute("aria-disabled"),
+    null,
+    "a failed request can be retried",
+  );
   assert.ok(screen.getByText("pics/b.png"));
 });
 

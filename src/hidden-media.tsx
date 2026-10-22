@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Eye, ImageBroken, VideoCamera } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import { isVideo, mediaUrl } from "./markdown-widgets";
@@ -63,6 +63,26 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState("");
   const [status, setStatus] = useState("");
+  const section = useRef<HTMLElement>(null);
+  const statusLine = useRef<HTMLParagraphElement>(null);
+  // An image shown to visitors leaves the list with the button that showed
+  // it. Keyboard focus then moves to the next one instead of the page.
+  const refocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const index = refocus.current;
+    if (index === null) return;
+    refocus.current = null;
+    const active = document.activeElement;
+    if (active && active !== document.body) return;
+    const actions = Array.from(
+      section.current?.querySelectorAll<HTMLButtonElement>(
+        ".hidden-media-action",
+      ) || [],
+    );
+    (
+      actions[Math.min(index, actions.length - 1)] || statusLine.current
+    )?.focus();
+  });
   // Requests belong to this mounted document; a late answer is dropped.
   const requests = useRef<AbortController | null>(null);
   useEffect(() => {
@@ -79,6 +99,10 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
   const show = async (paths: string[]) => {
     const signal = requests.current?.signal;
     if (!signal || signal.aborted) return;
+    const actions = Array.from(
+      section.current?.querySelectorAll(".hidden-media-action") || [],
+    );
+    const from = Math.max(0, actions.indexOf(document.activeElement!));
     setPending((current) => new Set([...current, ...paths]));
     setError("");
     setStatus("");
@@ -90,6 +114,7 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
       if (signal.aborted) return;
       const accepted = result.shared || [];
       const declined = result.refused || [];
+      if (accepted.length) refocus.current = from;
       setShared((current) => new Set([...current, ...accepted]));
       setRefused((current) => {
         const next = new Map(current);
@@ -131,6 +156,7 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
   if (!items.length && !status && !error) return null;
   return (
     <section
+      ref={section}
       className="hidden-media"
       aria-labelledby={items.length ? headingId : undefined}
     >
@@ -174,12 +200,16 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
                 </span>
               </span>
               {item.reason === "unapproved" && (
+                // Never disabled while it works: a disabled button would
+                // drop keyboard focus out of the dialog.
                 <button
                   type="button"
                   className="button quiet hidden-media-action"
                   aria-label={`Show ${name} to link visitors`}
-                  disabled={busy}
-                  onClick={() => void show([item.path])}
+                  aria-disabled={busy || undefined}
+                  onClick={() => {
+                    if (!busy) void show([item.path]);
+                  }}
                 >
                   <Eye size={16} aria-hidden="true" />
                   <span>{busy ? "Showing…" : "Show to link visitors"}</span>
@@ -194,7 +224,12 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
           {error}
         </p>
       )}
-      <p className="field-help hidden-media-status" role="status">
+      <p
+        ref={statusLine}
+        className="field-help hidden-media-status"
+        role="status"
+        tabIndex={-1}
+      >
         {status}
       </p>
     </section>
