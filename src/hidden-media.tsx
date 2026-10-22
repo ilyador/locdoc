@@ -1,32 +1,30 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { Eye, ImageBroken, VideoCamera } from "@phosphor-icons/react";
 import { api, send } from "./api";
-import { isVideo, mediaUrl } from "./markdown-widgets";
+import { isVideo, mediaReasons, mediaUrl } from "./markdown-widgets";
 import type { Document, HiddenMedia } from "./model";
 import { useRemote } from "./use-remote";
 
 type Refusal = { path: string; reason: string };
 type ShareResult = { ok: boolean; shared: string[]; refused: Refusal[] };
 
-const reasons: Record<string, string> = {
-  unapproved: "Not approved for link visitors",
-  missing: "File not found",
-};
-// The codes POST /api/docs/{id}/media/share refuses with read as sentences;
-// anything else is shown as inert text.
-const refusals: Record<string, string> = {
-  missing: "File not found",
-  // Also a remote link, a hidden folder or Locdoc's own data.
-  outside: "Outside your documents folder",
-  // Another kind of file, or over the size limit.
-  unsupported: "Not an image or video Locdoc can show",
-  // The document no longer names it.
-  unreferenced: "No longer in this document",
-};
+// The server's reasons, for an image it lists and for one POST
+// /api/docs/{id}/media/share refuses, read as sentences; anything else is
+// shown as inert text.
+const reason = (code: string) =>
+  Object.hasOwn(mediaReasons, code) ? mediaReasons[code] : code;
+// Locdoc serves these to nobody, so there is no picture to load.
+const unavailable = new Set([
+  "missing",
+  "outside",
+  "too-large",
+  "unsupported",
+  "invalid",
+]);
 
 function Preview({ doc, item }: { doc: Document; item: HiddenMedia }) {
   const [failed, setFailed] = useState(false);
-  if (item.reason === "missing" || failed)
+  if (unavailable.has(item.reason) || failed)
     return (
       <span className="hidden-media-thumb is-missing" aria-hidden="true">
         <ImageBroken size={18} />
@@ -195,8 +193,8 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
                   className={`hidden-media-reason ${refusal ? "is-refused" : ""}`}
                 >
                   {refusal
-                    ? `Not shown: ${refusals[refusal] || refusal}`
-                    : reasons[item.reason] || item.reason}
+                    ? `Not shown: ${reason(refusal)}`
+                    : reason(item.reason)}
                 </span>
               </span>
               {item.reason === "unapproved" && (

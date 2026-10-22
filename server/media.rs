@@ -95,8 +95,15 @@ pub(super) async fn media(
     h: HeaderMap,
 ) -> Result<Response> {
     let authorize = h.clone();
-    let (path, len, mime) =
-        doc_job(s, id.clone(), move |s| media_file(s, &id, &q, &authorize)).await?;
+    let served = doc_job(s, id.clone(), move |s| {
+        Ok(media_file(s, &id, &q, &authorize)
+            .map_err(|error| refused(s, &id, &q, &authorize, error)))
+    })
+    .await?;
+    let (path, len, mime) = match served {
+        Ok(file) => file,
+        Err(refused) => return Ok(refused),
+    };
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut start = 0;
     let mut end = len - 1;
@@ -161,13 +168,26 @@ pub(super) async fn media(
 
     Ok(res)
 }
-pub(super) fn media_file(
-    s: &Store,
-    id: &str,
-    q: &Media,
-    h: &HeaderMap,
-) -> Result<(PathBuf, usize, &'static str)> {
-    let d = s.doc(id)?;
+/// A refused media request. The owner's editor learns why it has nothing to
+/// show; anyone else gets only the error, as before.
+fn refused(s: &Store, id: &str, q: &Media, h: &HeaderMap, error: ApiError) -> Response {
+    let reason = s
+        .doc(id)
+        .ok()
+        .filter(|d| {
+            documents::has_media(&d.path) && requester(s, d, q, h).is_ok_and(|(owner, _)| owner)
+        })
+        .and_then(|d| owner_file(s, &d, &q.path).err());
+    match reason {
+        Some(reason) => {
+            (error.0, Json(json!({"error": error.1, "reason": reason}))).into_response()
+        }
+        None => error.into_response(),
+    }
+}
+/// Whether a media request is the owner's, and whether it comes through the
+/// owner's media capability for this document.
+fn requester(s: &Store, d: &Document, q: &Media, h: &HeaderMap) -> Result<(bool, bool)> {
     let capability = q
         .token
         .as_deref()
@@ -175,13 +195,23 @@ pub(super) fn media_file(
     let owner = capability
         || s.access(
             h,
-            &d,
+            d,
             &Access {
                 token: q.token.clone(),
                 ..Access::default()
             },
         )?
         .0;
+    Ok((owner, capability))
+}
+pub(super) fn media_file(
+    s: &Store,
+    id: &str,
+    q: &Media,
+    h: &HeaderMap,
+) -> Result<(PathBuf, usize, &'static str)> {
+    let d = s.doc(id)?;
+    let (owner, capability) = requester(s, &d, q, h)?;
     // A plain text document names no media, not even for its owner.
     if !documents::has_media(&d.path) {
         return Err(denied());
@@ -287,11 +317,117 @@ pub(super) fn previewed(content: &str) -> HashSet<String> {
     }
     previewed
 }
+/// The file a local media reference of `d` names, or why Locdoc shows it to
+/// nobody, its owner included: `outside` the documents folder, `missing`,
+/// `hidden` in a trash folder, `invalid` when it is spelled as no path Locdoc
+/// opens (an absolute path, backslashes, `://` or broken percent-encoding),
+/// or as `unservable` judges the file.
+fn owner_file(
+    s: &Store,
+    d: &Document,
+    reference: &str,
+) -> std::result::Result<(PathBuf, fs::Metadata), &'static str> {
+    let path = s
+        .media_path(d, reference)
+        .map_err(|_| unresolved(s, d, reference))?;
+    let metadata = fs::metadata(&path).map_err(|_| "missing")?;
+    match unservable(&path, &metadata) {
+        Some(reason) => Err(reason),
+        None => Ok((path, metadata)),
+    }
+}
+/// Why `Store::media_path` names no file for a reference of `d`.
+fn unresolved(s: &Store, d: &Document, reference: &str) -> &'static str {
+    let Ok(decoded) = percent_encoding::percent_decode_str(reference).decode_utf8() else {
+        return "invalid";
+    };
+    if reference.contains("://")
+        || reference.contains('\\')
+        || decoded.contains('\\')
+        || decoded.starts_with('/')
+    {
+        return "invalid";
+    }
+    let path = s
+        .root
+        .join(Path::new(&d.path).parent().unwrap())
+        .join(decoded.as_ref());
+    match fs::canonicalize(&path) {
+        // Inside the documents folder only a trash folder is refused.
+        Ok(file) if file.starts_with(&s.root) => "hidden",
+        Ok(_) => "outside",
+        // Nothing is there; a spelling that climbs out names nothing inside.
+        Err(_) => {
+            let mut spelled = PathBuf::new();
+            for part in path.components() {
+                match part {
+                    std::path::Component::ParentDir => {
+                        spelled.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    part => spelled.push(part),
+                }
+            }
+            if spelled.starts_with(&s.root) {
+                "missing"
+            } else {
+                "outside"
+            }
+        }
+    }
+}
+/// Why Locdoc serves a file as media to nobody, judged by its bytes as
+/// `media_kind` judges them: `unsupported` when it is no image or video
+/// Locdoc shows, `too-large` when it is an image over 5 MB or a video over
+/// 20 MB.
+fn unservable(path: &Path, metadata: &fs::Metadata) -> Option<&'static str> {
+    use std::io::Read;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Some("unsupported");
+    }
+    let mut prefix = [0; 512];
+    let kind = fs::File::open(path)
+        .and_then(|mut file| file.read(&mut prefix))
+        .ok()
+        .and_then(|n| infer::get(&prefix[..n]))
+        .filter(|kind| allowed_mime(kind.mime_type()));
+    let Some(kind) = kind else {
+        return Some("unsupported");
+    };
+    let limit = if kind.mime_type().starts_with("video/") {
+        20 * MB
+    } else {
+        5 * MB
+    };
+    (metadata.len() as usize > limit).then_some("too-large")
+}
+/// Where link visitors never see a file, whatever approved it: one rule for
+/// desktop imports, a first load and the owner's Show to link visitors
+/// alike. That is outside the documents folder, in a state folder kept inside
+/// it (`state`: it holds the owner key, the database and recovery archives),
+/// and under a dot-named file or folder (`hidden`), except Locdoc's own
+/// `.assets` uploads at the top of the documents folder. `path` is canonical.
+pub(super) fn private_location(s: &Store, path: &Path) -> Option<&'static str> {
+    let Ok(relative) = path.strip_prefix(&s.root) else {
+        return Some("outside");
+    };
+    if s.data != s.root && s.data.starts_with(&s.root) && path.starts_with(&s.data) {
+        return Some("state");
+    }
+    relative
+        .components()
+        .enumerate()
+        .any(|(index, part)| {
+            let name = part.as_os_str().to_string_lossy();
+            name.starts_with('.') && !(index == 0 && name == ".assets")
+        })
+        .then_some("hidden")
+}
 /// The media references the owner's editor previews in `content` that link
-/// visitors cannot see: `missing` when no file inside the documents folder
-/// is there, `unapproved` when the file is there but not approved for them.
-/// A file Locdoc cannot serve as an image or video is hidden from the owner
-/// too.
+/// visitors cannot see, and why: first what Locdoc shows nobody, as
+/// `owner_file` names it, then `state` or `hidden` as `private_location`
+/// names it, and `unapproved` for a file that only waits for the owner's
+/// approval.
 pub(super) fn hidden_media(s: &Store, d: &Document, content: &str) -> Vec<Value> {
     if !documents::has_media(&d.path) {
         return Vec::new();
@@ -301,17 +437,15 @@ pub(super) fn hidden_media(s: &Store, d: &Document, content: &str) -> Vec<Value>
     let mut hidden: Vec<(&String, &str)> = previewed
         .iter()
         .filter_map(|reference| {
-            let path = match s.media_path(d, reference) {
-                Ok(path) => path,
-                Err(error) if error.0 == StatusCode::BAD_REQUEST => return None,
-                Err(_) => return Some((reference, "missing")),
+            let reason = match owner_file(s, d, reference) {
+                Err(reason) => reason,
+                Ok((path, _)) => match private_location(s, &path) {
+                    Some(reason) => reason,
+                    None if approvals.approves(&path) && approvals.active(&path) => return None,
+                    None => "unapproved",
+                },
             };
-            if approvals.approves(&path) && approvals.active(&path) {
-                return None;
-            }
-            let metadata = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
-            media_kind(&path, &metadata).ok()?;
-            Some((reference, "unapproved"))
+            Some((reference, reason))
         })
         .collect();
     hidden.sort();
@@ -321,10 +455,9 @@ pub(super) fn hidden_media(s: &Store, d: &Document, content: &str) -> Vec<Value>
         .collect()
 }
 /// What an owner's approval for link visitors would publish, or why it
-/// cannot: the checks of a desktop approval for an existing file. It must be
-/// a regular image or video file Locdoc serves, inside the documents folder,
-/// outside the state folder and every hidden folder except Locdoc's own
-/// `.assets` uploads.
+/// cannot, for exactly the references `hidden_media` calls `unapproved`: an
+/// image or video file Locdoc serves outside every `private_location`.
+/// Remote links, data URLs and fragments are `outside`.
 pub(super) fn publishable(
     s: &Store,
     d: &Document,
@@ -333,25 +466,9 @@ pub(super) fn publishable(
     if !local_reference(reference) {
         return Err("outside");
     }
-    let path = match s.media_path(d, reference) {
-        Ok(path) => path,
-        Err(error) if error.0 == StatusCode::NOT_FOUND => return Err("missing"),
-        Err(_) => return Err("outside"),
-    };
-    let relative = path.strip_prefix(&s.root).map_err(|_| "outside")?;
-    let hidden = relative.components().enumerate().any(|(index, part)| {
-        let name = part.as_os_str().to_string_lossy();
-        name.starts_with('.') && !(index == 0 && name == ".assets")
-    });
-    // A state folder configured inside the documents folder holds the owner
-    // key, the database and recovery archives.
-    let state = s.data != s.root && s.data.starts_with(&s.root) && path.starts_with(&s.data);
-    if hidden || state {
-        return Err("outside");
-    }
-    let metadata = fs::symlink_metadata(&path).map_err(|_| "missing")?;
-    if !metadata.is_file() || media_kind(&path, &metadata).is_err() {
-        return Err("unsupported");
+    let (path, metadata) = owner_file(s, d, reference)?;
+    if let Some(reason) = private_location(s, &path) {
+        return Err(reason);
     }
     Ok(namespace::Identity::of(&metadata))
 }
@@ -806,12 +923,14 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["hiddenMedia"].clone()
         };
+        // Each says why; only photo.png waits for nothing but approval.
         assert_eq!(
             hidden().await,
             json!([
-                {"path": "../../outside.png", "reason": "missing"},
-                {"path": ".hidden/secret.png", "reason": "unapproved"},
+                {"path": "../../outside.png", "reason": "outside"},
+                {"path": ".hidden/secret.png", "reason": "hidden"},
                 {"path": "gone.png", "reason": "missing"},
+                {"path": "notes.png", "reason": "unsupported"},
                 {"path": "photo.png", "reason": "unapproved"},
             ])
         );
@@ -859,7 +978,7 @@ mod tests {
             serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(),
             json!({"ok": true, "shared": ["photo.png", "approved.png"], "refused": [
                 {"path": "gone.png", "reason": "missing"},
-                {"path": ".hidden/secret.png", "reason": "outside"},
+                {"path": ".hidden/secret.png", "reason": "hidden"},
                 {"path": "../../outside.png", "reason": "outside"},
                 {"path": "notes.png", "reason": "unsupported"},
                 {"path": "https://example.com/a.png", "reason": "outside"},
@@ -882,11 +1001,199 @@ mod tests {
         assert_eq!(
             hidden().await,
             json!([
-                {"path": "../../outside.png", "reason": "missing"},
-                {"path": ".hidden/secret.png", "reason": "unapproved"},
+                {"path": "../../outside.png", "reason": "outside"},
+                {"path": ".hidden/secret.png", "reason": "hidden"},
                 {"path": "gone.png", "reason": "missing"},
+                {"path": "notes.png", "reason": "unsupported"},
             ])
         );
+    }
+
+    #[test]
+    fn no_approval_shows_link_visitors_a_file_in_a_hidden_folder() {
+        let (_dir, s) = store();
+        let png = BASE64.decode(PNG).unwrap();
+        for path in [
+            ".secret.png",
+            "Notes/.dot/first.png",
+            "Notes/.dot/later.png",
+            "Notes/.assets/nested.png",
+            "Notes/photo.png",
+            ".assets/logo.png",
+        ] {
+            fs::create_dir_all(s.root.join(path).parent().unwrap()).unwrap();
+            fs::write(s.root.join(path), &png).unwrap();
+        }
+        // The desktop file's first load approves what it names, and a
+        // desktop import what it adds.
+        let first = concat!(
+            "![secret](../.secret.png)\n![first](.dot/first.png)\n",
+            "![nested](.assets/nested.png)\n![photo](photo.png)\n![logo](../.assets/logo.png)\n",
+        );
+        fs::write(s.root.join("Notes/page.md"), first).unwrap();
+        let d = s.index_document("Notes/page.md").unwrap();
+        let d = link(&s, &d, "page-link");
+        let room = s.room(&d).unwrap();
+        fs::write(
+            s.root.join("Notes/page.md"),
+            format!("{first}![later](.dot/later.png)\n"),
+        )
+        .unwrap();
+        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+        drop(room);
+        // Those approvals are recorded, as older versions recorded them, yet
+        // serve no hidden file; Locdoc's own top-level uploads stay served.
+        assert!(approvals(&s, &d) >= 12);
+        for (path, status) in [
+            ("../.secret.png", StatusCode::FORBIDDEN),
+            (".dot/first.png", StatusCode::FORBIDDEN),
+            (".dot/later.png", StatusCode::FORBIDDEN),
+            (".assets/nested.png", StatusCode::FORBIDDEN),
+            ("photo.png", StatusCode::OK),
+            ("../.assets/logo.png", StatusCode::OK),
+        ] {
+            assert_eq!(
+                served(&s, &d, path, Some("page-link"), &HeaderMap::new()),
+                status,
+                "{path}"
+            );
+        }
+        let hidden = [
+            "../.secret.png",
+            ".assets/nested.png",
+            ".dot/first.png",
+            ".dot/later.png",
+        ];
+        let payload = document_payload(&s, &owner(&s), &d, &Access::default()).unwrap();
+        assert_eq!(
+            payload["hiddenMedia"],
+            json!(hidden.map(|path| json!({"path": path, "reason": "hidden"})))
+        );
+        // Showing one is refused for the same reason.
+        let requested = hidden.map(String::from);
+        let room = s.room(&d).unwrap();
+        let (shared, refused) = room
+            .lock()
+            .unwrap()
+            .share_media(&s, &d, &requested)
+            .unwrap();
+        assert!(shared.is_empty());
+        assert_eq!(refused, requested.map(|path| (path, "hidden")).to_vec());
+    }
+
+    #[tokio::test]
+    async fn media_locdoc_shows_nobody_is_listed_and_only_its_owner_learns_why() {
+        let (dir, s) = store();
+        let png = BASE64.decode(PNG).unwrap();
+        let mp4 = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2";
+        fs::create_dir_all(s.root.join("Notes")).unwrap();
+        for (path, bytes, size) in [
+            ("big.png", png.as_slice(), 5 * MB + 1),
+            ("big.mp4", mp4.as_slice(), 20 * MB + 1),
+            ("clip.mp4", mp4.as_slice(), 6 * MB),
+            ("photo.png", png.as_slice(), png.len()),
+            ("notes.png", b"Not an image at all".as_slice(), 19),
+        ] {
+            let path = s.root.join("Notes").join(path);
+            fs::write(&path, bytes).unwrap();
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_len(size as u64)
+                .unwrap();
+        }
+        fs::write(dir.path().join("outside.png"), &png).unwrap();
+        fs::create_dir_all(s.root.join(".locdoc-trash/item")).unwrap();
+        fs::write(s.root.join(".locdoc-trash/item/old.png"), &png).unwrap();
+        // The desktop file approves every one of them.
+        fs::write(
+            s.root.join("Notes/page.md"),
+            concat!(
+                "![big](big.png) ![clip](big.mp4) ![small](clip.mp4) ![photo](photo.png)\n",
+                "![notes](notes.png) ![gone](gone.png) ![outside](../../outside.png)\n",
+                "![trashed](../.locdoc-trash/item/old.png) ![windows](pics\\photo.png)\n",
+            ),
+        )
+        .unwrap();
+        let d = s.index_document("Notes/page.md").unwrap();
+        let d = link(&s, &d, "page-link");
+        let payload = document_payload(&s, &owner(&s), &d, &Access::default()).unwrap();
+        assert_eq!(
+            payload["hiddenMedia"],
+            json!([
+                {"path": "../../outside.png", "reason": "outside"},
+                {"path": "../.locdoc-trash/item/old.png", "reason": "hidden"},
+                {"path": "big.mp4", "reason": "too-large"},
+                {"path": "big.png", "reason": "too-large"},
+                {"path": "gone.png", "reason": "missing"},
+                {"path": "notes.png", "reason": "unsupported"},
+                {"path": "pics\\photo.png", "reason": "invalid"},
+            ])
+        );
+        let room = s.room(&d).unwrap();
+        let (_, refused) = room
+            .lock()
+            .unwrap()
+            .share_media(&s, &d, &["big.png".into(), "big.mp4".into()])
+            .unwrap();
+        drop(room);
+        assert_eq!(
+            refused,
+            [
+                ("big.png".to_string(), "too-large"),
+                ("big.mp4".to_string(), "too-large")
+            ]
+        );
+        let request = |path: &str, token: Option<&str>, headers: HeaderMap| {
+            let request = Query(Media {
+                path: path.into(),
+                token: token.map(Into::into),
+            });
+            media(State(s.clone()), AxPath(d.id.clone()), request, headers)
+        };
+        for path in ["clip.mp4", "photo.png"] {
+            let response = request(path, Some("page-link"), HeaderMap::new()).await;
+            assert_eq!(response.unwrap().status(), StatusCode::OK, "{path}");
+        }
+        for (path, reason) in [
+            ("big.png", "too-large"),
+            ("big.mp4", "too-large"),
+            ("notes.png", "unsupported"),
+            ("gone.png", "missing"),
+            ("../../outside.png", "outside"),
+            ("../.locdoc-trash/item/old.png", "hidden"),
+            ("pics\\photo.png", "invalid"),
+        ] {
+            // The owner's editor learns why it has no picture to show.
+            let refused = request(path, None, owner(&s)).await.unwrap();
+            let status = refused.status();
+            assert!(status.is_client_error(), "{path}: {status}");
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(refused.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body["reason"], reason, "{path}");
+            // A link visitor learns nothing new: the error alone.
+            let visitor = match request(path, Some("page-link"), HeaderMap::new()).await {
+                Ok(response) => response,
+                Err(error) => error.into_response(),
+            };
+            assert_eq!(visitor.status(), status, "{path}");
+            let body: Value = serde_json::from_slice(
+                &axum::body::to_bytes(visitor.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                body.as_object().unwrap().keys().collect::<Vec<_>>(),
+                ["error"],
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -913,9 +1220,14 @@ mod tests {
             .share_media(&s, &page, &["state/fonts/cover.png".into()])
             .unwrap();
         assert!(shared.is_empty());
-        assert_eq!(refused, [("state/fonts/cover.png".to_string(), "outside")]);
+        assert_eq!(refused, [("state/fonts/cover.png".to_string(), "state")]);
         drop(room);
         assert_eq!(approvals(&s, &page), 0);
+        let payload = document_payload(&s, &owner(&s), &page, &Access::default()).unwrap();
+        assert_eq!(
+            payload["hiddenMedia"],
+            json!([{"path": "state/fonts/cover.png", "reason": "state"}])
+        );
     }
 
     #[test]

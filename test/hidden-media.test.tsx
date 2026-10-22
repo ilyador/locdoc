@@ -226,16 +226,65 @@ test("hidden images list their reason and are shown to link visitors on request"
   assert.ok(screen.getByText("pics/b.png"));
 });
 
+test("each listed reason reads as it is, and only an unapproved image offers Show", async () => {
+  const hidden: HiddenMedia[] = [
+    { path: "../../outside.png", reason: "outside" },
+    { path: ".dot/secret.png", reason: "hidden" },
+    { path: "state/cover.png", reason: "state" },
+    { path: "big.png", reason: "too-large" },
+    { path: "notes.png", reason: "unsupported" },
+    { path: "pics\\win.png", reason: "invalid" },
+    { path: "gone.png", reason: "missing" },
+    { path: "photo.png", reason: "unapproved" },
+  ];
+  respond = () => response({ ...makeDoc("doc-l"), hiddenMedia: hidden });
+  render(panel(makeDoc("doc-l")));
+  await screen.findByText("photo.png");
+  const rows = Array.from(
+    document.querySelectorAll(".hidden-media-item"),
+    (row) =>
+      [
+        row.querySelector(".hidden-media-path")!.textContent,
+        row.querySelector(".hidden-media-reason")!.textContent,
+        row.querySelector("button")?.textContent || "",
+        row.querySelector("img")?.getAttribute("src") ? "thumbnail" : "icon",
+      ].join("|"),
+  );
+  assert.deepEqual(rows, [
+    "../../outside.png|Outside your documents folder||icon",
+    ".dot/secret.png|In a hidden file or folder||thumbnail",
+    "state/cover.png|In Locdoc's state folder||thumbnail",
+    "big.png|Over the 5 MB image or 20 MB video limit||icon",
+    "notes.png|Not an image or video Locdoc can show||icon",
+    "pics\\win.png|Not a file path Locdoc can open||icon",
+    "gone.png|File not found||icon",
+    "photo.png|Not approved for link visitors|Show to link visitors|thumbnail",
+  ]);
+  // Only files the owner can see are requested as thumbnails.
+  assert.deepEqual(
+    Array.from(
+      document.querySelectorAll<HTMLImageElement>("img.hidden-media-thumb"),
+      (image) => new URL(image.src).searchParams.get("path"),
+    ),
+    [".dot/secret.png", "state/cover.png", "photo.png"],
+  );
+  assert.equal(screen.queryByRole("button", { name: "Show all" }), null);
+});
+
 test("each refusal the server sends reads as its reason", async () => {
   const hidden: HiddenMedia[] = [
     { path: "pics/gone.png", reason: "unapproved" },
     { path: "pics/huge.jpg", reason: "unapproved" },
     { path: "pics/odd.png", reason: "unapproved" },
+    { path: "pics/.dot.png", reason: "unapproved" },
+    { path: "pics/big.png", reason: "unapproved" },
   ];
   const reasons: Record<string, string> = {
     "pics/gone.png": "unreferenced",
     "pics/huge.jpg": "unsupported",
     "pics/odd.png": "<b>new code</b>",
+    "pics/.dot.png": "hidden",
+    "pics/big.png": "too-large",
   };
   respond = (request) =>
     request.method === "POST"
@@ -251,7 +300,13 @@ test("each refusal the server sends reads as its reason", async () => {
   render(panel(makeDoc("doc-r")));
   fireEvent.click(await screen.findByRole("button", { name: "Show all" }));
   await screen.findByText("Not shown: No longer in this document");
-  assert.ok(screen.getByText("Not shown: Not an image or video Locdoc can show"));
+  assert.ok(
+    screen.getByText("Not shown: Not an image or video Locdoc can show"),
+  );
+  assert.ok(screen.getByText("Not shown: In a hidden file or folder"));
+  assert.ok(
+    screen.getByText("Not shown: Over the 5 MB image or 20 MB video limit"),
+  );
   // An unknown reason is inert text, never markup.
   assert.ok(screen.getByText("Not shown: <b>new code</b>"));
   assert.equal(document.querySelector(".hidden-media b"), null);

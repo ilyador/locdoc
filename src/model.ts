@@ -19,8 +19,20 @@ export type TrashItem = {
   deleted: number;
   documents: number;
 };
-// A media reference the owner sees but link visitors cannot.
-export type HiddenMedia = { path: string; reason: "unapproved" | "missing" };
+// A media reference the owner's editor shows that link visitors cannot see,
+// and why. Only "unapproved" is the owner's to change from Locdoc.
+export type HiddenMedia = {
+  path: string;
+  reason:
+    | "unapproved"
+    | "missing"
+    | "outside"
+    | "hidden"
+    | "state"
+    | "too-large"
+    | "unsupported"
+    | "invalid";
+};
 export type Document = {
   id: string;
   path: string;
