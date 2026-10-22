@@ -108,14 +108,14 @@ impl Requests {
     }
     /// An engine path cannot use this document's file yet.
     fn unmatched(&self, document: &str) {
-        let held = self.0.lock().unwrap().held.contains(document);
-        if !held {
+        if !self.holds(document) {
             self.after(RETRY);
         }
     }
-    /// A listing found a file no pass has matched yet. While an incomplete
-    /// walk holds missing documents only its own retry can settle them, and
-    /// every pass meanwhile walks the tree, so listings do not ask.
+    /// A listing or a desktop save found a file no pass has matched yet.
+    /// While an incomplete walk holds missing documents only its own retry
+    /// can settle them, and every pass meanwhile walks the tree, so neither
+    /// asks.
     fn unlisted(&self) {
         let held = !self.0.lock().unwrap().held.is_empty();
         if !held {
@@ -124,6 +124,9 @@ impl Requests {
     }
     fn hold(&self, documents: HashSet<String>) {
         self.0.lock().unwrap().held = documents;
+    }
+    fn holds(&self, document: &str) -> bool {
+        self.0.lock().unwrap().held.contains(document)
     }
     /// Whether a document is now found somewhere it was not before.
     fn found(&self, elsewhere: HashMap<String, String>) -> bool {
@@ -499,6 +502,7 @@ impl Store {
         };
         let mut evidence = observe()?;
         if !self.assigned(&path, evidence.as_ref())? {
+            let discover = discover && !self.awaits_held(&path, evidence.as_ref())?;
             if discover {
                 self.reconcile(Pass::Discover)?;
                 evidence = observe()?;
@@ -506,11 +510,7 @@ impl Store {
             if !discover || !self.assigned(&path, evidence.as_ref())? {
                 // A busy room or a move in progress; a later pass decides. A
                 // second name for a document's file stays unlisted.
-                if discover {
-                    self.reconciliation.after(RETRY);
-                } else {
-                    self.reconciliation.unlisted();
-                }
+                self.reconciliation.unlisted();
                 return Err(ApiError(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "This file is still being matched to its document. Try again shortly.".into(),
@@ -540,6 +540,40 @@ impl Store {
             id
         };
         self.doc(&id)
+    }
+
+    /// Whether a file no document records is at the name of a document an
+    /// unlisted folder holds, born too late to be that document's own save.
+    /// A pass could only leave it unlisted until the held document's retry.
+    fn awaits_held(&self, path: &str, evidence: Option<&Identity>) -> Result<bool> {
+        let gap = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT d.id,g.since FROM docs d JOIN document_gaps g ON g.doc=d.id
+                 WHERE d.path=? AND d.active=1",
+                [path],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        let Some((id, since)) = gap else {
+            return Ok(false);
+        };
+        if !self.reconciliation.holds(&id) || continues(since, clock(), evidence) {
+            return Ok(false);
+        }
+        // Another document's file there still tells a pass where it went.
+        let Some(Identity(identity)) = evidence else {
+            return Ok(true);
+        };
+        let claimed = self.db.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM document_identities f JOIN docs d ON d.id=f.doc
+             WHERE f.identity=? AND d.active=1)",
+            [identity],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(!claimed)
     }
 
     /// Whether the file at an indexed path carries its document's recorded

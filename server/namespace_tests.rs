@@ -2316,6 +2316,86 @@ fn listings_never_walk_the_tree_while_an_unreadable_folder_holds_a_document() {
 }
 
 #[test]
+fn saves_of_a_new_file_at_a_held_documents_name_never_walk_the_tree_or_hasten_its_retry() {
+    let (_directory, s) = store();
+    let removed = s.create_document("removed.md").unwrap();
+    let page = s.create_document("page.md").unwrap();
+    share(&s, &removed.id);
+    let room = s.room(&removed).unwrap();
+    s.persist(&removed, &mut room.lock().unwrap()).unwrap();
+    drop(room);
+    s.create_folder("Locked").unwrap();
+    fs::remove_file(s.root.join("removed.md")).unwrap();
+    clock_offset(-10, || walking(locked(&s), || s.retire_missing_documents())).unwrap();
+    // A desktop editor keeps saving a new file at the held document's name.
+    fs::write(s.root.join("removed.md"), "New private notes\n").unwrap();
+    let walks = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (root, counted, unreadable) = (s.root.clone(), walks.clone(), locked(&s));
+    s.reconciliation.take();
+    walking(
+        move |path| {
+            if path == root {
+                counted.set(counted.get() + 1);
+            }
+            unreadable(path)
+        },
+        || {
+            s.retire_missing_documents().unwrap();
+            let held = s.reconciliation.take().unwrap();
+            let before = walks.get();
+            // The watcher indexes the file after each of its saves.
+            for _ in 0..5 {
+                assert_eq!(
+                    s.index_document("removed.md").unwrap_err().0,
+                    StatusCode::SERVICE_UNAVAILABLE
+                );
+            }
+            assert_eq!(walks.get(), before, "A save there must never walk the tree");
+            assert!(
+                s.reconciliation.take().is_none_or(|next| next >= held),
+                "Saves there must not bring the next walk forward"
+            );
+            // An atomic save of another document is still recorded at once.
+            let temporary = s.root.join("page.md.tmp");
+            fs::write(&temporary, "Saved by a rename\n").unwrap();
+            fs::rename(&temporary, s.root.join("page.md")).unwrap();
+            assert_eq!(s.index_document("page.md").unwrap().id, page.id);
+        },
+    );
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("# removed\n\n")
+    );
+    s.retire_missing_documents().unwrap();
+    assert!(s.doc(&removed.id).is_err());
+    assert_ne!(s.index_document("removed.md").unwrap().id, removed.id);
+}
+
+#[test]
+fn a_save_of_another_documents_file_at_a_held_name_keeps_the_held_retry() {
+    let (directory, s, a, b) = swap_fixture();
+    s.create_folder("Locked").unwrap();
+    fs::rename(s.root.join("p.md"), directory.path().join("outside.md")).unwrap();
+    fs::rename(s.root.join("r.md"), s.root.join("p.md")).unwrap();
+    s.reconciliation.take();
+    walking(locked(&s), || {
+        s.retire_missing_documents().unwrap();
+        let held = s.reconciliation.take().unwrap();
+        // The save's pass still finds B at A's name, which A keeps.
+        assert_eq!(
+            s.index_document("p.md").unwrap_err().0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(s.found_elsewhere(&b.id).as_deref(), Some("p.md"));
+        assert!(
+            s.reconciliation.take().is_none_or(|next| next >= held),
+            "A save must not bring the next walk forward"
+        );
+    });
+    assert_eq!(s.doc(&a.id).unwrap().path, "p.md");
+}
+
+#[test]
 fn a_document_whose_folder_became_a_file_retires() {
     let (_dir, s) = store();
     let doc = s.create_document("Notes/note.md").unwrap();
