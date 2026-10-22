@@ -20,7 +20,9 @@ const hidden = new Set([
 const words = new Intl.Segmenter(undefined, { granularity: "word" });
 
 export function countDocumentWords(source: string, path: string) {
-  if (documentFormat(path) !== "fountain") return countMarkdownWords(source);
+  const format = documentFormat(path);
+  if (format === "text") return countPlainWords(source);
+  if (format !== "fountain") return countMarkdownWords(source);
   const text = parseFountain(source)
     .lines.filter(
       (line) =>
@@ -31,6 +33,14 @@ export function countDocumentWords(source: string, path: string) {
     .map((line) => line.text)
     .join(" ");
   return [...words.segment(text)].filter((word) => word.isWordLike).length;
+}
+
+// Plain text is read as written: only hidden comment records are excluded.
+export function countPlainWords(source: string) {
+  let count = 0;
+  for (const word of words.segment(commentReadingText(source)))
+    if (word.isWordLike) count++;
+  return count;
 }
 
 // Count reading content, not Markdown punctuation, destinations or media paths.

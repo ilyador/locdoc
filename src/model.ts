@@ -1,3 +1,4 @@
+import type { DocumentFormat } from "./document-format";
 import type { Anchor } from "./editor-types";
 
 export type Entry = {
@@ -8,6 +9,7 @@ export type Entry = {
   modified?: number;
   title?: string;
   url?: string;
+  format?: DocumentFormat;
 };
 export type Document = {
   id: string;

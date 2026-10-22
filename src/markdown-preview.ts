@@ -30,6 +30,7 @@ import {
   mediaUrl,
 } from "./markdown-widgets";
 import { imageReference, mediaPreview } from "./markdown-media";
+import { plainTextSupport } from "./plain-text";
 import type { Entry } from "./model";
 
 // Solarized II, from the owner's Ulysses theme. Dark variants keep its hues
@@ -441,7 +442,9 @@ export function documentPreview(
   path = "",
   entries: Entry[] = [],
 ) {
-  const fountain = documentFormat(path) === "fountain";
+  const format = documentFormat(path);
+  if (format === "text") return plainTextSupport;
+  const fountain = format === "fountain";
   return [
     fountain
       ? [fountainPreview(), fountainSpeakerCompletion()]

@@ -527,4 +527,6 @@ test("a comment on a titled figure follows the figure only where media renders",
   assert.deepEqual(markdown, { marker: true, block: true });
   const screenplay = await commentMarkers("Notes/Chart.fountain", source, line);
   assert.deepEqual(screenplay, { marker: true, block: false });
+  const plain = await commentMarkers("Notes/Chart.txt", source, line);
+  assert.deepEqual(plain, { marker: true, block: false });
 });

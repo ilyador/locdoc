@@ -132,6 +132,9 @@ export const MarkdownEditor = forwardRef<
         ? v
         : null;
     };
+    // Plain text has no Markdown or screenplay syntax to insert.
+    const formatted = () =>
+      documentFormat(path) === "text" ? null : writable();
     return {
       formatFountain(kind) {
         const v = writable();
@@ -139,11 +142,11 @@ export const MarkdownEditor = forwardRef<
           formatFountainLine(v, kind);
       },
       insertLink(url, label, anchor) {
-        const v = writable();
+        const v = formatted();
         if (v && anchor) insertDocumentLink(v, ydoc, url, label, anchor);
       },
       toggleTasks() {
-        const v = writable();
+        const v = formatted();
         if (v) toggleTaskList(v);
       },
       insert(text) {
@@ -151,11 +154,11 @@ export const MarkdownEditor = forwardRef<
         if (v) insertText(v, text);
       },
       insertTable(rows, columns) {
-        const v = writable();
+        const v = formatted();
         if (v) insertMarkdownTable(v, rows, columns);
       },
       wrap(before, after = "") {
-        const v = writable();
+        const v = formatted();
         if (!v) return;
         if (
           before === after &&
@@ -324,7 +327,7 @@ export const MarkdownEditor = forwardRef<
     return () => observer.disconnect();
   }, [commentHost]);
   const previewEntries =
-    documentFormat(path) === "fountain" ? undefined : entries;
+    documentFormat(path) === "markdown" ? entries : undefined;
   useEffect(() => {
     view.current?.dispatch({
       effects: preview.current.reconfigure(

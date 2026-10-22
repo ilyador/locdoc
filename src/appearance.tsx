@@ -197,6 +197,8 @@ export function useAppearance() {
     return () => preference.removeEventListener("change", apply);
   }, [theme]);
   return {
+    // Plain text shares the Markdown writing profile: the same font, sizes,
+    // spacing and width apply to both prose formats.
     forFormat: (format: DocumentFormat) => ({
       ...(format === "fountain" ? fountain : markdown),
       theme,
@@ -653,8 +655,9 @@ export function AppearancePanel({
         )}
         {tab !== "theme" && (
           <p className="appearance-scope">
-            For all {format === "fountain" ? "Fountain" : "Markdown"} files in
-            this browser.
+            For all{" "}
+            {format === "fountain" ? "Fountain" : "Markdown and plain text"}{" "}
+            files in this browser.
           </p>
         )}
         {notice && (

@@ -12,11 +12,12 @@ import {
   TextUnderline,
   type Icon,
 } from "@phosphor-icons/react";
+import type { DocumentFormat } from "./document-format";
 import type { EditorHandle } from "./editor-types";
 import { TablePicker } from "./table-picker";
 
 export function FormattingTools({
-  fountain,
+  format,
   editable,
   busy,
   expanded = false,
@@ -25,7 +26,7 @@ export function FormattingTools({
   onUpload,
   onComment,
 }: {
-  fountain: boolean;
+  format: DocumentFormat;
   editable: boolean;
   busy: boolean;
   expanded?: boolean;
@@ -34,13 +35,16 @@ export function FormattingTools({
   onUpload: () => void;
   onComment: () => void;
 }) {
+  const fountain = format === "fountain";
+  // Plain text keeps only comments: it has no syntax to format.
+  const formatting = editable && format !== "text";
   const commands: {
     label: string;
     icon: Icon;
     className?: string;
     run: () => void;
     disabled?: boolean;
-  }[] = editable
+  }[] = formatting
     ? [
         ...(!fountain
           ? [
@@ -131,7 +135,7 @@ export function FormattingTools({
             {expanded && <span>{label.replace(/ \(.*\)$/, "")}</span>}
           </button>
         ))}
-      {editable && !fountain && (
+      {formatting && !fountain && (
         <div className="toolbar-media formatting-table">
           <TablePicker
             showLabel={expanded}

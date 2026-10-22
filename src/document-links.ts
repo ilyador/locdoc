@@ -1,5 +1,5 @@
 import type { Entry } from "./model";
-import { documentName } from "./document-format.ts";
+import { documentName, isDocumentPath } from "./document-format.ts";
 
 export function documentTitle(entry: Entry) {
   return entry.title || documentName(entry.path);
@@ -34,7 +34,7 @@ export function resolveDocumentLink(
   try {
     const decoded = decodeURIComponent(raw.replace(/^<|>$/g, ""));
     if (
-      !/\.(md|fountain)$/i.test(decoded) ||
+      !isDocumentPath(decoded) ||
       decoded.startsWith("/") ||
       decoded.includes("\\")
     )

@@ -18,7 +18,12 @@ import { CollaborationRecovery } from "./collaboration-recovery";
 import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { McpConnections } from "./mcp-authorization";
 import { RenameDocument } from "./rename-document";
-import { documentFormat, type DocumentFormat } from "./document-format";
+import {
+  documentFormat,
+  formatLabel,
+  isDocumentPath,
+  type DocumentFormat,
+} from "./document-format";
 import type { DocumentSession } from "./document-session";
 import type { Config, Document } from "./model";
 
@@ -127,22 +132,23 @@ export function CreateEntryForm({
           <select
             id="new-format"
             className="text-input"
-            value={
-              /\.(md|fountain)$/i.test(path) ? documentFormat(path) : format
-            }
+            value={isDocumentPath(path) ? documentFormat(path) : format}
             onChange={(event) => {
               const format = event.target.value as DocumentFormat;
               setFormat(format);
               setPath((value) =>
                 value
-                  ? value.replace(/\.(md|fountain)$/i, "") +
-                    (format === "fountain" ? ".fountain" : ".md")
+                  ? value.replace(/\.(md|fountain|txt)$/i, "") +
+                    { markdown: ".md", fountain: ".fountain", text: ".txt" }[
+                      format
+                    ]
                   : value,
               );
             }}
           >
             <option value="markdown">Markdown (.md)</option>
             <option value="fountain">Fountain screenplay (.fountain)</option>
+            <option value="text">Plain text (.txt)</option>
           </select>
         </>
       )}
@@ -158,7 +164,9 @@ export function CreateEntryForm({
             ? "Projects / Research"
             : format === "fountain"
               ? "Projects/My screenplay.fountain"
-              : "Projects/My next idea.md"
+              : format === "text"
+                ? "Projects/Notes.txt"
+                : "Projects/My next idea.md"
         }
         value={path}
         onChange={(e) => setPath(e.target.value)}
@@ -324,9 +332,9 @@ export function downloadDocument(
     [session?.ydoc.getText("content").toString() ?? doc.content ?? ""],
     {
       type:
-        documentFormat(doc.path) === "fountain"
-          ? "text/plain;charset=utf-8"
-          : "text/markdown;charset=utf-8",
+        documentFormat(doc.path) === "markdown"
+          ? "text/markdown;charset=utf-8"
+          : "text/plain;charset=utf-8",
     },
   );
   const a = document.createElement("a");
@@ -338,7 +346,7 @@ export function downloadDocument(
 
 export function DocumentOptions({
   doc,
-  fountain,
+  format,
   endpoint,
   formatting,
   onDownload,
@@ -346,7 +354,7 @@ export function DocumentOptions({
   onRename,
 }: {
   doc: Document;
-  fountain: boolean;
+  format: DocumentFormat;
   endpoint: string;
   formatting: ReactNode;
   onDownload: () => void;
@@ -356,14 +364,14 @@ export function DocumentOptions({
   return (
     <>
       <p className="dialog-description">{doc.path}</p>
-      {doc.edit && !fountain && (
+      {doc.edit && format === "markdown" && (
         <div className="formatting-menu" role="group" aria-label="Formatting">
           {formatting}
         </div>
       )}
       <button className="menu-action" onClick={onDownload}>
         <DownloadSimple />
-        Download {fountain ? "Fountain" : "Markdown"}
+        Download {format === "text" ? "plain text" : formatLabel(format)}
       </button>
       {doc.owner && (
         <button className="menu-action" onClick={onHistory}>
@@ -378,13 +386,15 @@ export function DocumentOptions({
           onRename={onRename}
         />
       )}
-      <div className="attachment-info">
-        <Image />
-        <span>
-          <strong>{(doc.usage / 1e6).toFixed(1)} MB of 50 MB used</strong>
-          <small>Images up to 5 MB · Videos up to 20 MB</small>
-        </span>
-      </div>
+      {format !== "text" && (
+        <div className="attachment-info">
+          <Image />
+          <span>
+            <strong>{(doc.usage / 1e6).toFixed(1)} MB of 50 MB used</strong>
+            <small>Images up to 5 MB · Videos up to 20 MB</small>
+          </span>
+        </div>
+      )}
     </>
   );
 }

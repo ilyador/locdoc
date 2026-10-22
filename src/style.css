@@ -1173,7 +1173,8 @@ button:hover {
 }
 /* Keep block spacing in CodeMirror's measured line box, never a margin. */
 .cm-line.md-block-end,
-.cm-line.fountain-block-end {
+.cm-line.fountain-block-end,
+.cm-line.text-block-end {
   padding-block-end: calc(
     var(--doc-paragraph-spacing, 0.15) * var(--doc-line-height) * 1em
   ) !important;
