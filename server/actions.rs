@@ -112,7 +112,7 @@ pub(super) async fn duplicate(
         let copy = s.duplicate_document(
             &original,
             &target.path,
-            &comments::without_records(&source),
+            &comments::without_records(&source, comments::plain(&original.path)),
             &ending,
         )?;
         Ok(Json(json!(copy)))

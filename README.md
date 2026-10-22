@@ -173,10 +173,15 @@ Name a document `.txt`, or place a `.txt` file in your documents folder, for
 plain text. It edits as text, without Markdown formatting, the format bar, the
 link picker or media: image syntax such as `![x](y.png)` is text in a `.txt`
 file, so it never approves, serves or uploads an image. Comments use the same
-`[[comment(...)]]` records as Markdown and Fountain. A rename can change a
-document between `.md`, `.fountain` and `.txt`; it keeps its links, comments and
-history. A plain text document renamed to Markdown shows its image syntax as
-images to you, and to link visitors only once you approve them.
+`[[comment(...)]]` records as Markdown and Fountain, without Markdown rules: a
+record in backticks, a fence, an indented line, HTML or a link is a comment too,
+and only an escaped `\[[` stays text. Every line is a paragraph, so a new
+comment goes at the end of the line where its passage ends; another one on that
+line starts after a blank line the editor hides with the records. Adding a
+comment never shows an empty line. A rename can change a document between `.md`,
+`.fountain` and `.txt`; it keeps its links, comments and history. A plain text
+document renamed to Markdown shows its image syntax as images to you, and to
+link visitors only once you approve them.
 
 ## ChatGPT and MCP
 
@@ -228,7 +233,7 @@ The passage being discussed[[comment(alex): this is my comment]]
 [[comment(ana): this is a response]]
 ```
 
-Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. The web editor inserts records after the complete paragraph, list, table or other containing block, keeping the selected passage anchored separately so comments do not split Markdown syntax. Records inside code examples, HTML or Markdown link/image syntax remain literal.
+Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. In Markdown and Fountain, the web editor inserts records after the complete paragraph, list, table or other containing block, keeping the selected passage anchored separately so comments do not split Markdown syntax, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
 
 Each record occupies one physical line. Escape backslashes as `\\`, literal `]` as `\]`, `)` in names as `\)`, and message line breaks as `\n` or `\r`. Names allow 1–60 characters; messages allow 1–4,000. Comment text belongs to the file; SQLite retains anchors, timestamps and resolved state. File-added comments have no invented timestamp. Cutting and reinserting an unchanged conversation within the same document preserves its timestamps and resolved state when the entire conversation is unique and its original records were removed. Copies, altered conversations and ambiguous duplicates receive independent metadata; recreated raw text never inherits author permissions or posting receipts.
 

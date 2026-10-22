@@ -38,7 +38,7 @@ export function countDocumentWords(source: string, path: string) {
 // Plain text is read as written: only hidden comment records are excluded.
 export function countPlainWords(source: string) {
   let count = 0;
-  for (const word of words.segment(commentReadingText(source)))
+  for (const word of words.segment(commentReadingText(source, true)))
     if (word.isWordLike) count++;
   return count;
 }

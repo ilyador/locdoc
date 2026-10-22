@@ -16,6 +16,7 @@ export function useConversation({
   endpoint,
   ready,
   source,
+  plain,
   name,
   action,
 }: {
@@ -23,6 +24,7 @@ export function useConversation({
   endpoint: (suffix: string) => string;
   ready: boolean;
   source: Y.Text | undefined;
+  plain: boolean;
   name: string;
   action: Action;
 }) {
@@ -39,7 +41,7 @@ export function useConversation({
     comments,
     mutate: mutateComment,
     forgetRequest,
-  } = useComments(endpoint, ready, source);
+  } = useComments(endpoint, ready, source, plain);
   const cancel = () => {
     if (conversation?.kind === "draft") {
       forgetRequest();

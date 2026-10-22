@@ -1,5 +1,6 @@
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import React, { useState } from "react";
 import * as Y from "yjs";
@@ -16,7 +17,12 @@ import {
 } from "../src/document-format";
 import { resolveDocumentLink } from "../src/document-links";
 import { uploadAttachment } from "../src/document-upload";
-import { sourceCommentLayer } from "../src/editor-comments";
+import { sourceComments } from "../src/comment-syntax";
+import {
+  sourceCommentLayer,
+  sourceCommentRanges,
+  visibleTextRanges,
+} from "../src/editor-comments";
 import { plainTextSupport } from "../src/plain-text";
 import { countDocumentWords } from "../src/word-count";
 import type { EditorHandle } from "../src/editor-types";
@@ -167,6 +173,56 @@ test("plain-text paragraph spacing follows visible lines through edits", () => {
     { changes: { from: 0, to: state.doc.length, insert: "One\nTwo" } },
     "replace everything",
   );
+});
+
+// The lines a reader sees: hidden records and the line breaks they hide are
+// gone, and each line notes whether it ends a paragraph.
+function displayedLines(state: EditorState) {
+  const hidden = sourceCommentRanges(state);
+  const ends = new Set(
+    layoutRows(state).split(",").filter(Boolean).map(Number),
+  );
+  const lines: string[] = [];
+  for (let number = 1; number <= state.doc.lines; number++) {
+    const line = state.doc.line(number);
+    const text = visibleTextRanges(state, line.from, line.to)
+      .map((range) => state.sliceDoc(range.from, range.to))
+      .join("");
+    if (hidden.some((range) => range.from < line.from && line.from <= range.to))
+      lines[lines.length - 1] += text;
+    else lines.push(`${ends.has(line.from) ? "paragraph" : "line"}: ${text}`);
+  }
+  return lines;
+}
+
+test("comments the server adds to plain text show no new line, as in the shared fixtures", () => {
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/file-comments.json", import.meta.url),
+      "utf8",
+    ),
+  ).filter((c: any) => c.comment);
+  assert.ok(cases.some((c: any) => documentFormat(c.path) === "text"));
+  for (const c of cases) {
+    const plain = documentFormat(c.path) === "text";
+    const threads = sourceComments(c.comment.expected, plain);
+    assert.equal(threads.length, c.threads.length + 1, c.name);
+    assert.ok(
+      threads.some(
+        (thread) =>
+          thread.messages.length === 1 &&
+          thread.messages[0].name === "ana" &&
+          thread.messages[0].body === "A note",
+      ),
+      `${c.name}: the new comment is its own conversation`,
+    );
+    if (plain)
+      assert.deepEqual(
+        displayedLines(plainState(c.comment.expected)),
+        displayedLines(plainState(c.source)),
+        c.name,
+      );
+  }
 });
 
 let dom: JSDOM;
@@ -383,6 +439,34 @@ test("a .txt document edits as plain text, never as Markdown or media", async ()
     } finally {
       fixture.close();
     }
+  }
+});
+
+test("renaming between Markdown and plain text switches which records are literal", async () => {
+  const source = "Use `x[[comment(ana): Hidden in plain text]]` here.";
+  const fixture = mountEditor("Notes/plain.txt", true, source);
+  const rename = (path: string) =>
+    fixture.page.rerender(
+      <MarkdownEditor
+        {...fixture.props}
+        ref={fixture.ref}
+        path={path}
+        editable
+      />,
+    );
+  const shown = () => fixture.view.contentDOM.textContent!;
+  try {
+    assert.ok(!shown().includes("Hidden in plain text"), "plain text hides it");
+    rename("Notes/plain.md");
+    assert.ok(
+      shown().includes("[[comment(ana): Hidden in plain text]]"),
+      "Markdown code keeps it literal",
+    );
+    rename("Notes/plain.txt");
+    assert.ok(!shown().includes("Hidden in plain text"), "hidden again");
+    assert.equal(fixture.text.toString(), source);
+  } finally {
+    fixture.close();
   }
 });
 

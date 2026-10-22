@@ -2,6 +2,7 @@ import * as Y from "yjs";
 import { startCompletion } from "@codemirror/autocomplete";
 import { EditorView } from "@codemirror/view";
 import {
+  plainCommentRecords,
   resolveCommentAnchor,
   sourceCommentRanges,
   visibleTextRanges,
@@ -213,17 +214,18 @@ export function selectionAnchor(
   wholeLine: boolean,
 ): Selection {
   let { from, to } = v.state.selection.main;
+  const plain = v.state.facet(plainCommentRecords);
   if (wholeLine && from === to) {
     const line = v.state.doc.lineAt(from);
     from = line.from;
     to =
-      sourceComments(v.state.doc.toString()).find(
+      sourceComments(v.state.doc.toString(), plain).find(
         (thread) => thread.from >= from && thread.from <= line.to,
       )?.from ?? line.to;
   }
   const text = ydoc.getText("content");
   return {
-    quote: commentReadingText(v.state.sliceDoc(from, to)),
+    quote: commentReadingText(v.state.sliceDoc(from, to), plain),
     anchor: {
       start: Y.relativePositionToJSON(
         Y.createRelativePositionFromTypeIndex(text, from),

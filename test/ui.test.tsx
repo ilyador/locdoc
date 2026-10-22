@@ -6,6 +6,7 @@ import React, { useState } from "react";
 import * as Y from "yjs";
 import { countMarkdownWords } from "../src/word-count";
 import { sourceComments } from "../src/comment-syntax";
+import { documentFormat } from "../src/document-format";
 import { readFileSync } from "node:fs";
 import { NamePrompt } from "../src/name-prompt";
 import {
@@ -3056,7 +3057,9 @@ test("file comment syntax matches the backend fixtures and does not count as pro
   );
   for (const c of cases)
     assert.deepEqual(
-      sourceComments(c.source).map((t) => t.messages),
+      sourceComments(c.source, documentFormat(c.path) === "text").map(
+        (t) => t.messages,
+      ),
       c.threads,
       c.name,
     );

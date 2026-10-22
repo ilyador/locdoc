@@ -3,6 +3,7 @@ import {
   ChangeSet,
   EditorSelection,
   EditorState,
+  Facet,
   StateEffect,
   StateField,
   type Line,
@@ -19,6 +20,11 @@ import type { Anchor } from "./editor-types";
 import { sourceComments } from "./comment-syntax";
 import { mediaPreview, wholeLineImage } from "./markdown-media";
 
+// Plain text documents read their records without Markdown rules.
+export const plainCommentRecords = Facet.define<boolean, boolean>({
+  combine: (values) => values.some(Boolean),
+});
+
 // Source records stay editable on disk, while the writing surface shows only
 // their passage marker and conversation. Atomic ranges keep cursors out of them.
 type SourceCommentState = { ranges: Range[]; decorations: DecorationSet };
@@ -26,6 +32,11 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
   StateField.define({
     create: buildSourceComments,
     update(value, tr) {
+      if (
+        tr.startState.facet(plainCommentRecords) !==
+        tr.state.facet(plainCommentRecords)
+      )
+        return buildSourceComments(tr.state);
       if (!tr.docChanged) return value;
       if (!mapsSourceComments(tr, value.ranges))
         return buildSourceComments(tr.state);
@@ -33,7 +44,7 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
         from: tr.changes.mapPos(from, 1),
         to: tr.changes.mapPos(to, -1),
       }));
-      hiddenSources.set(tr.newDoc, ranges);
+      hiddenSources(tr.state).set(tr.newDoc, ranges);
       return { ranges, decorations: value.decorations.map(tr.changes) };
     },
     provide: (field) => [
@@ -114,18 +125,23 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
       }),
     ],
   });
-const hiddenSources = new WeakMap<EditorState["doc"], Range[]>();
+const markdownSources = new WeakMap<EditorState["doc"], Range[]>();
+const plainSources = new WeakMap<EditorState["doc"], Range[]>();
+const hiddenSources = (state: EditorState) =>
+  state.facet(plainCommentRecords) ? plainSources : markdownSources;
 export function sourceCommentRanges(state: EditorState): Range[] {
   return (
     state.field(sourceCommentLayer, false)?.ranges ?? parseSourceComments(state)
   );
 }
 function parseSourceComments(state: EditorState) {
-  const cached = hiddenSources.get(state.doc);
+  const cache = hiddenSources(state);
+  const cached = cache.get(state.doc);
   if (cached) return cached;
+  const plain = state.facet(plainCommentRecords);
   const source = state.doc.toString();
   const hidden: { from: number; to: number }[] = [];
-  for (const thread of sourceComments(source)) {
+  for (const thread of sourceComments(source, plain)) {
     const first = state.doc.lineAt(thread.from),
       last = state.doc.lineAt(thread.to);
     const standalone =
@@ -134,10 +150,17 @@ function parseSourceComments(state: EditorState) {
     const from = standalone ? first.from : thread.from;
     const to = standalone && last.to < source.length ? last.to + 1 : thread.to;
     const previous = hidden.at(-1);
-    if (previous && !source.slice(previous.to, from).trim()) previous.to = to;
+    if (previous && !source.slice(previous.to, from).trim())
+      // Every line is a paragraph in plain text: records that follow text on
+      // its line keep the line break after the last of them.
+      previous.to =
+        plain &&
+        source.slice(state.doc.lineAt(previous.from).from, previous.from).trim()
+          ? Math.min(to, last.to)
+          : to;
     else hidden.push({ from, to });
   }
-  hiddenSources.set(state.doc, hidden);
+  cache.set(state.doc, hidden);
   return hidden;
 }
 

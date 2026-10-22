@@ -179,6 +179,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     endpoint,
     ready: !!doc,
     source: session?.ydoc.getText("content"),
+    plain: format === "text",
     name,
     action,
   });

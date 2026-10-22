@@ -85,28 +85,39 @@ fn line_breaks(source: &str) -> usize {
     }
     count
 }
-fn parse(source: &str) -> Vec<Thread> {
+/// Whether the document at `path` is plain text, whose records follow no
+/// Markdown rules.
+pub(super) fn plain(path: &str) -> bool {
+    documents::format(path) == Some(documents::Format::Text)
+}
+fn parse(source: &str, plain: bool) -> Vec<Thread> {
     if !source.contains("[[comment(") {
         return Vec::new();
     }
-    let code: Vec<Range<usize>> = parser(source)
-        .into_offset_iter()
-        .filter_map(|(event, range)| {
-            matches!(
-                event,
-                pulldown_cmark::Event::Code(_)
-                    | pulldown_cmark::Event::Html(_)
-                    | pulldown_cmark::Event::InlineHtml(_)
-                    | pulldown_cmark::Event::Start(
-                        pulldown_cmark::Tag::CodeBlock(_)
-                            | pulldown_cmark::Tag::HtmlBlock
-                            | pulldown_cmark::Tag::Link { .. }
-                            | pulldown_cmark::Tag::Image { .. }
-                    )
-            )
-            .then_some(range)
-        })
-        .collect();
+    // Plain text has no code, HTML or links: only an escape keeps a record
+    // literal there.
+    let code: Vec<Range<usize>> = if plain {
+        Vec::new()
+    } else {
+        parser(source)
+            .into_offset_iter()
+            .filter_map(|(event, range)| {
+                matches!(
+                    event,
+                    pulldown_cmark::Event::Code(_)
+                        | pulldown_cmark::Event::Html(_)
+                        | pulldown_cmark::Event::InlineHtml(_)
+                        | pulldown_cmark::Event::Start(
+                            pulldown_cmark::Tag::CodeBlock(_)
+                                | pulldown_cmark::Tag::HtmlBlock
+                                | pulldown_cmark::Tag::Link { .. }
+                                | pulldown_cmark::Tag::Image { .. }
+                        )
+                )
+                .then_some(range)
+            })
+            .collect()
+    };
     let mut threads: Vec<Thread> = Vec::new();
     for c in PATTERN.captures_iter(source) {
         let m = c.get(0).unwrap();
@@ -148,8 +159,12 @@ fn parse(source: &str) -> Vec<Thread> {
     threads
 }
 pub(super) fn reading_source(source: &str) -> String {
+    reading(source, false)
+}
+/// Source without its records, as a reader sees it.
+pub(super) fn reading(source: &str, plain: bool) -> String {
     let mut ranges: Vec<Range<usize>> = Vec::new();
-    for t in parse(source) {
+    for t in parse(source, plain) {
         if let Some(previous) = ranges.last_mut()
             && source[previous.end..t.from].trim().is_empty()
         {
@@ -171,7 +186,7 @@ pub(super) fn reading_source(source: &str) -> String {
 /// document. A record on a line of its own leaves with that line and with
 /// one of the blank lines that set it apart, so the copy keeps no gap where
 /// a conversation was. Text the parser leaves literal, as in code, stays.
-pub(super) fn without_records(source: &str) -> String {
+pub(super) fn without_records(source: &str, plain: bool) -> String {
     fn leading_break(text: &str) -> usize {
         if text.starts_with("\r\n") {
             2
@@ -192,7 +207,7 @@ pub(super) fn without_records(source: &str) -> String {
         text.is_empty() || line.is_empty() || line.ends_with(['\n', '\r'])
     }
     let mut out = source.to_owned();
-    for thread in parse(source).iter().rev() {
+    for thread in parse(source, plain).iter().rev() {
         let before = out[..thread.from].trim_end_matches([' ', '\t']);
         let rest = out[thread.to..].trim_start_matches([' ', '\t']);
         let own_line = before.is_empty() || before.ends_with(['\n', '\r']);
@@ -388,6 +403,82 @@ fn insertion_point(source: &str, at: usize) -> usize {
     at
 }
 
+// The nearest character a reader sees before, or else from, `at`: neither
+// space nor part of a record.
+fn visible_text(source: &str, threads: &[Thread], at: usize) -> Option<usize> {
+    let record = |index: usize| threads.iter().find(|t| t.from <= index && index < t.to);
+    let mut end = at;
+    while let Some((index, _)) = source[..end]
+        .char_indices()
+        .rev()
+        .find(|(_, c)| !c.is_whitespace())
+    {
+        match record(index) {
+            Some(thread) => end = thread.from,
+            None => return Some(index),
+        }
+    }
+    let mut start = at;
+    while let Some((offset, _)) = source[start..]
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+    {
+        match record(start + offset) {
+            Some(thread) => start = thread.to,
+            None => return Some(start + offset),
+        }
+    }
+    None
+}
+
+// Plain text has no blocks, and each line is a paragraph: records go at the
+// end of the line where the passage ends, so adding one adds no line. Beside
+// another conversation a new one starts after a blank line, which the editor
+// hides together with the records around it. Returns where and the prefix.
+fn text_point(source: &str, threads: &[Thread], at: usize) -> (usize, &'static str) {
+    let Some(last) = visible_text(source, threads, at) else {
+        // No text at all: the end, apart from any conversation already there.
+        return (source.len(), if threads.is_empty() { "" } else { "\n\n" });
+    };
+    let mut point = source[last..]
+        .find(['\n', '\r'])
+        .map_or(source.len(), |n| last + n);
+    let mut after = false;
+    for thread in threads.iter().filter(|t| t.to > last) {
+        // A conversation that ends the line, or follows it with nothing else
+        // between, would take the new record as a reply.
+        let ends_line = thread.from < point
+            && (thread.to >= point || source[thread.to..point].trim().is_empty());
+        if ends_line || (thread.from >= point && source[point..thread.from].trim().is_empty()) {
+            point = thread.to;
+            after = true;
+        } else if thread.from >= point {
+            break;
+        }
+    }
+    if after {
+        return (point, "\n\n");
+    }
+    // A record right after an odd run of backslashes would be escaped. Before
+    // the last one it is not, unless only space separates it from another
+    // conversation, which would take it as a reply: then it gets a line.
+    let slashes = source[..point]
+        .chars()
+        .rev()
+        .take_while(|&c| c == '\\')
+        .count();
+    if slashes % 2 == 1 {
+        let before = point - 1;
+        let joins = threads
+            .iter()
+            .rev()
+            .find(|t| t.to <= before)
+            .is_some_and(|t| source[t.to..before].trim().is_empty());
+        return if joins { (point, "\n") } else { (before, "") };
+    }
+    (point, "")
+}
+
 // Compare rendered Markdown, not byte offsets: block separators may gain blank
 // lines, but adding a hidden record must not change prose, list nesting, tables,
 // headings, links, or literal HTML/code. HTML's trailing line terminator is not
@@ -408,15 +499,20 @@ fn same_visible_structure(before: &str, after: &str) -> bool {
     visible_structure(&before).eq(visible_structure(&after))
 }
 
-fn valid_candidate(source: &str, candidate: &str, expected: &[(usize, &[MessageText])]) -> bool {
-    let parsed = parse(candidate);
+fn valid_candidate(
+    source: &str,
+    candidate: &str,
+    expected: &[(usize, &[MessageText])],
+    plain: bool,
+) -> bool {
+    let parsed = parse(candidate, plain);
     parsed.len() == expected.len()
         && expected.iter().all(|(from, messages)| {
             parsed
                 .binary_search_by_key(from, |thread| thread.from)
                 .is_ok_and(|index| parsed[index].messages == *messages)
         })
-        && same_visible_structure(source, candidate)
+        && (plain || same_visible_structure(source, candidate))
 }
 
 struct Insertion {
@@ -429,21 +525,28 @@ fn root_record(
     threads: &[Thread],
     at: usize,
     messages: &[MessageText],
+    plain: bool,
 ) -> Result<Insertion> {
-    let at = insertion_point(source, at);
-    let prefix = if at == 0 || source[..at].ends_with("\n\n") {
-        ""
-    } else if source[..at].ends_with('\n') {
-        "\n"
+    let (at, prefix, suffix) = if plain {
+        let (at, prefix) = text_point(source, threads, at);
+        (at, prefix, "")
     } else {
-        "\n\n"
-    };
-    let suffix = if at == source.len() || source[at..].starts_with("\n\n") {
-        ""
-    } else if source[at..].starts_with('\n') {
-        "\n"
-    } else {
-        "\n\n"
+        let at = insertion_point(source, at);
+        let prefix = if at == 0 || source[..at].ends_with("\n\n") {
+            ""
+        } else if source[..at].ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let suffix = if at == source.len() || source[at..].starts_with("\n\n") {
+            ""
+        } else if source[at..].starts_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        (at, prefix, suffix)
     };
     let body = messages
         .iter()
@@ -461,12 +564,16 @@ fn root_record(
         })
         .collect::<Vec<_>>();
     expected.push((marker, messages));
-    if valid_candidate(source, &candidate, &expected) {
+    if valid_candidate(source, &candidate, &expected, plain) {
         Ok(Insertion {
             at,
             encoded,
             marker,
         })
+    } else if plain {
+        Err(bad(
+            "This comment could not be placed. Reload the document and try again.",
+        ))
     } else {
         // In particular an unfinished fence/HTML block may still consume the
         // records. Never invent closing syntax or acknowledge a hidden thread.
@@ -592,6 +699,7 @@ fn reanchor_moved(
     thread: &Thread,
     previous: &Value,
     value: &mut Value,
+    plain: bool,
 ) {
     let quote = previous["quote"].as_str().filter(|quote| !quote.is_empty());
     let matching = (|| {
@@ -601,7 +709,7 @@ fn reanchor_moved(
             return None;
         }
         let selected = &source[byte(source, from)?..byte(source, to)?];
-        Some(quote.is_none_or(|quote| reading_source(selected).starts_with(quote)))
+        Some(quote.is_none_or(|quote| reading(selected, plain).starts_with(quote)))
     })()
     .unwrap_or(false);
     if matching {
@@ -628,6 +736,7 @@ fn thread_values(
     threads: &[Thread],
     meta: &[Value],
     doc_id: &str,
+    plain: bool,
 ) -> (Vec<Value>, Vec<Value>) {
     let markers: Vec<_> = threads
         .iter()
@@ -682,7 +791,15 @@ fn thread_values(
                 value["guest"] = json!("");
                 value.as_object_mut().unwrap().remove("requestId");
                 value.as_object_mut().unwrap().remove("replyRequests");
-                reanchor_moved(r, source, threads, thread, stored.unwrap(), &mut value);
+                reanchor_moved(
+                    r,
+                    source,
+                    threads,
+                    thread,
+                    stored.unwrap(),
+                    &mut value,
+                    plain,
+                );
             }
             // Remember independent copies too. A later deletion of the first
             // conversation must not turn an already-seen copy into a move.
@@ -702,10 +819,11 @@ pub(super) fn rebuild_metadata(
     fresh: &Doc,
     source: &str,
     rows: &[Value],
+    plain: bool,
 ) -> Vec<Value> {
     let previous = room_text(old);
-    let old_threads = parse(&previous);
-    let threads = parse(source);
+    let old_threads = parse(&previous, plain);
+    let threads = parse(source, plain);
     let identical = previous == source;
     let source_length = source.encode_utf16().count() as u32;
     let markers: Vec<_> = old_threads
@@ -823,9 +941,10 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
     if !meta.iter().any(|c| c.get("source").is_none()) {
         return Ok(());
     }
+    let plain = plain(&d.path);
     let original = room_text(r);
     let mut candidate = original.clone();
-    let original_threads = parse(&original);
+    let original_threads = parse(&original, plain);
     let mut planned = Vec::<(usize, Insertion, Value)>::new();
     // Validate the entire migration before changing even one CRDT item. A bad
     // legacy record must leave its metadata and all existing threads intact.
@@ -880,7 +999,7 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
                 messages.push(normalize(reply, "Reply")?);
             }
         }
-        let insertion = root_record(&candidate, &parse(&candidate), at, &messages)?;
+        let insertion = root_record(&candidate, &parse(&candidate, plain), at, &messages, plain)?;
         if candidate.len() + insertion.encoded.len() > 5 * MB {
             return Err(bad("Document exceeds 5 MB."));
         }
@@ -911,8 +1030,9 @@ fn load(s: &Store, d: &Document, r: &mut Room) -> Result<Loaded> {
     let mut meta = metadata(s, &d.id)?;
     migrate(s, d, r, &mut meta)?;
     let source = room_text(r);
-    let threads = parse(&source);
-    let (values, changed) = thread_values(r, &source, &threads, &meta, &d.id);
+    let plain = plain(&d.path);
+    let threads = parse(&source, plain);
+    let (values, changed) = thread_values(r, &source, &threads, &meta, &d.id, plain);
     if !changed.is_empty() {
         r.edit(s, d, |_| changed)?;
     }
@@ -1115,6 +1235,7 @@ fn add_command(
             name: b.name.trim().into(),
             body: b.body.trim().into(),
         }],
+        plain(&d.path),
     )?;
     let marker = utf16(&source, at) + encoded[..marker - at].encode_utf16().count() as u32;
     let at = utf16(&source, at);
@@ -1251,10 +1372,13 @@ pub(super) fn edit_payload(
                 )
             })
             .collect::<Vec<_>>();
-        if !valid_candidate(&source, &candidate, &expected) {
-            return Err(bad(
-                "This conversation moved into a Markdown block. Move it outside that block before replying.",
-            ));
+        let plain = plain(&d.path);
+        if !valid_candidate(&source, &candidate, &expected, plain) {
+            return Err(bad(if plain {
+                "This conversation changed. Reload the document before replying."
+            } else {
+                "This conversation moved into a Markdown block. Move it outside that block before replying."
+            }));
         }
         insertion = Some((utf16(&source, threads[index].to), encoded));
         c["replies"]
@@ -1482,7 +1606,7 @@ mod tests {
     }
 
     fn remembered_thread(r: &Room, source: &str, id: &str) -> Value {
-        let threads = parse(source);
+        let threads = parse(source, false);
         let thread = &threads[0];
         let mut row = thread_value(r, source, &threads, thread, None, id);
         row["id"] = json!("remembered-thread");
@@ -1524,7 +1648,7 @@ mod tests {
             let mut r = room.lock().unwrap();
             let row = remembered_thread(&r, source, &d.id);
             s.commit_room(&d, &mut r, &[row]).unwrap();
-            let thread = &parse(source)[0];
+            let thread = &parse(source, false)[0];
             let raw = &source[thread.from..thread.to];
             delete_thread(&r, source, thread);
             let (_, threads, values) = load(&s, &d, &mut r).unwrap();
@@ -1589,7 +1713,7 @@ mod tests {
         let original = remembered_thread(&r, source, &d.id);
         s.commit_room(&d, &mut r, std::slice::from_ref(&original))
             .unwrap();
-        delete_thread(&r, source, &parse(source)[0]);
+        delete_thread(&r, source, &parse(source, false)[0]);
         let end = room_text(&r).encode_utf16().count() as u32;
         insert(
             &r,
@@ -1633,7 +1757,7 @@ mod tests {
         row["anchor"] =
             json!({"start":relative(&r,8,Assoc::After),"end":relative(&r,16,Assoc::Before)});
         s.commit_room(&d, &mut r, &[row]).unwrap();
-        let cut_to = parse(source)[0].to;
+        let cut_to = parse(source, false)[0].to;
         r.awareness
             .doc()
             .get_or_insert_text("content")
@@ -1712,13 +1836,13 @@ mod tests {
                 let end = original.encode_utf16().count() as u32;
                 insert(&r, end, &replacement);
             } else {
-                delete_thread(&r, original, &parse(original)[0]);
+                delete_thread(&r, original, &parse(original, false)[0]);
                 let end = room_text(&r).encode_utf16().count() as u32;
                 insert(&r, end, &format!("\n\n{replacement}"));
             }
             let source = room_text(&r);
-            let threads = parse(&source);
-            let (values, _) = thread_values(&r, &source, &threads, &meta, &d.id);
+            let threads = parse(&source, false);
+            let (values, _) = thread_values(&r, &source, &threads, &meta, &d.id, false);
             let new = values.last().unwrap();
             assert_ne!(
                 new["id"], "remembered-thread",
@@ -1755,7 +1879,7 @@ mod tests {
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
         let vector = r.awareness.doc().transact().state_vector();
-        let thread = &parse(source)[0];
+        let thread = &parse(source, false)[0];
         let raw = &source[thread.from..thread.to];
         for _ in 0..2 {
             let peer = Doc::with_options(Options {
@@ -1783,9 +1907,9 @@ mod tests {
                 .unwrap();
         }
         let source = room_text(&r);
-        let threads = parse(&source);
+        let threads = parse(&source, false);
         assert_eq!(threads.len(), 2);
-        let (values, _) = thread_values(&r, &source, &threads, &[row], &d.id);
+        let (values, _) = thread_values(&r, &source, &threads, &[row], &d.id, false);
         assert!(values.iter().all(|value| value["created"] == 0
             && value["resolved"] == false
             && value["id"] != "remembered-thread"));
@@ -1795,12 +1919,13 @@ mod tests {
     fn planned(source: &str, at: usize) -> String {
         let plan = root_record(
             source,
-            &parse(source),
+            &parse(source, false),
             at,
             &[MessageText {
                 name: "Ana".into(),
                 body: "A note".into(),
             }],
+            false,
         )
         .expect("complete Markdown supports a safe comment insertion");
         let mut result = source.to_string();
@@ -1825,7 +1950,7 @@ mod tests {
             ("Before `code` after.", 10),
         ] {
             let result = planned(source, at);
-            assert_eq!(parse(&result).len(), 1, "{source}");
+            assert_eq!(parse(&result, false).len(), 1, "{source}");
             assert!(same_visible_structure(&result, source), "{source}");
         }
     }
@@ -1835,7 +1960,7 @@ mod tests {
         let source = "A long paragraph that continues beyond the selected word.";
         let first = planned(source, 6);
         let second = planned(&first, 6);
-        let threads = parse(&second);
+        let threads = parse(&second, false);
         assert_eq!(threads.len(), 2);
         assert!(threads.iter().all(|thread| thread.messages.len() == 1));
         assert!(second.starts_with(source));
@@ -1890,7 +2015,7 @@ mod tests {
         migrate(&s, &d, &mut r, &mut meta).unwrap();
         let current = room_text(&r);
         assert!(same_visible_structure(&current, source));
-        let threads = parse(&current);
+        let threads = parse(&current, false);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].messages.len(), 2);
         assert_eq!(threads[0].messages[0].name, s.owner_name);
@@ -1967,7 +2092,7 @@ mod tests {
         fs::write(s.root.join(&d.path), source).unwrap();
         let room = s.room(&d).unwrap();
         let old = room.lock().unwrap();
-        let thread = &parse(source)[0];
+        let thread = &parse(source, false)[0];
         let row = json!({"id":"stable-thread", "source":relative(&old,utf16(source,thread.from),Assoc::After),
             "name":"Ana","body":"note", "quote":"Selected", "anchor":{"start":relative(&old,0,Assoc::After),"end":relative(&old,8,Assoc::Before)},
             "created":42,"resolved":true,"replies":[{"name":"Alex","body":"reply","created":43}]});
@@ -1980,7 +2105,7 @@ mod tests {
                 ..Options::default()
             });
             apply_text(&fresh, "", &chosen);
-            let rows = rebuild_metadata(&old, &fresh, &chosen, std::slice::from_ref(&row));
+            let rows = rebuild_metadata(&old, &fresh, &chosen, std::slice::from_ref(&row), false);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0]["id"], "stable-thread");
             assert_eq!(rows[0]["created"], 42);
@@ -1996,7 +2121,7 @@ mod tests {
             );
             assert_eq!(
                 doc_offset(&fresh, &rows[0]["source"]),
-                Some(utf16(&chosen, parse(&chosen)[0].from))
+                Some(utf16(&chosen, parse(&chosen, false)[0].from))
             );
         }
         let chosen = format!("{source}\n\n{source}");
@@ -2006,7 +2131,7 @@ mod tests {
         });
         apply_text(&fresh, "", &chosen);
         assert!(
-            rebuild_metadata(&old, &fresh, &chosen, std::slice::from_ref(&row)).is_empty(),
+            rebuild_metadata(&old, &fresh, &chosen, std::slice::from_ref(&row), false).is_empty(),
             "ambiguous identities stay only in the maintenance archive"
         );
         assert!(
@@ -2014,7 +2139,8 @@ mod tests {
                 &old,
                 &fresh,
                 "Selected passage continues.",
-                std::slice::from_ref(&row)
+                std::slice::from_ref(&row),
+                false
             )
             .is_empty(),
             "deleted threads must not reappear through legacy migration"
@@ -2026,7 +2152,10 @@ mod tests {
         let cases: Vec<Value> =
             serde_json::from_str(include_str!("../test/fixtures/file-comments.json")).unwrap();
         for case in cases {
-            let threads = parse(case["source"].as_str().unwrap());
+            let threads = parse(
+                case["source"].as_str().unwrap(),
+                case["path"].as_str().is_some_and(plain),
+            );
             let actual = json!(
                 threads
                     .iter()
@@ -2040,12 +2169,86 @@ mod tests {
             assert_eq!(actual, case["threads"], "{}", case["name"]);
         }
     }
+    // The editor tests check that each expected source shows the same lines
+    // as the original in its format.
+    #[test]
+    fn new_comment_placement_matches_the_editor_fixtures() {
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../test/fixtures/file-comments.json")).unwrap();
+        for case in cases.iter().filter(|case| case["comment"].is_object()) {
+            let source = case["source"].as_str().unwrap();
+            let plain = case["path"].as_str().is_some_and(plain);
+            let after = case["comment"]["after"].as_str().unwrap();
+            let at = source.find(after).unwrap() + after.len();
+            let threads = parse(source, plain);
+            let plan = root_record(
+                source,
+                &threads,
+                at,
+                &[MessageText {
+                    name: "ana".into(),
+                    body: "A note".into(),
+                }],
+                plain,
+            )
+            .unwrap_or_else(|error| panic!("{}: {}", case["name"], error.1));
+            let mut result = source.to_string();
+            result.insert_str(plan.at, &plan.encoded);
+            assert_eq!(result, case["comment"]["expected"], "{}", case["name"]);
+            assert_eq!(
+                parse(&result, plain).len(),
+                threads.len() + 1,
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn plain_text_comments_never_fail_join_another_conversation_or_change_the_text() {
+        let message = [MessageText {
+            name: "ana".into(),
+            body: "A note".into(),
+        }];
+        for source in [
+            "",
+            "  \n\n",
+            "Buy milk\nBuy eggs\n",
+            "Buy milk[[comment(alex): a]]  \nNext",
+            "Buy[[comment(alex): a]] milk\n[[comment(ben): b]]\n\n[[comment(cy): c]]\nTail\\",
+            "\\\n[[comment(alex): a]]\n\\\\\\\n\\",
+            "`code` [[comment(alex): a]]\n    indented\n```\nunclosed <span title=\"x",
+            "[[comment(alex): a]]",
+            "Text [[comment(alex): a]] \\",
+            "Café 😀\n\n[[comment(alex): a]]\n[[comment(ben): b]]",
+        ] {
+            let threads = parse(source, true);
+            for at in (0..=source.len()).filter(|&at| source.is_char_boundary(at)) {
+                if threads.iter().any(|t| t.from < at && at < t.to) {
+                    continue;
+                }
+                // root_record checks that every conversation survives intact.
+                let plan = root_record(source, &threads, at, &message, true)
+                    .unwrap_or_else(|error| panic!("{source:?} at {at}: {}", error.1));
+                let mut result = source.to_string();
+                result.insert_str(plan.at, &plan.encoded);
+                // Only a record that must avoid a backslash takes its own line.
+                if !plan.encoded.starts_with('\n') || plan.encoded.starts_with("\n\n") {
+                    assert_eq!(
+                        reading(&result, true),
+                        reading(source, true),
+                        "{source:?} at {at}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn comment_serialization_cannot_escape_its_record_or_grant_media_access() {
         let name = "Ana) ] \\";
         let body = "Line one\n]] [[comment(forged): injected]]\n![private](../private.png)\n<script>bad()</script>";
         let encoded = record(name, body);
-        let threads = parse(&encoded);
+        let threads = parse(&encoded, false);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].messages.len(), 1);
         assert_eq!(threads[0].messages[0].name, name);
@@ -2103,7 +2306,7 @@ mod tests {
             ),
             ("No comments here.\n", "No comments here.\n"),
         ] {
-            assert_eq!(without_records(source), expected, "{source:?}");
+            assert_eq!(without_records(source, false), expected, "{source:?}");
         }
         // The editor's grammar cases: a copy renders as the source reads
         // without its records, up to the spaces a removal leaves.
@@ -2116,14 +2319,25 @@ mod tests {
             serde_json::from_str(include_str!("../test/fixtures/file-comments.json")).unwrap();
         for case in cases {
             let source = case["source"].as_str().unwrap();
-            let copy = without_records(source);
-            assert!(parse(&copy).is_empty(), "{}", case["name"]);
-            assert_eq!(
-                rendered(&copy),
-                rendered(&reading_source(source)),
-                "{}",
-                case["name"]
-            );
+            let plain = case["path"].as_str().is_some_and(plain);
+            let copy = without_records(source, plain);
+            assert!(parse(&copy, plain).is_empty(), "{}", case["name"]);
+            if plain {
+                let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert_eq!(
+                    words(&copy),
+                    words(&reading(source, true)),
+                    "{}",
+                    case["name"]
+                );
+            } else {
+                assert_eq!(
+                    rendered(&copy),
+                    rendered(&reading_source(source)),
+                    "{}",
+                    case["name"]
+                );
+            }
         }
     }
 }

@@ -445,6 +445,46 @@ test("comments on literal code, links, tables and media are inserted outside the
   }
 });
 
+test("plain text comments end their line, ignore Markdown syntax and keep replies and separate conversations", async () => {
+  const path = join(dir, "docs/list.txt");
+  const d = await create("list.txt", "Buy milk\nBuy eggs\n```\nunclosed fence");
+  const comment = async (name, body, quote) => {
+    const snapshot = await request(`/api/docs/${d.id}`),
+      from = snapshot.content.indexOf(quote);
+    return request(`/api/docs/${d.id}/comments`, "POST", {
+      name,
+      body,
+      quote,
+      anchor: anchor(snapshot, from, from + quote.length),
+    });
+  };
+  const first = await comment("alex", "Which brand?", "milk");
+  assert.equal(
+    await readFile(path, "utf8"),
+    "Buy milk[[comment(alex): Which brand?]]\nBuy eggs\n```\nunclosed fence",
+    "no line is added and Markdown placement rules do not apply",
+  );
+  await comment("ana", "Close it?", "fence");
+  await comment("ben", "Separate", "milk");
+  await request(`/api/docs/${d.id}/comments/${first.id}`, "PATCH", {
+    name: "ana",
+    body: "Oat",
+  });
+  assert.equal(
+    await readFile(path, "utf8"),
+    "Buy milk[[comment(alex): Which brand?]]\n[[comment(ana): Oat]]\n\n[[comment(ben): Separate]]\nBuy eggs\n```\nunclosed fence[[comment(ana): Close it?]]",
+  );
+  const { comments } = await request(`/api/docs/${d.id}/comments`);
+  assert.deepEqual(
+    comments.map((c) => [c.quote, c.body, c.replies.map((r) => r.body)]),
+    [
+      ["milk", "Which brand?", ["Oat"]],
+      ["milk", "Separate", []],
+      ["fence", "Close it?", []],
+    ],
+  );
+});
+
 test("a comment queued during a desktop save remains durable and never imports partial text", async () => {
   const d = await create("writer.md", "Original passage."),
     peer = await connect(d.id),

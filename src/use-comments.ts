@@ -10,6 +10,7 @@ export function useComments(
   endpoint: (suffix: string) => string,
   ready: boolean,
   source: string | Y.Text | undefined,
+  plain = false,
 ) {
   const [comments, setComments] = useState<Comment[]>([]);
   const alive = useRef(false);
@@ -46,7 +47,7 @@ export function useComments(
       timer = undefined;
       if (source === undefined) return;
       const text = typeof source === "string" ? source : source.toString();
-      const key = sourceComments(text)
+      const key = sourceComments(text, plain)
         .map((t) => text.slice(t.from, t.to))
         .join("\n\n");
       const changed = sourceKey.current !== null && sourceKey.current !== key;
@@ -64,7 +65,7 @@ export function useComments(
       clearTimeout(timer);
       if (source && typeof source !== "string") source.unobserve(changed);
     };
-  }, [source, refresh]);
+  }, [source, plain, refresh]);
   useEffect(() => {
     alive.current = true;
     return () => {
