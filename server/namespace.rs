@@ -2905,15 +2905,16 @@ impl Store {
     /// is there. The pass before the delete placed every document, but a
     /// desktop application may move or remove files until the rename, so the
     /// moved folder decides, as a pass would: a document whose own recorded
-    /// file is inside goes wherever its row was, and one recorded below the
-    /// folder goes when its name still holds its own file or one no other
-    /// document records. A document whose file left the folder first stays
-    /// active for passes to place or retire. A name that cannot be read
-    /// still goes with its folder. Returns each document with the path it
-    /// had and where its file is in the trash.
+    /// file is inside goes wherever its row was, its media approvals
+    /// reanchored as for any move when that file changed folders, and one
+    /// recorded below the folder goes when its name still holds its own
+    /// file or one no other document records. A document whose file left
+    /// the folder first stays active for passes to place or retire. A name
+    /// that cannot be read still goes with its folder. Returns each document
+    /// with the path it had and where its file is in the trash.
     fn carried_documents(
         &self,
-        tx: &Connection,
+        tx: &rusqlite::Transaction<'_>,
         original: &str,
         location: &str,
     ) -> Result<Vec<(Document, String, String)>> {
@@ -2942,11 +2943,14 @@ impl Store {
                 .filter(|identity| owners[identity] == 1)
                 .and_then(|identity| inside.get(identity))
             {
-                carried.push((
-                    document,
-                    format!("{original}/{relative}"),
-                    format!("{location}/{relative}"),
-                ));
+                let path = format!("{original}/{relative}");
+                // A file that changed folders before the delete carried it
+                // moved as a pass would place it: its approvals never lend
+                // the folder it reached another image with their spelling.
+                if Path::new(&path).parent() != Path::new(&document.path).parent() {
+                    self.reanchor_moved_media(tx, &document, &path)?;
+                }
+                carried.push((document, path, format!("{location}/{relative}")));
                 continue;
             }
             let Some(trashed) = rebase(&document.path, original, location) else {

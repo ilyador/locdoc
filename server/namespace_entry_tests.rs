@@ -1213,3 +1213,52 @@ fn a_document_moved_into_a_folder_while_it_is_deleted_goes_and_returns_with_it()
     );
     assert_eq!(s.doc(&busy_page.id).unwrap().path, "Drafts/busy.md");
 }
+
+#[test]
+fn a_document_carried_into_a_deleted_folder_never_approves_an_image_there() {
+    use std::time::Duration;
+    let (_directory, s) = store();
+    let png = BASE64
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=")
+        .unwrap();
+    let busy_page = s.create_document("Drafts/busy.md").unwrap();
+    // A shared page beside an approved image, and a private image with the
+    // same name in the folder being deleted.
+    let page = s.create_document("page.md").unwrap();
+    share(&s, &page.id);
+    fs::write(s.root.join("photo.png"), &png).unwrap();
+    fs::write(s.root.join("Drafts/photo.png"), &png).unwrap();
+    fs::write(s.root.join("page.md"), "![photo](photo.png)\n").unwrap();
+    let room = s.room(&page).unwrap();
+    assert!(s.persist(&page, &mut room.lock().unwrap()).unwrap());
+    drop(room);
+    let visitor = |s: &Store| {
+        let request = Media {
+            path: "photo.png".into(),
+            token: Some("old-link".into()),
+        };
+        media_file(s, &page.id, &request, &HeaderMap::new()).map_err(|error| error.0)
+    };
+    assert!(visitor(&s).is_ok());
+    let room = s.room(&busy_page).unwrap();
+    let busy = room.lock().unwrap();
+    let worker = {
+        let s = s.clone();
+        std::thread::spawn(move || s.trash_folder("Drafts"))
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!worker.is_finished(), "the delete waits for the room");
+    // A desktop application moves the page into the folder meanwhile.
+    fs::rename(s.root.join("page.md"), s.root.join("Drafts/page.md")).unwrap();
+    drop(busy);
+    let trash = worker.join().unwrap().unwrap();
+    assert_eq!(active(&s, &page.id), 2);
+    s.restore_trash(&trash).unwrap();
+    let back = s.doc(&page.id).unwrap();
+    assert_eq!(back.path, "Drafts/page.md");
+    // Its approval named the image it left behind, never the private one
+    // its spelling names from the folder it was carried into.
+    assert_eq!(visitor(&s).map(|_| ()), Err(StatusCode::FORBIDDEN));
+    assert!(s.attachment_allowed(&back, &s.root.join("photo.png")));
+    assert!(!s.attachment_allowed(&back, &s.root.join("Drafts/photo.png")));
+}
