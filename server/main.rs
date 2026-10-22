@@ -526,40 +526,16 @@ impl Store {
             .collect())
     }
     fn attachment_allowed(&self, d: &Document, path: &Path) -> bool {
-        let db = self.db.lock().unwrap();
-        let grant = db
-            .query_row(
-                "SELECT 1 FROM grants WHERE doc=? AND path=?",
-                params![d.id, path.to_string_lossy()],
-                |r| r.get::<_, i64>(0),
-            )
-            .is_ok();
-        let rel = path
-            .strip_prefix(&self.root)
-            .unwrap_or(path)
-            .to_string_lossy();
-        let uploaded = db
-            .query_row(
-                "SELECT 1 FROM assets WHERE doc=? AND path=?",
-                params![d.id, rel],
-                |r| r.get::<_, i64>(0),
-            )
-            .is_ok();
-        if grant || uploaded {
-            return true;
+        self.approvals(d).approves(path)
+    }
+    /// The file still at the exact path a grant pinned, as long as that path
+    /// is its own name rather than a link to where it went.
+    fn pinned_identity(path: &str) -> Option<namespace::Identity> {
+        let path = Path::new(path);
+        if fs::canonicalize(path).ok()? != path {
+            return None;
         }
-        let references = db
-            .prepare("SELECT reference FROM trusted_references WHERE doc=?")
-            .and_then(|mut query| {
-                query
-                    .query_map([&d.id], |r| r.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-            })
-            .unwrap_or_default();
-        drop(db);
-        references
-            .iter()
-            .any(|reference| self.media_path(d, reference).is_ok_and(|p| p == path))
+        namespace::Identity::of(&fs::metadata(path).ok()?)
     }
 
     fn usage(&self, d: &Document, content: &str) -> usize {

@@ -412,26 +412,42 @@ impl super::Store {
         doc: &super::Document,
         path: &std::path::Path,
     ) -> bool {
-        if !self.attachment_allowed(doc, path) {
-            return false;
-        }
-        let references = self
-            .db
-            .lock()
-            .unwrap()
-            .prepare("SELECT reference FROM active_media WHERE doc=?")
-            .and_then(|mut query| {
-                query
-                    .query_map([&doc.id], |row| row.get::<_, String>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()
-            })
-            .unwrap_or_default();
-        references.iter().any(|reference| {
-            self.media_path(doc, reference)
-                .is_ok_and(|candidate| candidate == path)
-        })
+        let approvals = self.approvals(doc);
+        approvals.approves(path) && approvals.active(path)
     }
 
+    /// A document's media approvals, read once to check one or many files.
+    pub(super) fn approvals<'a>(&'a self, doc: &'a super::Document) -> Approvals<'a> {
+        let db = self.db.lock().unwrap();
+        // Storage errors approve nothing.
+        let rows = |sql: &str| {
+            db.prepare(sql)
+                .and_then(|mut query| {
+                    query
+                        .query_map([&doc.id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                        })?
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                })
+                .unwrap_or_default()
+        };
+        let grants = rows("SELECT path,identity FROM grants WHERE doc=?");
+        let uploads = rows("SELECT path,NULL FROM assets WHERE doc=?");
+        let trusted = rows("SELECT reference,NULL FROM trusted_references WHERE doc=?");
+        let active = rows("SELECT reference,NULL FROM active_media WHERE doc=?");
+        drop(db);
+        let names = |rows: Vec<(String, Option<String>)>| rows.into_iter().map(|row| row.0);
+        Approvals {
+            store: self,
+            doc,
+            grants,
+            uploads: names(uploads).collect(),
+            trusted: names(trusted).collect(),
+            active: names(active).collect(),
+            trusted_files: std::cell::OnceCell::new(),
+            active_files: std::cell::OnceCell::new(),
+        }
+    }
     pub(super) fn seed_active_media(&self, doc: &super::Document) -> Result<()> {
         let initialized: bool = self.db.lock().unwrap().query_row(
             "SELECT media_initialized FROM docs WHERE id=?",
@@ -639,6 +655,67 @@ impl super::Store {
             )?;
         }
         result
+    }
+}
+
+/// What makes a document's local media visible to link visitors. A file is
+/// approved by a grant at its exact path, by a grant whose pinned file left
+/// that path for this one, by an upload, or by a trusted reference naming it
+/// from the document's folder. It is active while a current approved
+/// reference names it. Visitors' requests only read these approvals.
+pub(super) struct Approvals<'a> {
+    store: &'a super::Store,
+    doc: &'a super::Document,
+    /// Exact canonical paths, with the identity of the file each pinned.
+    grants: Vec<(String, Option<String>)>,
+    uploads: std::collections::HashSet<String>,
+    trusted: Vec<String>,
+    active: Vec<String>,
+    trusted_files: std::cell::OnceCell<std::collections::HashSet<std::path::PathBuf>>,
+    active_files: std::cell::OnceCell<std::collections::HashSet<std::path::PathBuf>>,
+}
+impl Approvals<'_> {
+    fn resolved(&self, references: &[String]) -> std::collections::HashSet<std::path::PathBuf> {
+        references
+            .iter()
+            .filter_map(|reference| self.store.media_path(self.doc, reference).ok())
+            .collect()
+    }
+    /// Whether the document may serve this canonical file to link visitors.
+    pub(super) fn approves(&self, path: &std::path::Path) -> bool {
+        let exact = path.to_string_lossy();
+        if self.grants.iter().any(|(pinned, _)| *pinned == exact) {
+            return true;
+        }
+        let relative = path
+            .strip_prefix(&self.store.root)
+            .unwrap_or(path)
+            .to_string_lossy();
+        if self.uploads.contains(relative.as_ref()) {
+            return true;
+        }
+        // A grant follows its file, never a second name of a file still at
+        // its pinned path.
+        if self.grants.iter().any(|(_, identity)| identity.is_some())
+            && let Some(identity) = std::fs::metadata(path)
+                .ok()
+                .and_then(|metadata| super::namespace::Identity::of(&metadata))
+            && self.grants.iter().any(|(pinned, recorded)| {
+                recorded.as_deref() == Some(identity.as_str())
+                    && super::Store::pinned_identity(pinned).as_ref() != Some(&identity)
+            })
+        {
+            return true;
+        }
+        self.trusted_files
+            .get_or_init(|| self.resolved(&self.trusted))
+            .contains(path)
+    }
+    /// Whether a current approved reference of the document names this file.
+    pub(super) fn active(&self, path: &std::path::Path) -> bool {
+        self.active_files
+            .get_or_init(|| self.resolved(&self.active))
+            .contains(path)
     }
 }
 

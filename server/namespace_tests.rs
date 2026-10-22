@@ -2124,6 +2124,96 @@ fn a_symlink_at_the_destination_never_carries_an_image_approval_along() {
     assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::FORBIDDEN);
 }
 
+/// The page's (grants, trusted references) rows.
+fn approval_rows(s: &Store, page: &Document) -> (i64, i64) {
+    let db = s.db.lock().unwrap();
+    let count = |table: &str| {
+        db.query_row(
+            &format!("SELECT count(*) FROM {table} WHERE doc=?"),
+            [&page.id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    (count("grants"), count("trusted_references"))
+}
+
+#[test]
+fn a_pinned_grant_follows_its_image_when_the_image_later_moves_after_its_page() {
+    let (_directory, s, page, upload) = album();
+    s.create_folder("Trip").unwrap();
+    // A Locdoc move leaves the image behind and pins its approval there.
+    s.rename_document(&page.id, "Trip/page.md").unwrap();
+    assert_eq!(approval_rows(&s, &page), (1, 0));
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::NOT_FOUND);
+    // Later the image follows its page. The grant stayed pinned to the
+    // old path, so the owner saw the image and link visitors got 403.
+    fs::rename(
+        s.root.join("Album/photo.png"),
+        s.root.join("Trip/photo.png"),
+    )
+    .unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    // A pass makes the approval relative again, so it moves with the page.
+    s.discover_file_moves().unwrap();
+    assert_eq!(approval_rows(&s, &page), (0, 1));
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    fs::rename(s.root.join("Trip"), s.root.join("Final")).unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(s.doc(&page.id).unwrap().path, "Final/page.md");
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    assert_eq!(guest_media(&s, &page, &upload), StatusCode::OK);
+    // A file that later takes the old pinned name stays private.
+    let png = BASE64.decode(PNG).unwrap();
+    fs::write(s.root.join("Album/photo.png"), &png).unwrap();
+    let moved = s.doc(&page.id).unwrap();
+    assert!(!s.attachment_allowed(&moved, &s.root.join("Album/photo.png")));
+}
+
+#[test]
+fn a_pinned_grant_never_follows_a_second_name_of_an_image_still_in_place() {
+    let (_directory, s, page, _upload) = album();
+    s.create_folder("Trip").unwrap();
+    s.rename_document(&page.id, "Trip/page.md").unwrap();
+    fs::hard_link(
+        s.root.join("Album/photo.png"),
+        s.root.join("Trip/photo.png"),
+    )
+    .unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::FORBIDDEN);
+    s.discover_file_moves().unwrap();
+    assert_eq!(approval_rows(&s, &page), (1, 0));
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::FORBIDDEN);
+    // A symlink left at the old name is not the image staying there.
+    fs::remove_file(s.root.join("Album/photo.png")).unwrap();
+    std::os::unix::fs::symlink("../Trip/photo.png", s.root.join("Album/photo.png")).unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    s.discover_file_moves().unwrap();
+    assert_eq!(approval_rows(&s, &page), (0, 1));
+}
+
+#[test]
+fn a_grant_pinned_by_an_older_version_follows_once_a_pass_has_seen_its_image() {
+    let (_directory, s, page, _upload) = album();
+    s.create_folder("Trip").unwrap();
+    s.rename_document(&page.id, "Trip/page.md").unwrap();
+    // As in a database written before grants recorded their files.
+    s.db.lock()
+        .unwrap()
+        .execute_batch("ALTER TABLE grants DROP COLUMN identity")
+        .unwrap();
+    let s = reopen(s);
+    assert_eq!(approval_rows(&s, &page), (1, 0));
+    fs::rename(
+        s.root.join("Album/photo.png"),
+        s.root.join("Trip/photo.png"),
+    )
+    .unwrap();
+    s.discover_file_moves().unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    assert_eq!(approval_rows(&s, &page), (0, 1));
+}
+
 /// A walk hook under which the root's Locked folder cannot be listed.
 fn locked(s: &Store) -> impl Fn(&Path) -> std::io::Result<()> + Clone + 'static {
     let locked = s.root.join("Locked");

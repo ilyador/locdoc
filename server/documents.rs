@@ -269,6 +269,17 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
             [],
         )?;
     }
+    // The file a grant pinned at its exact path, so the grant follows that
+    // file once it moves where the document names it. Rows from earlier
+    // versions have none until a pass sees their file still in place.
+    let has_grant_identity = db
+        .prepare("PRAGMA table_info(grants)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(std::result::Result::ok)
+        .any(|column| column == "identity");
+    if !has_grant_identity {
+        db.execute("ALTER TABLE grants ADD COLUMN identity TEXT", [])?;
+    }
     let rows = db
         .prepare("SELECT id,path FROM docs WHERE active=1 ORDER BY path")?
         .query_map([], |row| {
