@@ -3,6 +3,7 @@ import { Eye, ImageBroken, VideoCamera } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import { isVideo, mediaReasons, mediaUrl } from "./markdown-widgets";
 import type { Document, HiddenMedia } from "./model";
+import { PathText } from "./ui";
 import { useRemote } from "./use-remote";
 
 type Refusal = { path: string; reason: string };
@@ -188,7 +189,7 @@ export function HiddenMediaSection({ doc }: { doc: Document }) {
               <Preview doc={doc} item={item} />
               <span className="hidden-media-text">
                 <span className="hidden-media-path" title={item.path}>
-                  {item.path}
+                  <PathText path={item.path} separator="/" />
                 </span>
                 <span
                   className={`hidden-media-reason ${refusal ? "is-refused" : ""}`}

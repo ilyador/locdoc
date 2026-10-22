@@ -102,7 +102,7 @@ export function LinkPreview({
           }
         }}
       >
-        {data?.title || target.label || target.url}
+        <span dir="auto">{data?.title || target.label || target.url}</span>
         <ArrowUpRight size={17} />
       </a>
       {result.loading ? (
@@ -110,7 +110,9 @@ export function LinkPreview({
           Loading preview…
         </p>
       ) : data?.description ? (
-        <p className="link-preview-description">{data.description}</p>
+        <p className="link-preview-description" dir="auto">
+          {data.description}
+        </p>
       ) : result.error ? (
         <p className="link-preview-description">
           Preview unavailable. Open the link above.

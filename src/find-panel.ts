@@ -331,8 +331,10 @@ class FindPanel implements Panel {
       if (replaceExpanded) this.replaceField.focus();
     };
     const field = element("div", "find-field");
+    // Hebrew searches read right to left as they are typed.
     this.searchField = element("input", "find-input", {
       type: "text",
+      dir: "auto",
       placeholder: "Find",
       "aria-label": "Find",
       "aria-describedby": `${id}-count`,
@@ -399,6 +401,7 @@ class FindPanel implements Panel {
     const replaceBox = element("div", "find-field");
     this.replaceField = element("input", "find-input", {
       type: "text",
+      dir: "auto",
       placeholder: "Replace",
       "aria-label": "Replace with",
       autocomplete: "off",

@@ -7,6 +7,7 @@ import {
   type SetStateAction,
 } from "react";
 import { api, send } from "./api";
+import { isolateName } from "./bidi";
 import {
   documentExtension,
   documentFormat,
@@ -247,8 +248,9 @@ export function useFileActions({
     });
   const refresh = () => void loadTree();
   const failure = (error: unknown) => (error as Error).message;
+  // Names inside messages keep their own direction (bidi.ts).
   const folderName = (folder: string) =>
-    folder ? baseName(folder) : ROOT_NAME;
+    folder ? isolateName(baseName(folder)) : ROOT_NAME;
 
   const checkEdit = (current: FileEdit) =>
     checkName(current.value, {
@@ -401,7 +403,7 @@ export function useFileActions({
         await relocate(entry, path);
         settle(null);
         focusPath(path, trigger === "enter");
-        announce(`Renamed to ${check.name}.`);
+        announce(`Renamed to ${isolateName(check.name)}.`);
         return;
       }
       const created = await api<{ id?: string }>(
@@ -430,7 +432,7 @@ export function useFileActions({
       refresh();
       if (current.kind === "folder") {
         focusPath(path, trigger === "enter");
-        announce(`Created folder ${check.name}.`);
+        announce(`Created folder ${isolateName(check.name)}.`);
         return;
       }
       focusPath(path);
@@ -443,7 +445,7 @@ export function useFileActions({
           // The preferred extension is a convenience only.
         }
       }
-      announce(`Created ${check.name}.`);
+      announce(`Created ${isolateName(check.name)}.`);
       if (!id) return;
       editorFocus.current = id;
       let moved = false;
@@ -453,7 +455,7 @@ export function useFileActions({
         showToast({
           seq,
           tone: "error",
-          message: `${check.name} is ready in the sidebar. Unsaved changes here could not be stored, so this document stays open.`,
+          message: `${isolateName(check.name)} is ready in the sidebar. Unsaved changes here could not be stored, so this document stays open.`,
         });
       }
       if (!moved) {
@@ -469,6 +471,7 @@ export function useFileActions({
     if (overlaps(busyRef.current, entry.path)) return;
     const seq = ++actionSeq.current;
     const name = baseName(entry.path);
+    const shown = isolateName(name);
     if (entry.kind === "folder" && within(folder, entry.path)) {
       showToast({
         seq,
@@ -482,7 +485,7 @@ export function useFileActions({
       showToast({
         seq,
         tone: "error",
-        message: `${folderName(folder)} already has an item named ${name}.`,
+        message: `${folderName(folder)} already has an item named ${shown}.`,
       });
       return;
     }
@@ -491,12 +494,12 @@ export function useFileActions({
       await relocate(entry, to);
       if (folder) expand([...ancestors(folder), folder]);
       focusPath(to, !!origin.focus);
-      announce(`Moved ${name} to ${folderName(folder)}.`);
+      announce(`Moved ${shown} to ${folderName(folder)}.`);
     } catch (error) {
       showToast({
         seq,
         tone: "error",
-        message: `Could not move ${name}. ${failure(error)}`,
+        message: `Could not move ${shown}. ${failure(error)}`,
       });
     }
   };
@@ -504,7 +507,7 @@ export function useFileActions({
   const remove = async (entry: Entry, origin: Origin = {}) => {
     if (!owner || overlaps(busyRef.current, entry.path)) return;
     const seq = ++actionSeq.current;
-    const name = baseName(entry.path);
+    const name = isolateName(baseName(entry.path));
     try {
       const result = await track(entry.path, () =>
         entry.kind === "file"
@@ -574,7 +577,7 @@ export function useFileActions({
       const done: FileToast = {
         seq,
         tone: "done",
-        message: `Restored ${baseName(path)}.`,
+        message: `Restored ${isolateName(baseName(path))}.`,
       };
       // Undo replaces its own toast; anything newer keeps its place.
       if (undoing()) setToast(done);
@@ -587,7 +590,7 @@ export function useFileActions({
         showToast({
           seq,
           tone: "error",
-          message: `Could not restore ${baseName(item.path)}. ${failure(error)}`,
+          message: `Could not restore ${isolateName(baseName(item.path))}. ${failure(error)}`,
         });
       return { ok: false, error: failure(error) };
     } finally {
@@ -638,12 +641,12 @@ export function useFileActions({
       lastDeletion.current = null;
       refresh();
       focusPath(created.path, !!origin.focus);
-      announce(`Duplicated as ${baseName(created.path)}.`);
+      announce(`Duplicated as ${isolateName(baseName(created.path))}.`);
     } catch (error) {
       showToast({
         seq,
         tone: "error",
-        message: `Could not duplicate ${baseName(entry.path)}. ${failure(error)}`,
+        message: `Could not duplicate ${isolateName(baseName(entry.path))}. ${failure(error)}`,
       });
     }
   };

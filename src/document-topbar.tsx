@@ -7,7 +7,7 @@ import {
   SidebarSimple,
 } from "@phosphor-icons/react";
 import { documentExtension } from "./document-format";
-import { Avatar, IconButton } from "./ui";
+import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document } from "./model";
 
 export function DocumentTopbar({
@@ -48,13 +48,15 @@ export function DocumentTopbar({
         {path?.includes("/") && (
           <>
             <span className="crumb-folder">
-              {path.split("/").slice(0, -1).join(" / ")}
+              <PathText path={path.split("/").slice(0, -1).join("/")} />
             </span>
             <CaretRight size={12} />
           </>
         )}
         <span className="crumb-current doc-label">
-          <span className="doc-title">{filename}</span>{" "}
+          <span className="doc-title" dir="auto">
+            {filename}
+          </span>{" "}
           {path && (
             <span className="doc-extension">{documentExtension(path)}</span>
           )}

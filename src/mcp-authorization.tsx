@@ -58,8 +58,11 @@ export function McpAuthorization({ request }: { request: string }) {
         {preview.data && (
           <>
             <p>
-              <strong>{preview.data.clientName}</strong> is requesting access to
-              Locdoc.
+              {/* The app chose this name: its text cannot reorder the rest. */}
+              <strong>
+                <bdi>{preview.data.clientName}</bdi>
+              </strong>{" "}
+              is requesting access to Locdoc.
               <span className="field-help connection-app-name">
                 Name supplied by the requesting app.
               </span>
@@ -178,7 +181,9 @@ export function McpConnections({ publicUrl }: { publicUrl: string }) {
         .map((connection) => (
           <div className="mcp-connection" key={connection.id}>
             <span>
-              <strong>{connection.clientName}</strong>
+              <strong>
+                <bdi>{connection.clientName}</bdi>
+              </strong>
               <small>
                 {connection.scopes
                   .map((scope) => scope.replace("locdoc:", ""))

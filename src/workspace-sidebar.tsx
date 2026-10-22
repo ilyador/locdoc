@@ -11,7 +11,7 @@ import {
 import { DocumentSidebar } from "./document-sidebar";
 import { SidebarResize } from "./sidebar-resize";
 import { documentExtension } from "./document-format";
-import { Avatar, IconButton } from "./ui";
+import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document, type Entry } from "./model";
 import type { Workspace } from "./workspace";
 
@@ -88,6 +88,7 @@ export function WorkspaceSidebar({
             <input
               ref={searchInput}
               placeholder="Find a document…"
+              dir="auto"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(event) => {
@@ -154,7 +155,9 @@ export function WorkspaceSidebar({
         <div className="shared-sidebar">
           <FileText />
           <strong className="doc-label">
-            <span className="doc-title">{filename}</span>{" "}
+            <span className="doc-title" dir="auto">
+              {filename}
+            </span>{" "}
             <span className="doc-extension">{documentExtension(doc.path)}</span>
           </strong>
           <p>
@@ -179,13 +182,15 @@ export function WorkspaceSidebar({
         </div>
         {config?.owner && (
           <span className="root-path" title={config.root}>
-            {config.root}
+            <PathText path={config.root} separator="/" />
           </span>
         )}
         <button className="profile" onClick={onSettings}>
           <Avatar name={name} color="#39795e" />
           <span>
-            <strong>{name}</strong>
+            <strong>
+              <bdi>{name}</bdi>
+            </strong>
             <small>
               {config?.owner ? "Workspace owner" : "Guest collaborator"}
             </small>

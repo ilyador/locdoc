@@ -19,6 +19,7 @@ import { syntaxTree } from "@codemirror/language";
 import type { Anchor } from "./editor-types";
 import { sourceComments } from "./comment-syntax";
 import { mediaPreview, wholeLineImage } from "./markdown-media";
+import { textDirection, type TextDirection } from "./bidi";
 
 // Plain text documents read their records without Markdown rules.
 export const plainCommentRecords = Facet.define<boolean, boolean>({
@@ -322,7 +323,12 @@ export function resolveCommentAnchor(
 
 // Split the displayed text at its anchor, without inserting Markdown newlines.
 // A rendered table is indivisible, so conversations belong after its preview.
-function commentPosition(state: EditorState, offset: number) {
+// Its marker sits at the end edge of the table or figure, which is the left
+// edge when that block reads right to left.
+function commentPosition(
+  state: EditorState,
+  offset: number,
+): { pos: number; block: boolean; direction?: TextDirection | null } {
   const pos = Math.max(0, Math.min(state.doc.length, offset));
   for (
     let node = syntaxTree(state).resolveInner(pos, -1);
@@ -330,11 +336,16 @@ function commentPosition(state: EditorState, offset: number) {
     node = node.parent!
   ) {
     if (node.name === "Table")
-      return { pos: state.doc.lineAt(node.to).to, block: true };
+      return {
+        pos: state.doc.lineAt(node.to).to,
+        block: true,
+        direction: textDirection(state.sliceDoc(node.from, node.to)),
+      };
   }
   const line = state.doc.lineAt(pos);
-  if (state.facet(mediaPreview) && wholeLineImage(line.text))
-    return { pos: line.to, block: true };
+  const image = state.facet(mediaPreview) && wholeLineImage(line.text);
+  if (image)
+    return { pos: line.to, block: true, direction: textDirection(image.alt) };
   return { pos, block: false };
 }
 
@@ -344,6 +355,7 @@ class CommentMarker extends WidgetType {
     readonly active: boolean,
     readonly open: (id: string) => void,
     readonly block: boolean,
+    readonly direction: TextDirection | null = null,
   ) {
     super();
   }
@@ -351,7 +363,8 @@ class CommentMarker extends WidgetType {
     return (
       this.active === other.active &&
       this.id === other.id &&
-      this.block === other.block
+      this.block === other.block &&
+      this.direction === other.direction
     );
   }
   toDOM() {
@@ -383,6 +396,7 @@ class CommentMarker extends WidgetType {
       const wrap = document.createElement("div");
       wrap.className = "comment-marker-block";
       wrap.contentEditable = "false";
+      if (this.direction) wrap.dir = this.direction;
       wrap.append(button);
       return wrap;
     }
@@ -452,6 +466,7 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
               item.id === layout.active,
               open,
               placement.block,
+              placement.direction,
             ),
           }).range(placement.pos),
         );

@@ -36,6 +36,8 @@ import { InlineName } from "./inline-name";
 import type { Entry } from "./model";
 import { sidebarTimestamp } from "./recent-documents";
 import { mac, shortcuts } from "./shortcuts";
+import { isolateName } from "./bidi";
+import { PathText } from "./ui";
 import type { SidebarView } from "./workspace";
 
 export type TreeRow =
@@ -317,7 +319,7 @@ export function FileTree({
         label: "Move to…",
         icon: ArrowElbowDownRight,
         disabled: busy,
-        title: `Move ${name} to`,
+        title: `Move ${isolateName(name)} to`,
         items: () => folderChoices(entry),
       },
       { kind: "separator" },
@@ -625,7 +627,9 @@ export function FileTree({
             )}
             <span className="doc-name">
               <span className="doc-label" id={labelId}>
-                <span className="doc-title">{documentTitle(e)}</span>{" "}
+                <span className="doc-title" dir="auto">
+                  {documentTitle(e)}
+                </span>{" "}
                 {!folder && (
                   <span className="doc-extension">
                     {documentExtension(e.path)}
@@ -633,7 +637,9 @@ export function FileTree({
                 )}
               </span>
               {!nested && parent && (
-                <small>{parent.replaceAll("/", " / ")}</small>
+                <small>
+                  <PathText path={parent} />
+                </small>
               )}
             </span>
             {!folder && (

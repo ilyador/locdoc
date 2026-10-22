@@ -1,0 +1,154 @@
+/* Hebrew faces paired with each Latin family. Every face covers only the
+   Hebrew block, its presentation forms and the sheqel sign, so Latin and
+   Cyrillic text keeps its own face, and a file loads only when a page shows
+   Hebrew in that family and weight. Hebrew has no italics: with font
+   synthesis off, emphasized Hebrew keeps its upright face. */
+
+/* IBM Plex Sans Hebrew: the interface, IBM Plex Sans documents, and installed
+   sans-serif, display and handwriting families. */
+@font-face {
+  font-family: "Locdoc Hebrew Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/ibm-plex-sans-hebrew/files/ibm-plex-sans-hebrew-hebrew-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url("@fontsource/ibm-plex-sans-hebrew/files/ibm-plex-sans-hebrew-hebrew-500-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/ibm-plex-sans-hebrew/files/ibm-plex-sans-hebrew-hebrew-600-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Sans";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("@fontsource/ibm-plex-sans-hebrew/files/ibm-plex-sans-hebrew-hebrew-700-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+
+/* Miriam Libre, the classic geometric Hebrew sans: DM Sans documents. */
+@font-face {
+  font-family: "Locdoc Hebrew Geometric";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/miriam-libre/files/miriam-libre-hebrew-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Geometric";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/miriam-libre/files/miriam-libre-hebrew-600-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Geometric";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("@fontsource/miriam-libre/files/miriam-libre-hebrew-700-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+
+/* Frank Ruhl Libre, the Hebrew book face: Lora, Georgia and installed serif
+   families. */
+@font-face {
+  font-family: "Locdoc Hebrew Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/frank-ruhl-libre/files/frank-ruhl-libre-hebrew-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/frank-ruhl-libre/files/frank-ruhl-libre-hebrew-600-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Serif";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("@fontsource/frank-ruhl-libre/files/frank-ruhl-libre-hebrew-700-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+
+/* Cascadia Mono, a coding monospace like JetBrains Mono: JetBrains Mono
+   documents, code, the system monospace and installed monospace families. */
+@font-face {
+  font-family: "Locdoc Hebrew Mono";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/cascadia-mono/files/cascadia-mono-hebrew-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Mono";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 600;
+  src: url("@fontsource/cascadia-mono/files/cascadia-mono-hebrew-600-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Mono";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("@fontsource/cascadia-mono/files/cascadia-mono-hebrew-700-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+
+/* Cousine keeps Courier's character width, so Courier Prime screenplays keep
+   their measure in Hebrew. */
+@font-face {
+  font-family: "Locdoc Hebrew Typewriter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/cousine/files/cousine-hebrew-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}
+@font-face {
+  font-family: "Locdoc Hebrew Typewriter";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 700;
+  src: url("@fontsource/cousine/files/cousine-hebrew-700-normal.woff2")
+    format("woff2");
+  unicode-range: U+0590-05FF, U+20AA, U+FB1D-FB4F;
+}

@@ -29,6 +29,7 @@ import type { FileActions } from "./file-actions";
 import type { Config, Document } from "./model";
 import { normalizePresence } from "./presence";
 import { RecentlyDeleted } from "./trash";
+import { PathText } from "./ui";
 
 export function panelTitle(panel: string | null) {
   return {
@@ -57,7 +58,9 @@ export function DocumentSharePanel({
 }) {
   return (
     <>
-      <p className="dialog-description">Share “{filename}” with a link.</p>
+      <p className="dialog-description">
+        Share “<bdi>{filename}</bdi>” with a link.
+      </p>
       <ShareControls
         value={doc}
         name={name}
@@ -192,6 +195,7 @@ function DisplayName({
         <input
           id="your-name"
           className="text-input"
+          dir="auto"
           maxLength={60}
           value={draft}
           readOnly={pending}
@@ -308,7 +312,9 @@ export function DocumentOptions({
 }) {
   return (
     <>
-      <p className="dialog-description">{doc.path}</p>
+      <p className="dialog-description">
+        <PathText path={doc.path} separator="/" />
+      </p>
       {doc.edit && format === "markdown" && (
         <div className="formatting-menu" role="group" aria-label="Formatting">
           {formatting}

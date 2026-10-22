@@ -26,5 +26,6 @@ import "@fontsource/lora/700.css";
 import "@fontsource/lora/400-italic.css";
 import "@fontsource/lora/600-italic.css";
 import "@fontsource/lora/700-italic.css";
+import "./hebrew-fonts.css";
 
 createRoot(document.getElementById("root")!).render(<App />);

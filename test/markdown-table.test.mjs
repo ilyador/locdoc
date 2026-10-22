@@ -15,6 +15,11 @@ test("table cell targets retain offsets and escaped pipes", () => {
   assert.equal(source.slice(cell.from - 20, cell.to - 20), "one \\| two");
 });
 
+test("a column without colons starts where its text starts, so Hebrew cells align right", () => {
+  const table = parseMarkdownTable("| שם | Name | Note |\n| --- | :--- | :---: |\n| דנה | Ada | x |");
+  assert.deepEqual(table.align, ["start", "left", "center"]);
+});
+
 test("empty cells and missing trailing cells stay addressable", () => {
   const table = parseMarkdownTable(
     "| A | B |\n| --- | :---: |\n|   | ok |\n| only |",

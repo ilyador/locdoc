@@ -54,6 +54,7 @@ function CommentInput({
     >
       <textarea
         id={id}
+        dir="auto"
         aria-label={label}
         placeholder={placeholder}
         value={value}
@@ -132,9 +133,14 @@ function CommentMessage({
   created: number;
   resolved?: boolean;
 }) {
+  // The message reads in the direction of its text. The author's name is
+  // isolated, so it neither decides that direction nor takes the colon.
   return (
-    <p className="comment-message">
-      <strong className="comment-name">{name}:</strong> <span>{body}</span>
+    <p className="comment-message" dir="auto">
+      <strong className="comment-name">
+        <bdi>{name}</bdi>:
+      </strong>{" "}
+      <span>{body}</span>
       {created > 0 && (
         <>
           {" "}

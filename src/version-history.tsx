@@ -63,7 +63,8 @@ export function VersionHistory({
       )}
       {id && (
         <>
-          <pre className="version-preview">
+          {/* Each line of the version reads in its own direction. */}
+          <pre className="version-preview" dir="auto">
             {preview.loading
               ? "Loading version…"
               : preview.data?.content || "Empty document"}

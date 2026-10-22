@@ -3,14 +3,31 @@ import { CaretDown, Desktop, Sun, Moon, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import type { DocumentFormat } from "./document-format";
 type GoogleFont = { family: string; category: string };
-export function documentFontFamily(font: string) {
+// The Hebrew face that follows each document family (hebrew-fonts.css). A
+// family from the Google Fonts library gets one for its catalog category;
+// one that has Hebrew of its own shows its own letters first.
+function hebrewPartner(font: string, category: string) {
+  if (font === "Courier Prime") return '"Locdoc Hebrew Typewriter"';
+  if (font === "DM Sans") return '"Locdoc Hebrew Geometric"';
+  if (
+    ["JetBrains Mono", "monospace"].includes(font) ||
+    category === "Monospace"
+  )
+    return '"Locdoc Hebrew Mono"';
+  if (["Asul", "Lora", "Georgia"].includes(font) || category === "Serif")
+    return '"Locdoc Hebrew Serif"';
+  return '"Locdoc Hebrew Sans"';
+}
+// Each family keeps its fallbacks; its Hebrew partner comes right after it.
+export function documentFontFamily(font: string, category = "") {
+  const hebrew = hebrewPartner(font, category);
   if (["JetBrains Mono", "Courier Prime"].includes(font))
-    return `"${font}", ui-monospace, monospace`;
-  if (font === "DM Sans") return '"DM Sans Variable", sans-serif';
-  if (font === "monospace") return "ui-monospace, monospace";
+    return `"${font}", ${hebrew}, ui-monospace, monospace`;
+  if (font === "DM Sans") return `"DM Sans Variable", ${hebrew}, sans-serif`;
+  if (font === "monospace") return `ui-monospace, ${hebrew}, monospace`;
   if (["Asul", "Lora", "Georgia"].includes(font))
-    return `"${font}", Georgia, serif`;
-  return `"${font}", sans-serif`;
+    return `"${font}", ${hebrew}, Georgia, serif`;
+  return `"${font}", ${hebrew}, sans-serif`;
 }
 const bundledFonts = [
   "JetBrains Mono",
@@ -29,6 +46,28 @@ function loadFontCatalog() {
     catalogRequest = null;
     throw error;
   }));
+}
+// The catalog category of a family installed from Google Fonts, which picks
+// its Hebrew partner. Bundled families need no catalog; until it loads, or if
+// it cannot, a family is paired as sans-serif.
+export function useFontCategory(font: string) {
+  const bundled = bundledFonts.includes(font);
+  const [catalog, setCatalog] = useState<GoogleFont[] | null>(null);
+  useEffect(() => {
+    if (bundled || catalog) return;
+    let active = true;
+    loadFontCatalog()
+      .then((data) => {
+        if (active) setCatalog(data.fonts);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [bundled, catalog]);
+  return bundled
+    ? ""
+    : catalog?.find((entry) => entry.family === font)?.category || "";
 }
 type WritingDevice = "phone" | "tablet" | "desktop";
 const defaultSizes = { phone: 12, tablet: 15, desktop: 18 };

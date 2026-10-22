@@ -34,6 +34,7 @@ export function NamePrompt({ onChoose }: { onChoose: (name: string) => void }) {
         <input
           id="collaborator-name"
           className="text-input"
+          dir="auto"
           autoComplete="nickname"
           autoFocus
           required
