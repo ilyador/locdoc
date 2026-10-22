@@ -546,3 +546,55 @@ test("existing conversations export once, preserve identity and resolution, and 
   assert.equal(reopened[0].created, 123456);
   assert.equal(await readFile(join(dir, "docs/legacy.md"), "utf8"), file);
 });
+
+// Runs last: it changes the owner's name that the tests above rely on.
+test("the owner's chosen name is stored for every device, owner-only, and checked like presence names", async () => {
+  const d = await create("profile.md", "A passage.");
+  await request(`/api/docs/${d.id}/comments`, "POST", {
+    name: "alex",
+    body: "Written before the change",
+  });
+  const config = async (owner = true) =>
+    (
+      await fetch(base + "/api/config", {
+        headers: {
+          Cookie: cookie,
+          ...(owner ? { Authorization: `Bearer ${key}` } : {}),
+        },
+      })
+    ).json();
+  const choose = (name, owner = true) =>
+    fetch(base + "/api/profile", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: base,
+        Cookie: cookie,
+        ...(owner ? { Authorization: `Bearer ${key}` } : {}),
+      },
+      body: JSON.stringify({ name }),
+    });
+  assert.equal((await config()).ownerName, "alex", "LOCDOC_OWNER_NAME first");
+  assert.equal((await choose("A visitor", false)).status, 403);
+  for (const name of ["", "   ", "Tab\tname", "x".repeat(61)])
+    assert.equal((await choose(name)).status, 400, JSON.stringify(name));
+  assert.equal((await config()).ownerName, "alex");
+  const saved = await choose(" Ilya ");
+  assert.equal(saved.status, 200);
+  assert.deepEqual(await saved.json(), { name: "Ilya" });
+  assert.equal((await config()).ownerName, "Ilya");
+  assert.equal((await config(false)).ownerName, undefined);
+  await stop();
+  await start();
+  assert.equal(
+    (await config()).ownerName,
+    "Ilya",
+    "the choice outlasts a restart that still sets LOCDOC_OWNER_NAME",
+  );
+  assert.ok(
+    (await readFile(join(dir, "docs/profile.md"), "utf8")).includes(
+      "[[comment(alex): Written before the change]]",
+    ),
+    "existing comment records keep their name",
+  );
+});

@@ -973,9 +973,9 @@ fn migrate(s: &Store, d: &Document, r: &mut Room, meta: &mut [Value]) -> Result<
         let mut messages = Vec::new();
         let normalize = |value: &mut Value, fallback: &str| -> Result<MessageText> {
             let name = if value["name"] == "You" {
-                s.owner_name.as_str()
+                s.owner_name.get()
             } else {
-                value["name"].as_str().unwrap_or("Guest")
+                value["name"].as_str().unwrap_or("Guest").to_owned()
             }
             .trim()
             .to_string();
@@ -2018,7 +2018,7 @@ mod tests {
         let threads = parse(&current, false);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].messages.len(), 2);
-        assert_eq!(threads[0].messages[0].name, s.owner_name);
+        assert_eq!(threads[0].messages[0].name, s.owner_name.get());
         assert_eq!(meta[0]["created"], 42);
         assert_eq!(meta[0]["resolved"], true);
         assert_eq!(meta[0]["replies"][0]["created"], 43);

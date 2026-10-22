@@ -52,12 +52,42 @@ export function useWorkspace() {
       ?.name || "",
   );
   const [needsName, setNeedsName] = useState(false);
+  // A guest's name stays in this browser. The owner's is stored with the
+  // workspace, so every device shows the same one.
+  const rememberGuestName = (value: string) => {
+    try {
+      localStorage.setItem("locdoc.guestName", value);
+    } catch {
+      // The name still applies in this tab when storage is blocked.
+    }
+  };
   const chooseName = (value: string) => {
     const person = normalizePresence({ name: value });
     if (!person) return;
-    localStorage.setItem("locdoc.guestName", person.name);
+    rememberGuestName(person.name);
     setName(person.name);
     setNeedsName(false);
+  };
+  // A name read from the server applies only while no newer read or save
+  // has started.
+  const nameRequest = useRef(0);
+  const saveName = async (value: string) => {
+    const person = normalizePresence({ name: value });
+    if (!person) throw new Error("Enter a name (1–60 characters).");
+    if (!config) throw new Error("Your workspace is still opening.");
+    if (!config.owner) {
+      rememberGuestName(person.name);
+      setName(person.name);
+      return person.name;
+    }
+    nameRequest.current++;
+    const saved = await api<{ name: string }>(
+      "/api/profile",
+      send("PATCH", { name: person.name }),
+    );
+    nameRequest.current++;
+    setName(saved.name);
+    return saved.name;
   };
   const [sidebar, setSidebar] = useState(() => {
     try {
@@ -255,12 +285,29 @@ export function useWorkspace() {
   }, [id, config?.folder]);
   useEffect(() => {
     if (name) localStorage.setItem("locdoc.name", name);
-    if (config && !config.owner && !needsName && normalizePresence({ name }))
-      localStorage.setItem(
-        "locdoc.guestName",
-        normalizePresence({ name })!.name,
+  }, [name]);
+  // The owner may have chosen another name in another tab or on another
+  // device; a tab coming back into view shows it.
+  useEffect(() => {
+    if (!config?.owner) return;
+    const refresh = () => {
+      if (document.hidden) return;
+      const request = ++nameRequest.current;
+      void api<Config>("/api/config").then(
+        (current) => {
+          if (current.owner && request === nameRequest.current)
+            setName(current.ownerName || "Owner");
+        },
+        () => {},
       );
-  }, [name, config?.owner, needsName]);
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [config?.owner]);
   useEffect(() => {
     if (!config?.owner && !config?.folder) return;
     if (sharedToken && !config.folder) return;
@@ -276,7 +323,7 @@ export function useWorkspace() {
     initialDocument,
     error,
     name,
-    setName,
+    saveName,
     needsName,
     chooseName,
     sidebar,

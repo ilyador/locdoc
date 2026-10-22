@@ -605,7 +605,9 @@ function WorkspaceFixture() {
           initialDocument: null,
           error: "",
           name: "Owner",
-          setName() {},
+          async saveName(name: string) {
+            return name;
+          },
           sidebar: true,
           setSidebar() {},
           sidebarWidth: null,

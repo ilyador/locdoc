@@ -219,6 +219,10 @@ async fn socket_loop(
     .await;
     close_socket(&mut sender, &mut receiver).await;
 }
+/// A display name collaborators see beside a cursor or comment.
+pub(super) fn valid_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.chars().count() <= 60 && !name.chars().any(char::is_control)
+}
 pub(super) fn valid_presence(json: &str) -> bool {
     fn color(v: &Value, alpha: bool) -> bool {
         v.as_str().is_some_and(|s| {
@@ -259,9 +263,10 @@ pub(super) fn valid_presence(json: &str) -> bool {
     };
     let user_ok = state.get("user").is_none_or(|user| {
         user.as_object().is_some_and(|u| {
-            u.get("name").and_then(Value::as_str).is_some_and(|n| {
-                !n.trim().is_empty() && n.chars().count() <= 60 && !n.chars().any(char::is_control)
-            }) && u.get("color").is_none_or(|v| color(v, false))
+            u.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(valid_name)
+                && u.get("color").is_none_or(|v| color(v, false))
                 && u.get("colorLight").is_none_or(|v| color(v, true))
         })
     });

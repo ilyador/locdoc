@@ -59,7 +59,7 @@ LOCDOC_PUBLIC_URL=http://127.0.0.1:3477
 LOCDOC_OWNER_NAME=Your name
 ```
 
-`npm start` and `npm run owner` load `.env`; environment variables override it. If you run the binary directly, export these variables yourself. Keep one server process per document/state directory. Files must be writable by the user running Locdoc.
+`npm start` and `npm run owner` load `.env`; environment variables override it. If you run the binary directly, export these variables yourself. Keep one server process per document/state directory. Files must be writable by the user running Locdoc. `LOCDOC_OWNER_NAME` is your display name until you save another under **Your workspace → Your display name**; that name is stored in the state folder, so every device shows it, and comments already written keep the name they were written with.
 
 ### Start automatically
 
@@ -218,7 +218,7 @@ Choose **Share** in a document, or switch to the **Folders** tab and use the sha
 - Folder access and individual document links are independent. Turning off a document's own link does not remove access granted through a shared parent folder. To remove that access, change the folder link or move the file outside the folder; access ends as soon as Locdoc finds the file outside, even while its new name is still being recorded.
 - A document's own links, comments and history follow a move between folders. Folder access is recalculated from its current location; it is never copied onto the document.
 - Turn a link private to revoke it, or choose **Replace link** to invalidate the old URL. Removing or replacing a shared folder invalidates its capability. A folder renamed or moved in Locdoc keeps its link, as do its subfolders' links; deleting it suspends them until it is restored. A folder share does not follow a rename made by another application; share the new location again.
-- Visitors choose a display name without signing in. Names are labels, not verified identities.
+- Visitors choose a display name without signing in and can change it under **Your workspace**; their browser remembers it. Names are labels, not verified identities.
 
 ## Writing and comments
 
