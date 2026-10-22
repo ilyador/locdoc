@@ -133,7 +133,8 @@ function useRestore(files: FileActions, item: TrashItem) {
   };
 }
 
-// The open document's content stays readable while it is in the trash.
+// The open document's content stays readable while it is in the trash. A
+// document deleted with its folder comes back when the folder does.
 export function TrashedNotice({
   files,
   item,
@@ -142,12 +143,15 @@ export function TrashedNotice({
   item: TrashItem;
 }) {
   const { busy, restore } = useRestore(files, item);
+  const folder = item.kind === "folder";
   return (
     <div className="trash-notice" role="status">
       <Trash size={16} aria-hidden="true" />
       <span>
-        This document is in Recently deleted. Links and MCP access are paused
-        until you restore it.
+        {folder
+          ? `This document is in Recently deleted with the folder ${baseName(item.path)}.`
+          : "This document is in Recently deleted."}{" "}
+        Links and MCP access are paused until you restore it.
       </span>
       {item.id && (
         <button
@@ -156,7 +160,7 @@ export function TrashedNotice({
           onClick={() => void restore()}
         >
           <ArrowCounterClockwise size={15} aria-hidden="true" />
-          {busy ? "Restoring…" : "Restore"}
+          {busy ? "Restoring…" : folder ? "Restore folder" : "Restore"}
         </button>
       )}
     </div>
@@ -164,15 +168,20 @@ export function TrashedNotice({
 }
 
 // Opening a trashed document shows where it went instead of an error.
+// `path` is the document's own former path; a folder item names the folder.
 export function TrashedDocument({
   files,
   item,
+  path,
 }: {
   files: FileActions;
   item: TrashItem;
+  path: string;
 }) {
   const { busy, restore } = useRestore(files, item);
   const stamp = deletedAgo(item);
+  const when = stamp ? deletedWhen(stamp.label) : "deleted";
+  const folder = item.kind === "folder";
   return (
     <div className="welcome trashed-document">
       <span className="welcome-symbol">
@@ -180,8 +189,9 @@ export function TrashedDocument({
       </span>
       <h1>This document is in Recently deleted.</h1>
       <p>
-        {baseName(item.path)} was {stamp ? deletedWhen(stamp.label) : "deleted"}.
-        Restoring it brings back its comments, history and links.
+        {folder
+          ? `${baseName(path)} was ${when} with the folder ${baseName(item.path)}. Restoring the folder brings back its documents with their comments, history and links.`
+          : `${baseName(path)} was ${when}. Restoring it brings back its comments, history and links.`}
       </p>
       {item.id ? (
         <button
@@ -190,7 +200,11 @@ export function TrashedDocument({
           onClick={() => void restore()}
         >
           <ArrowCounterClockwise size={17} aria-hidden="true" />
-          {busy ? "Restoring…" : "Restore document"}
+          {busy
+            ? "Restoring…"
+            : folder
+              ? "Restore folder"
+              : "Restore document"}
         </button>
       ) : (
         <p>Restore it from Recently deleted in your workspace settings.</p>

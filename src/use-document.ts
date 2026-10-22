@@ -16,15 +16,27 @@ import { trashItem } from "./file-actions";
 import { sharedToken, type Document as Doc, type TrashItem } from "./model";
 type Projection = "synced" | "pending" | "blocked" | "conflict";
 
-// A trashed document answers 410 with its trash item.
-const trashedItem = (error: ApiError, id: string, path = ""): TrashItem =>
-  trashItem((error.body as { trash?: unknown } | undefined)?.trash) || {
-    id: "",
-    kind: "document",
-    path: path || id,
-    deleted: 0,
-    documents: 1,
+// The trash item holding the open document, and the path the document had.
+// A document deleted with its folder is held by the folder's item.
+export type Trashed = { item: TrashItem; path: string };
+
+// A trashed document answers 410 with its trash item and its former path.
+const trashedDocument = (
+  error: ApiError,
+  id: string,
+  known = "",
+): Trashed => {
+  const body = error.body as { trash?: unknown; path?: unknown } | undefined;
+  const item = trashItem(body?.trash);
+  const path =
+    typeof body?.path === "string"
+      ? body.path
+      : known || (item?.kind === "document" ? item.path : id);
+  return {
+    item: item || { id: "", kind: "document", path, deleted: 0, documents: 1 },
+    path,
   };
+};
 
 export function useDocument(
   id: string | null,
@@ -38,7 +50,7 @@ export function useDocument(
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState<DraftRecovery[]>([]);
   const [storageWarning, setStorageWarning] = useState("");
-  const [trashed, setTrashed] = useState<TrashItem | null>(null);
+  const [trashed, setTrashed] = useState<Trashed | null>(null);
   const [reload, setReload] = useState(0);
   const recoveryJournal = useRef<DraftJournal | null>(null);
   const verify = useRef<(() => void) | null>(null);
@@ -200,7 +212,7 @@ export function useDocument(
           provider.disconnect();
           drafts.disconnected();
           setDoc((value) => (value ? { ...value, edit: false } : value));
-          setTrashed(trashedItem(error, d.id, d.path));
+          setTrashed(trashedDocument(error, d.id, d.path));
           updateStatus();
         };
         verify.current = () => {
@@ -347,7 +359,7 @@ export function useDocument(
       })
       .catch((e) => {
         if (active && e instanceof ApiError && e.status === 410) {
-          setTrashed(trashedItem(e, id));
+          setTrashed(trashedDocument(e, id));
           setStatus("In Recently deleted");
         } else if (active) {
           setError(e.message);

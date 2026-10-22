@@ -163,7 +163,12 @@ export function fileApi(
       );
       if (!doc)
         return trashed
-          ? json(410, { error: "trashed", trash: trashItem(trashed) })
+          ? json(410, {
+              error: "trashed",
+              trash: trashItem(trashed),
+              // The document's own former path; a folder item names the folder.
+              path: trashed.items.find((entry) => entry.id === id)!.path,
+            })
           : json(404, { error: "Document not found." });
       if (document[2] && method === "POST") {
         if (exists(body.path)) return taken();

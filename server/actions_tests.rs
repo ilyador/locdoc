@@ -260,6 +260,7 @@ async fn file_actions_answer_with_the_contract_shapes_and_refusals() {
     assert_eq!(status, StatusCode::GONE);
     assert_eq!(gone["error"], "trashed");
     assert_eq!(gone["trash"], *item);
+    assert_eq!(gone["path"], "Taken/Archive/page.md");
     let anonymous = |request: reqwest::RequestBuilder| request;
     let (status, refusal) = call(&base, "GET", &format!("/api/docs/{id}"), None, &anonymous).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -294,6 +295,13 @@ async fn file_actions_answer_with_the_contract_shapes_and_refusals() {
     assert_eq!(folder["trash"]["kind"], "folder");
     assert_eq!(folder["trash"]["path"], "Taken/Archive");
     assert_eq!(folder["trash"]["documents"], 1);
+    // A document deleted with its folder names the folder's item and its
+    // own former path, so the owner learns which document it was.
+    let copy_id = copy["id"].as_str().unwrap();
+    let (status, gone) = call(&base, "GET", &format!("/api/docs/{copy_id}"), None, &owner).await;
+    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(gone["trash"], folder["trash"]);
+    assert_eq!(gone["path"], "Taken/Archive/copy.md");
     for path in ["Missing", "Taken/Archive"] {
         let (status, _) = call(
             &base,

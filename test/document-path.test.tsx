@@ -187,6 +187,38 @@ test("a trashed document opens to Recently deleted, and Restore brings it back",
   assert.equal(editor()!.getAttribute("contenteditable"), "true");
 });
 
+test("a document deleted with its folder names itself and restores the folder", async () => {
+  api = fileApi(files);
+  await api.fetch("/api/folders", {
+    method: "DELETE",
+    body: JSON.stringify({ path: "Notes" }),
+  });
+  globalThis.fetch = api.fetch as typeof fetch;
+  localStorage.setItem("locdoc.sidebarView", "folders");
+  localStorage.setItem("locdoc.document", "notes-plan-md");
+  render(<App />);
+  await waitFor(() =>
+    assert.ok(
+      screen.getByRole("heading", { name: "This document is in Recently deleted." }),
+    ),
+  );
+  // The 410 names the folder's trash item; the document keeps its own name.
+  await waitFor(() => assert.equal(document.title, "Plan · locdoc"));
+  assert.deepEqual(crumbs(), { folder: "Notes", title: "Plan", extension: ".md" });
+  assert.match(
+    document.querySelector(".trashed-document")!.textContent!,
+    /Plan\.md was deleted .* with the folder Notes\./,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Restore folder" }));
+  await waitFor(() => assert.ok(editor()));
+  assert.ok(
+    api.calls.some((call) => call.path === "/api/trash/trash-1/restore"),
+    "Restore brings back the folder that holds it",
+  );
+  await waitFor(() => assert.ok(row("Notes"), "The folder is listed again"));
+  assert.equal(editor()!.getAttribute("contenteditable"), "true");
+});
+
 test("deleting the open document keeps its text readable until Undo reopens it", async () => {
   await open(files, "notes-plan-md");
   await waitFor(() => assert.ok(editor()));

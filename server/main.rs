@@ -1021,9 +1021,9 @@ async fn document(
         // MCP find it as they find a removed one.
         Err(error) if error.0 == StatusCode::NOT_FOUND && s.owner(&h) => {
             match actions::holding(s, &id)? {
-                Some(item) => Ok((
+                Some((item, path)) => Ok((
                     StatusCode::GONE,
-                    Json(json!({"error": "trashed", "trash": item})),
+                    Json(json!({"error": "trashed", "trash": item, "path": path})),
                 )
                     .into_response()),
                 None => Err(error),

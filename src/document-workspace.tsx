@@ -350,7 +350,9 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               {storageWarning}
             </div>
           )}
-          {trashed && doc && <TrashedNotice files={files} item={trashed} />}
+          {trashed && doc && (
+            <TrashedNotice files={files} item={trashed.item} />
+          )}
           <DraftRecoveryNotice
             records={recovery}
             dismiss={clearRecovery}
@@ -393,7 +395,11 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
               />
             )}
             {trashed && !doc ? (
-              <TrashedDocument files={files} item={trashed} />
+              <TrashedDocument
+                files={files}
+                item={trashed.item}
+                path={trashed.path}
+              />
             ) : !config ||
               (!doc &&
                 !error &&

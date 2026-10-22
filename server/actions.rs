@@ -58,19 +58,22 @@ fn find(s: &Store, id: &str) -> Result<TrashItem> {
         })
 }
 
-/// The trash item holding a trashed document.
-pub(super) fn holding(s: &Store, document: &str) -> Result<Option<TrashItem>> {
-    let trash =
+/// The trash item holding a trashed document, and the path the document
+/// had: a folder item names only the folder.
+pub(super) fn holding(s: &Store, document: &str) -> Result<Option<(TrashItem, String)>> {
+    let trashed =
         s.db.lock()
             .unwrap()
             .query_row(
-                "SELECT t.trash FROM trashed_documents t JOIN docs d ON d.id=t.doc
+                "SELECT t.trash,t.path FROM trashed_documents t JOIN docs d ON d.id=t.doc
              WHERE t.doc=? AND d.active=2",
                 [document],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()?;
-    trash.map(|trash| find(s, &trash)).transpose()
+    trashed
+        .map(|(trash, path)| Ok((find(s, &trash)?, path)))
+        .transpose()
 }
 
 fn deleted(s: &Store, trash: &str) -> Result<Json<Value>> {
