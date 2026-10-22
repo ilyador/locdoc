@@ -181,13 +181,13 @@ function parseSourceComments(state: EditorState) {
     const to = standalone && last.to < source.length ? last.to + 1 : thread.to;
     const previous = hidden.at(-1);
     if (previous && !source.slice(previous.to, from).trim())
-      // Every line is a paragraph in plain text: records that follow text on
-      // its line keep the line break after the last of them.
-      previous.to =
-        plain &&
-        source.slice(state.doc.lineAt(previous.from).from, previous.from).trim()
-          ? Math.min(to, last.to)
-          : to;
+      // Records that follow text on its line keep the line break after the
+      // last of them, so the next line still shows as a line of its own.
+      previous.to = source
+        .slice(state.doc.lineAt(previous.from).from, previous.from)
+        .trim()
+        ? Math.min(to, last.to)
+        : to;
     else hidden.push({ from, to });
   }
   cache.set(state.doc, hidden);

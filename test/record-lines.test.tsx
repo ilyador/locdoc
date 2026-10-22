@@ -5,6 +5,7 @@ import React from "react";
 import * as Y from "yjs";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
+import { sourceComments } from "../src/comment-syntax";
 import { sourceCommentRanges } from "../src/editor-comments";
 
 let dom: JSDOM;
@@ -190,6 +191,32 @@ test("a Markdown line after a comment record on its own line keeps its own styli
     try {
       assert.deepEqual(shown(editor.view), expected, JSON.stringify(source));
       assert.equal(editor.text.toString(), source);
+    } finally {
+      editor.close();
+    }
+  }
+});
+
+test("a line after records that follow text shows as a line of its own", () => {
+  const source = `Buy milk[[comment(alex): Which brand?]]\n\n[[comment(ana): A note]]\nBuy eggs`;
+  for (const [path, expected] of [
+    ["Notes/list.md", ["md-block-end: Buy milk", "md-block-end: Buy eggs"]],
+    [
+      "Notes/list.fountain",
+      [
+        "fountain-action fountain-block-end fountain-line: Buy milk",
+        "fountain-action fountain-block-end fountain-line: Buy eggs",
+      ],
+    ],
+    [
+      "Notes/list.txt",
+      ["text-block-end: Buy milk", "text-block-end: Buy eggs"],
+    ],
+  ] as const) {
+    const editor = mount(path, source);
+    try {
+      assert.deepEqual(shown(editor.view), expected, path);
+      assert.equal(sourceComments(editor.text.toString()).length, 2);
     } finally {
       editor.close();
     }
