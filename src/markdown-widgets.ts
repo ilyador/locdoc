@@ -51,10 +51,12 @@ export class TableWidget extends WidgetType {
             "aria-label",
             `Edit row ${rowIndex + 1}, column ${columnIndex + 1}${cell.text ? `: ${cell.text}` : ""}`,
           );
+          // The user's own selection: the preview reveals the source there.
           edit.onclick = () => {
             view.dispatch({
               selection: { anchor: view.posAtDOM(wrap) + cell.from },
               scrollIntoView: true,
+              userEvent: "select",
             });
             view.focus();
           };
@@ -243,8 +245,12 @@ export class MediaWidget extends WidgetType {
     edit.textContent = "Edit Markdown";
     edit.className = "embed-edit";
     edit.type = "button";
+    // The user's own selection: the preview reveals the source there.
     edit.onclick = () => {
-      view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
+      view.dispatch({
+        selection: { anchor: view.posAtDOM(wrap) },
+        userEvent: "select",
+      });
       view.focus();
     };
     wrap.appendChild(edit);
@@ -286,7 +292,10 @@ export class InlineMediaWidget extends WidgetType {
       wrap.onclick = (event) => {
         if (view.state.readOnly) return;
         event.preventDefault();
-        view.dispatch({ selection: { anchor: view.posAtDOM(wrap) } });
+        view.dispatch({
+          selection: { anchor: view.posAtDOM(wrap) },
+          userEvent: "select",
+        });
         view.focus();
       };
     return wrap;

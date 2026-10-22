@@ -14,6 +14,7 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { JSDOM } from "jsdom";
 import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
+import { engagement } from "../src/editor-engagement";
 import { livePreview } from "../src/markdown-preview";
 
 const language = markdown({
@@ -34,12 +35,14 @@ function parsed(state: EditorState) {
   return state;
 }
 
+// Most cases check a selection the user placed, so they start engaged.
 function create(
   doc: string,
   selection: EditorSelection | { anchor: number; head?: number } = {
     anchor: 0,
   },
   readOnly = false,
+  engaged = true,
 ) {
   return parsed(
     EditorState.create({
@@ -49,6 +52,7 @@ function create(
         language,
         sourceCommentLayer,
         preview,
+        engagement.init(() => engaged),
         EditorState.allowMultipleSelections.of(true),
         EditorState.readOnly.of(readOnly),
       ],
@@ -120,7 +124,12 @@ function assertRows(actual: string[], expected: string[], label: string) {
 }
 
 function assertFresh(state: EditorState, label: string) {
-  const fresh = create(state.doc.toString(), state.selection, state.readOnly);
+  const fresh = create(
+    state.doc.toString(),
+    state.selection,
+    state.readOnly,
+    state.field(engagement),
+  );
   assertRows(decorationRows(state), decorationRows(fresh), `${label}: marks`);
   assertRows(wrapperRows(state), wrapperRows(fresh), `${label}: wrappers`);
 }
@@ -362,6 +371,95 @@ test("selection changes reveal exactly the affected Markdown lines and blocks", 
   );
 });
 
+// The transaction a view dispatches when its focus changes.
+function focusChange(state: EditorState, focused: boolean): TransactionSpec {
+  return {
+    effects: state
+      .facet(EditorView.focusChangeEffect)
+      .flatMap((effect) => effect(state, focused) ?? []),
+  };
+}
+
+// Whether the whole-line image is a figure rather than revealed source.
+const figure = (state: EditorState) =>
+  decorationRows(state).some((row) => {
+    const parsed = JSON.parse(row) as { from: number; widget?: string };
+    return (
+      parsed.widget === "MediaWidget" &&
+      parsed.from === state.doc.toString().indexOf("![Cover]")
+    );
+  });
+
+test("a selection the user never placed reveals nothing until they engage", () => {
+  // A new editor's caret sits at the start, here on a whole-line image.
+  const source = `![Cover](_media/cover.png)\n\n${richSource}`;
+  const opened = create(source, { anchor: 0 }, false, false);
+  assert.ok(figure(opened), "the image renders at open");
+  // As an engaged editor whose caret is on "Tail.", which has no syntax.
+  const untouched = decorationRows(create(source, { anchor: source.length }));
+  assertRows(decorationRows(opened), untouched, "opened editor");
+  const everything = { anchor: 0, head: source.length };
+  assertRows(
+    decorationRows(create(source, everything, false, false)),
+    untouched,
+    "a whole-document selection nobody placed",
+  );
+  // Locdoc's own selections, remote edits and blur carry no user event.
+  let state = update(opened, { selection: everything }, "Locdoc's selection");
+  state = update(
+    state,
+    {
+      changes: { from: source.indexOf("Tail"), insert: "Remote " },
+      annotations: Transaction.remote.of(true),
+    },
+    "remote edit",
+  );
+  state = update(state, focusChange(state, false), "blur");
+  state = update(state, { selection: { anchor: 0 } }, "Locdoc's caret");
+  assert.equal(state.field(engagement), false);
+  assert.ok(figure(state), "nothing above engaged the editor");
+  const table = source.indexOf("| Body");
+  const heading = source.indexOf("Heading with");
+  const engagements: [string, (state: EditorState) => TransactionSpec][] = [
+    ["focus", (state) => focusChange(state, true)],
+    [
+      "click",
+      () => ({ selection: { anchor: 3 }, userEvent: "select.pointer" }),
+    ],
+    ["arrow key", () => ({ selection: { anchor: 1 }, userEvent: "select" })],
+    [
+      "typing",
+      () => ({
+        changes: { from: 0, insert: "\n" },
+        selection: { anchor: 1 },
+        userEvent: "input.type",
+      }),
+    ],
+    [
+      "find",
+      () => ({
+        selection: EditorSelection.create([
+          EditorSelection.range(2, 7),
+          EditorSelection.range(heading, heading + 7),
+          EditorSelection.range(table + 2, table + 6),
+        ]),
+        userEvent: "select.search.matches",
+      }),
+    ],
+  ];
+  for (const [label, engage] of engagements) {
+    const engaged = update(state, engage(state), `${label} engages`);
+    assert.equal(engaged.field(engagement), true, label);
+    assert.ok(!figure(engaged), `${label}: the image's source shows`);
+    const moved = update(
+      engaged,
+      { selection: { anchor: engaged.doc.length } },
+      `${label}, then a selection without a user event`,
+    );
+    assert.ok(figure(moved), `${label}: the image renders once left`);
+  }
+});
+
 test("remote and boundary edits have the same preview as local fresh source", () => {
   let state = create(richSource);
   state = update(
@@ -412,6 +510,7 @@ test("read-only reconfiguration hides syntax and updates task permissions consis
         language,
         sourceCommentLayer,
         preview,
+        engagement.init(() => true),
         permissions.of(EditorState.readOnly.of(false)),
       ],
     }),

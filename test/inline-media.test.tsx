@@ -16,6 +16,7 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { Awareness } from "y-protocols/awareness";
 import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
+import { engagement } from "../src/editor-engagement";
 import { livePreview } from "../src/markdown-preview";
 import {
   InlineMediaWidget,
@@ -42,12 +43,14 @@ function parsed(state: EditorState) {
   return state;
 }
 
+// Most cases check a selection the user placed, so they start engaged.
 function create(
   doc: string,
   selection: EditorSelection | { anchor: number; head?: number } = {
     anchor: 0,
   },
   readOnly = false,
+  engaged = true,
 ) {
   return parsed(
     EditorState.create({
@@ -57,6 +60,7 @@ function create(
         language,
         sourceCommentLayer,
         preview,
+        engagement.init(() => engaged),
         EditorState.allowMultipleSelections.of(true),
         EditorState.readOnly.of(readOnly),
       ],
@@ -126,7 +130,12 @@ function rows(state: EditorState) {
 function assertFresh(state: EditorState, label: string) {
   const actual = rows(state);
   const expected = rows(
-    create(state.doc.toString(), state.selection, state.readOnly),
+    create(
+      state.doc.toString(),
+      state.selection,
+      state.readOnly,
+      state.field(engagement),
+    ),
   );
   assert.equal(actual.length, expected.length, `${label}: range count`);
   for (let index = 0; index < actual.length; index++)
@@ -338,6 +347,7 @@ test("read-only views render inline images even where a selection touches them",
         language,
         sourceCommentLayer,
         preview,
+        engagement.init(() => true),
         permissions.of(EditorState.readOnly.of(true)),
       ],
     }),
@@ -411,7 +421,8 @@ function mountView(doc: string, readOnly = false) {
   document.body.append(parent);
   const view = new EditorView({
     parent,
-    state: create(doc, { anchor: 0 }, readOnly),
+    // As a document opens: the user has not engaged with it yet.
+    state: create(doc, { anchor: 0 }, readOnly, false),
   });
   return {
     view,
@@ -450,9 +461,8 @@ test("inline media DOM keeps alt and title inert and reveals source on click", (
       source.indexOf("![a"),
       "clicking places the caret at the image source",
     );
-    assert.equal(
-      fixture.view.dom.querySelector(".embed-inline"),
-      null,
+    assert.ok(
+      fixture.view.dom.querySelector(".embed-inline") === null,
       "the touched image shows its source",
     );
   } finally {

@@ -31,6 +31,7 @@ import {
   toggleTaskList,
   wrapSelection,
 } from "./editor-commands";
+import { userEngagement } from "./editor-engagement";
 import { fileDropEvents, linkEvents } from "./editor-events";
 import {
   editorAccess,
@@ -239,6 +240,9 @@ export const MarkdownEditor = forwardRef<
           findExtension(),
           layer.extension,
           access.current.of(editorAccess(editable)),
+          // Outside the preview compartment: a new preview keeps whether the
+          // user has engaged with this editor.
+          userEngagement,
           preview.current.of([
             documentPreview(id, token, path, entries),
             explainMedia.of(!!owner),
