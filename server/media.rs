@@ -232,15 +232,30 @@ fn media_kind(path: &Path, metadata: &fs::Metadata) -> Result<(usize, &'static s
     }
     Ok((len, kind.mime_type()))
 }
+/// Whether the editor previews a media reference as a local file: a relative
+/// path, never a URL with a scheme (`https:`, `data:` or a drive letter), an
+/// absolute path or a fragment. `isLocalMediaPath` in src/markdown-media.ts
+/// is the same rule; test/fixtures/media-references.json holds both.
+pub(super) fn local_reference(reference: &str) -> bool {
+    let scheme = reference.split_once(':').is_some_and(|(scheme, _)| {
+        let mut characters = scheme.chars();
+        characters
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+    });
+    !reference.is_empty() && !scheme && !reference.starts_with(['/', '#'])
+}
 /// The local media references of a document that link visitors cannot see,
 /// for its owner: `missing` when no file inside the documents folder is
 /// there, `unapproved` when the file is there but not approved for them.
-/// Remote links are not local media, and a file Locdoc cannot serve as an
-/// image or video is hidden from the owner too.
+/// Remote links, data URLs and fragments are not local media, and a file
+/// Locdoc cannot serve as an image or video is hidden from the owner too.
 pub(super) fn hidden_media(s: &Store, d: &Document, references: &HashSet<String>) -> Vec<Value> {
     let approvals = s.approvals(d);
     let mut hidden: Vec<(&String, &str)> = references
         .iter()
+        .filter(|reference| local_reference(reference))
         .filter_map(|reference| {
             let path = match s.media_path(d, reference) {
                 Ok(path) => path,
@@ -271,6 +286,9 @@ pub(super) fn publishable(
     d: &Document,
     reference: &str,
 ) -> std::result::Result<Option<namespace::Identity>, &'static str> {
+    if !local_reference(reference) {
+        return Err("outside");
+    }
     let path = match s.media_path(d, reference) {
         Ok(path) => path,
         Err(error) if error.0 == StatusCode::NOT_FOUND => return Err("missing"),
@@ -644,6 +662,59 @@ mod tests {
         let application = router(s.clone());
         tokio::spawn(async move { axum::serve(listener, application).await.unwrap() });
         (dir, s, page, base, folder, CONNECTION.into())
+    }
+
+    #[test]
+    fn urls_fragments_and_drive_paths_are_never_listed_as_hidden_files() {
+        let (_dir, s) = store();
+        let png = BASE64.decode(PNG).unwrap();
+        fs::create_dir_all(s.root.join("Notes")).unwrap();
+        fs::write(s.root.join("Notes/photo.png"), &png).unwrap();
+        fs::write(s.root.join("Notes/page.md"), "# Page\n").unwrap();
+        let page = s.index_document("Notes/page.md").unwrap();
+        let room = s.room(&page).unwrap();
+        // Typed in the owner's browser: nothing here is approved.
+        let typed = concat!(
+            "![photo](photo.png) ![data](data:image/png;base64,AAAA) ![top](#top)\n",
+            "![drive](C:/Pictures/x.png) ![mail](mailto:a@example.test)\n",
+        );
+        process_frame(
+            &s,
+            &page,
+            &room,
+            &peer_update(&room, typed),
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        // The editor previews none of the others as local media, so the
+        // owner never sees them as images link visitors cannot see.
+        let payload = document_payload(&s, &owner(&s), &page, &Access::default()).unwrap();
+        assert_eq!(
+            payload["hiddenMedia"],
+            json!([{"path": "photo.png", "reason": "unapproved"}])
+        );
+        // Showing one is refused as a remote link is.
+        let requested = [
+            "data:image/png;base64,AAAA",
+            "#top",
+            "C:/Pictures/x.png",
+            "mailto:a@example.test",
+        ]
+        .map(String::from);
+        let (shared, refused) = room
+            .lock()
+            .unwrap()
+            .share_media(&s, &page, &requested)
+            .unwrap();
+        assert!(shared.is_empty());
+        assert_eq!(
+            refused,
+            requested.map(|path| (path, "outside")).to_vec(),
+            "refusals"
+        );
+        assert_eq!(approvals(&s, &page), 0);
     }
 
     #[tokio::test]

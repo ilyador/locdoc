@@ -66,6 +66,15 @@ test("previewed fixture images are parser images with the server's destination",
   }
 });
 
+test("the server lists as hidden files only the references the editor treats as local", () => {
+  for (const fixture of fixtures)
+    assert.deepEqual(
+      fixture.references.filter(isLocalMediaPath),
+      fixture.local,
+      `${fixture.name}: local references`,
+    );
+});
+
 test("media destinations decode like CommonMark and stay local", () => {
   assert.equal(decodeMarkdownText("a\\_b\\]c"), "a_b]c");
   assert.equal(

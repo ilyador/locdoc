@@ -20,6 +20,20 @@ fn media_references_match_the_editor_fixtures() {
             .collect();
         expected.sort();
         assert_eq!(actual, expected, "{}", case["name"]);
+        // Only references the editor treats as local files can be listed
+        // to the owner as images link visitors cannot see.
+        let local: Vec<&String> = actual
+            .iter()
+            .filter(|reference| media::local_reference(reference))
+            .collect();
+        let mut wanted: Vec<&str> = case["local"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reference| reference.as_str().unwrap())
+            .collect();
+        wanted.sort();
+        assert_eq!(local, wanted, "{}: local references", case["name"]);
         for rendered in case["rendered"].as_array().unwrap() {
             let path = rendered["path"].as_str().unwrap();
             assert!(
