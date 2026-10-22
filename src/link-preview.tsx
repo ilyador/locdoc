@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from "react";
 import { ArrowUpRight, FileText, GlobeSimple } from "@phosphor-icons/react";
-import type { LinkTarget } from "./editor";
+import type { LinkTarget } from "./editor-types";
 import { useRemote } from "./use-remote";
 
 type Preview = {

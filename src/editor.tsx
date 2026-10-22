@@ -50,13 +50,6 @@ import { documentPreview } from "./markdown-preview";
 import { documentFormat } from "./document-format";
 import type { Comment, Entry } from "./model";
 
-export type {
-  Anchor,
-  EditorHandle,
-  LinkTarget,
-  Selection,
-} from "./editor-types";
-
 export const MarkdownEditor = forwardRef<
   EditorHandle,
   {

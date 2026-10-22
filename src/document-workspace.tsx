@@ -7,11 +7,11 @@ import {
 } from "react";
 import { IconContext, WarningCircle, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
-import { MarkdownEditor, type EditorHandle, type Selection } from "./editor";
+import { MarkdownEditor } from "./editor";
+import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
 import { FolderShare, type ShareAccess } from "./sharing";
 import { LinkPicker } from "./link-picker";
 import { LinkPreview } from "./link-preview";
-import type { LinkTarget } from "./editor";
 import { FormattingTools } from "./formatting-tools";
 import { publishPresence } from "./presence";
 import { DraftRecoveryNotice } from "./draft-recovery";
@@ -43,11 +43,6 @@ import {
   OpeningDocument,
   OwnerWelcome,
 } from "./workspace-welcome";
-declare global {
-  interface Window {
-    __locdocOpen?: Promise<Response | null>;
-  }
-}
 import { type Entry, sharedToken } from "./model";
 import type { Workspace } from "./workspace";
 
@@ -150,6 +145,10 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [tell]);
+  // Hook order: this runs after useConversation's reveal effect. Closing a
+  // modal dialog refocuses what had focus when it opened, so an update that
+  // closed a dialog and opened a conversation would take focus from the
+  // composer. No dialog control opens a conversation.
   useEffect(() => {
     if (panel && panel !== "appearance") dialog.current?.showModal();
     else dialog.current?.close();

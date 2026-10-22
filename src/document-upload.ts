@@ -6,7 +6,7 @@ import {
   insertAttachment,
   type DocumentSession,
 } from "./document-session";
-import type { EditorHandle } from "./editor";
+import type { EditorHandle } from "./editor-types";
 import type { Document } from "./model";
 
 // The upload belongs to the session that started it. Its result is inserted

@@ -1,7 +1,7 @@
 import { useEffect, useState, type RefObject } from "react";
 import type * as Y from "yjs";
 import { CommentComposer, CommentThread } from "./comments";
-import type { EditorHandle, Selection } from "./editor";
+import type { EditorHandle, Selection } from "./editor-types";
 import { normalizePresence } from "./presence";
 import { useComments } from "./use-comments";
 
@@ -95,11 +95,12 @@ export function useConversation({
       document.getElementById("new-comment")?.focus({ preventScroll: true });
     }
   }, [conversation]);
+  const author = () => normalizePresence({ name })?.name || "Guest";
   const add = (body: string) =>
     action(async () => {
       const c = await mutateComment("", {
         body,
-        name: normalizePresence({ name })?.name || "Guest",
+        name: author(),
         quote: selection?.quote,
         anchor: selection?.anchor,
       });
@@ -138,18 +139,32 @@ export function useConversation({
     conversation?.kind === "thread"
       ? comments.find((c) => c.id === conversation.id)
       : null;
+  const currentIndex = comments.findIndex((c) => c.id === currentComment?.id);
+  // The thread before or after the current one in the document, if any.
+  const neighbour = (index: number) => {
+    const target = comments[index];
+    return target
+      ? () => setConversation({ kind: "thread", id: target.id })
+      : undefined;
+  };
   return {
     comments,
     conversation,
-    setConversation,
     selection,
     commentsOpen,
     currentComment,
-    newCommentDraft,
-    setNewCommentDraft,
-    replyDrafts,
-    setReplyDrafts,
-    name,
+    previous: neighbour(currentIndex - 1),
+    next: neighbour(currentIndex + 1),
+    newCommentBody: newCommentDraft?.body || "",
+    // Typing updates the draft only while its own conversation is shown.
+    editNewComment: (body: string) =>
+      setNewCommentDraft((current) =>
+        current?.conversation === conversation ? { ...current, body } : current,
+      ),
+    replyBody: (id: string) => replyDrafts[id] || "",
+    editReply: (id: string, body: string) =>
+      setReplyDrafts((current) => ({ ...current, [id]: body })),
+    reply: (id: string, body: string) => update(id, { body, name: author() }),
     start,
     cancel,
     add,
@@ -169,33 +184,13 @@ export function CommentConversation({
   busy: boolean;
   editable: boolean;
 }) {
-  const {
-    comments,
-    conversation,
-    setConversation,
-    selection,
-    currentComment,
-    newCommentDraft,
-    setNewCommentDraft,
-    replyDrafts,
-    setReplyDrafts,
-    name,
-  } = thread;
-  const currentCommentIndex = comments.findIndex(
-    (c) => c.id === currentComment?.id,
-  );
+  const { selection, currentComment } = thread;
   return (
     <section className="inline-conversation" aria-label="Comment conversation">
       {selection ? (
         <CommentComposer
-          draft={newCommentDraft?.body || ""}
-          onDraftChange={(body) =>
-            setNewCommentDraft((current) =>
-              current?.conversation === conversation
-                ? { ...current, body }
-                : current,
-            )
-          }
+          draft={thread.newCommentBody}
+          onDraftChange={thread.editNewComment}
           busy={busy}
           onSubmit={thread.add}
           onCancel={thread.cancel}
@@ -210,29 +205,19 @@ export function CommentConversation({
             })
           }
           navigation={
-            comments.length > 1 && (
+            thread.comments.length > 1 && (
               <>
                 <button
                   type="button"
-                  disabled={currentCommentIndex <= 0}
-                  onClick={() =>
-                    setConversation({
-                      kind: "thread",
-                      id: comments[currentCommentIndex - 1].id,
-                    })
-                  }
+                  disabled={!thread.previous}
+                  onClick={thread.previous}
                 >
                   Previous comment
                 </button>
                 <button
                   type="button"
-                  disabled={currentCommentIndex >= comments.length - 1}
-                  onClick={() =>
-                    setConversation({
-                      kind: "thread",
-                      id: comments[currentCommentIndex + 1].id,
-                    })
-                  }
+                  disabled={!thread.next}
+                  onClick={thread.next}
                 >
                   Next comment
                 </button>
@@ -240,21 +225,11 @@ export function CommentConversation({
             )
           }
           canResolve={editable || !!currentComment.canResolve}
-          onReply={(body) =>
-            thread.update(currentComment.id, {
-              body,
-              name: normalizePresence({ name })?.name || "Guest",
-            })
-          }
+          onReply={(body) => thread.reply(currentComment.id, body)}
           busy={busy}
           onCancel={thread.cancel}
-          draft={replyDrafts[currentComment.id] || ""}
-          onDraftChange={(body) =>
-            setReplyDrafts((current) => ({
-              ...current,
-              [currentComment.id]: body,
-            }))
-          }
+          draft={thread.replyBody(currentComment.id)}
+          onDraftChange={(body) => thread.editReply(currentComment.id, body)}
         />
       ) : (
         <p className="field-help">This conversation is no longer available.</p>

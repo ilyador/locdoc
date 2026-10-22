@@ -8,7 +8,8 @@ import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
 import { yUndoManagerKeymap } from "y-codemirror.next";
 import { commentParser } from "../src/comment-syntax";
-import { MarkdownEditor, type EditorHandle } from "../src/editor";
+import { MarkdownEditor } from "../src/editor";
+import type { EditorHandle } from "../src/editor-types";
 import { toggleInlineFormat } from "../src/inline-format";
 
 function format(

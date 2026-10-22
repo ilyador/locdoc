@@ -15,6 +15,13 @@ import {
 
 export type SidebarView = "date" | "folders";
 
+declare global {
+  interface Window {
+    // public/theme.js starts a share link's open request before the bundle.
+    __locdocOpen?: Promise<Response | null>;
+  }
+}
+
 // Workspace state survives document navigation. No document content, sharing
 // state, comments or asynchronous document mutations live at this level.
 export function useWorkspace() {

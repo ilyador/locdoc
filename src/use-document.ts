@@ -10,10 +10,9 @@ import {
 } from "lib0/encoding";
 import { api, ApiError, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
-import { documentSession } from "./document-session";
+import { documentSession, type DocumentSession } from "./document-session";
 import { normalizePresence } from "./presence";
 import { sharedToken, type Document as Doc } from "./model";
-type Session = ReturnType<typeof documentSession>;
 type Projection = "synced" | "pending" | "blocked" | "conflict";
 
 export function useDocument(
@@ -22,7 +21,7 @@ export function useDocument(
   initialDocument: Doc | null,
 ) {
   const [doc, setDoc] = useState<Doc | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<DocumentSession | null>(null);
   const [status, setStatus] = useState("Connecting");
   const [people, setPeople] = useState<{ name: string; color: string }[]>([]);
   const [error, setError] = useState("");
@@ -36,7 +35,7 @@ export function useDocument(
   useEffect(() => {
     if (!id || !authorized) return;
     let active = true;
-    let connection: Session | null = null;
+    let connection: DocumentSession | null = null;
     let cancelRetry: (() => void) | undefined;
     setDoc(null);
     setSession(null);

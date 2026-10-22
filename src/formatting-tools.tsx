@@ -12,7 +12,7 @@ import {
   TextUnderline,
   type Icon,
 } from "@phosphor-icons/react";
-import type { EditorHandle } from "./editor";
+import type { EditorHandle } from "./editor-types";
 import { TablePicker } from "./table-picker";
 
 export function FormattingTools({
