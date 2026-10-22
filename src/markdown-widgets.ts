@@ -65,9 +65,42 @@ export class TableWidget extends WidgetType {
   }
 }
 
+// Phosphor's regular ImageBroken, drawn like the workspace's other icons.
+const BROKEN_MEDIA =
+  "M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16h64a8,8,0,0,0,7.59-5.47l14.83-44.48L163,151.43a8.07,8.07,0,0,0,4.46-4.46l14.62-36.55,44.48-14.83A8,8,0,0,0,232,88V56A16,16,0,0,0,216,40ZM112.41,157.47,98.23,200H40V172l52-52,30.42,30.42L117,152.57A8,8,0,0,0,112.41,157.47ZM216,82.23,173.47,96.41a8,8,0,0,0-4.9,4.62l-14.72,36.82L138.58,144l-35.27-35.27a16,16,0,0,0-22.62,0L40,149.37V56H216Zm12.68,33a8,8,0,0,0-7.21-1.1l-23.8,7.94a8,8,0,0,0-4.9,4.61l-14.31,35.77-35.77,14.31a8,8,0,0,0-4.61,4.9l-7.94,23.8A8,8,0,0,0,137.73,216H216a16,16,0,0,0,16-16V121.73A8,8,0,0,0,228.68,115.24ZM216,200H148.83l3.25-9.75,35.51-14.2a8.07,8.07,0,0,0,4.46-4.46l14.2-35.51,9.75-3.25Z";
+
+// What stands in for media the server will not serve here, such as an image
+// the owner has not shown to link visitors or a missing file: its alt text in
+// quiet interface type instead of the browser's broken-image box.
+function unavailableMedia(alt: string, video: boolean) {
+  const kind = video ? "Video" : "Image";
+  const holder = document.createElement("span");
+  holder.className = "media-missing";
+  holder.setAttribute("role", "img");
+  holder.setAttribute(
+    "aria-label",
+    alt ? `${alt} (${kind.toLowerCase()} unavailable)` : `${kind} unavailable`,
+  );
+  holder.title = `${kind} unavailable`;
+  const namespace = "http://www.w3.org/2000/svg";
+  const icon = document.createElementNS(namespace, "svg");
+  icon.setAttribute("viewBox", "0 0 256 256");
+  icon.setAttribute("aria-hidden", "true");
+  icon.setAttribute("focusable", "false");
+  const path = document.createElementNS(namespace, "path");
+  path.setAttribute("d", BROKEN_MEDIA);
+  path.setAttribute("fill", "currentColor");
+  icon.append(path);
+  const text = document.createElement("span");
+  text.textContent = alt || `${kind} unavailable`;
+  holder.append(icon, text);
+  return holder;
+}
+
 // Source text reaches the DOM only through properties, never as markup.
 function mediaElement(src: string, alt: string, title: string) {
-  const el = document.createElement(isVideo(src) ? "video" : "img");
+  const video = isVideo(src);
+  const el = document.createElement(video ? "video" : "img");
   if (el instanceof HTMLVideoElement) {
     el.controls = true;
     el.preload = "metadata";
@@ -78,6 +111,11 @@ function mediaElement(src: string, alt: string, title: string) {
     el.draggable = false;
   }
   if (title) el.title = title;
+  el.addEventListener(
+    "error",
+    () => el.replaceWith(unavailableMedia(alt, video)),
+    { once: true },
+  );
   el.src = src;
   return el;
 }

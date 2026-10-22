@@ -1767,8 +1767,36 @@ button:hover {
   border-radius: 6px;
   vertical-align: bottom;
 }
-.cm-content[contenteditable="true"] .embed-inline img {
+.cm-content[contenteditable="true"] .embed-inline img,
+.cm-content[contenteditable="true"] .embed-inline .media-missing {
   cursor: pointer;
+}
+/* Media the server will not serve here, such as an image not shown to link
+   visitors: its alt text in quiet interface type, never a broken-image box. */
+.media-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font: var(--weight-regular) var(--ui-control-size) / 1.5 var(--ui-font);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  vertical-align: middle;
+}
+.media-missing svg {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+}
+.embed .media-missing {
+  display: flex;
+  width: fit-content;
+  margin: 0 auto;
 }
 .unsupported-embed {
   font-size: var(--ui-body-size);

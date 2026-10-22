@@ -455,6 +455,52 @@ test("inline media DOM keeps alt and title inert and reveals source on click", (
   }
 });
 
+test("media the server refuses shows its alt text instead of a broken image", () => {
+  // A link visitor's view of images the owner has not shown to visitors.
+  const source =
+    'Look ![a <b>bold</b> alt](hidden.png "Title") here\n\n![Gallery](gallery.png)\n\n![](missing.png)\n\n![clip](clip.mp4)';
+  const fixture = mountView(source, true);
+  try {
+    const failed = Array.from(
+      fixture.view.dom.querySelectorAll<HTMLImageElement | HTMLVideoElement>(
+        ".embed-inline img, .embed img, .embed video",
+      ),
+    );
+    assert.equal(failed.length, 4, "all four media render before loading");
+    for (const media of failed)
+      media.dispatchEvent(new dom.window.Event("error"));
+    const placeholders = Array.from(
+      fixture.view.dom.querySelectorAll<HTMLElement>(".media-missing"),
+      (holder) =>
+        [
+          holder.parentElement!.className,
+          holder.getAttribute("role"),
+          holder.getAttribute("aria-label"),
+          holder.textContent,
+        ].join("|"),
+    );
+    assert.deepEqual(placeholders, [
+      "embed-inline|img|a <b>bold</b> alt (image unavailable)|a <b>bold</b> alt",
+      "embed|img|Gallery (image unavailable)|Gallery",
+      "embed|img|Image unavailable|Image unavailable",
+      "embed|img|clip (video unavailable)|clip",
+    ]);
+    assert.equal(
+      fixture.view.dom.querySelectorAll(".embed img, .embed-inline img, video")
+        .length,
+      0,
+      "no broken image box is left behind",
+    );
+    assert.equal(
+      fixture.view.dom.querySelector(".media-missing b"),
+      null,
+      "alt text stays inert",
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
 test("clicking an inline image in a read-only view leaves the selection alone", () => {
   const source = "Look ![photo](pic.png) here";
   const fixture = mountView(source, true);
