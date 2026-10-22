@@ -343,6 +343,31 @@ fn an_unreadable_folder_keeps_the_restore_unaccepted_until_a_complete_pass() {
 }
 
 #[test]
+fn a_copied_lost_and_found_never_keeps_the_restore_unaccepted() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let (directory, s) = store();
+    let a = written(&s, "p.md", "Shared text of A\n");
+    share(&s, &a.id);
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |_| {});
+    let (root, data) = put_in_place(s, &backup);
+    // A backup of a dedicated mount's root also copies fsck's folder,
+    // which only root can read.
+    let found = root.join("lost+found");
+    fs::create_dir(&found).unwrap();
+    fs::set_permissions(&found, fs::Permissions::from_mode(0o000)).unwrap();
+    let s = Store::open_restored(root, data, "http://localhost".into()).unwrap();
+    let report = restore(&s);
+    fs::set_permissions(&found, fs::Permissions::from_mode(0o700)).unwrap();
+    let report = report.unwrap();
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &a)["restoredPath"], "p.md");
+}
+
+#[test]
 fn a_second_instance_on_the_same_state_fails_fast_in_either_mode() {
     let (_directory, s) = store();
     let (root, data) = (s.root.clone(), s.data.clone());
