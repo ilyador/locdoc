@@ -10,8 +10,10 @@ import {
   rename,
   copyFile,
   symlink,
+  chmod,
   rm,
 } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:net";
 import { once } from "node:events";
@@ -711,6 +713,27 @@ test("restore restarts the unit, and stops it to put the live data back when its
     }
   } finally {
     for (const unit of units) unit.systemctl("stop");
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a restore into a read-only state folder keeps the live data and says what it kept", async () => {
+  const root = await mkdtemp(join(tmpdir(), "locdoc-restore-"));
+  try {
+    const fixture = await restoreFixture(root);
+    const live = fingerprint(fixture.live);
+    await chmod(fixture.state, 0o500);
+    const failed = fixture.restore(fixture.snapshot);
+    await chmod(fixture.state, 0o700);
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /put the previous data back/);
+    const kept = failed.stderr.match(/restored copies are kept in (.*)/)[1];
+    for (const path of kept.split(" and "))
+      assert.ok(existsSync(path), `${path} exists`);
+    await removeKeptCopies(fixture);
+    assert.equal(fingerprint(fixture.live), live);
+  } finally {
+    await chmod(join(root, "live/state"), 0o700).catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });

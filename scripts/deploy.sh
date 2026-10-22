@@ -812,7 +812,8 @@ put_back() {
     fi
     [[ ! -e $state/.restoring-$restore_stamp ]] ||
       mv -T -- "$state/.restoring-$restore_stamp" "$state/$failed/copying"
-    rmdir -- "$state/$failed" 2>/dev/null || kept_state=$state/$failed
+    rmdir -- "$state/$failed" 2>/dev/null
+    [[ ! -d $state/$failed ]] || kept_state=$state/$failed
     if [[ -d $aside_state ]]; then
       for name in "${state_files[@]}"; do
         [[ -e $aside_state/$name || -L $aside_state/$name ]] || continue
