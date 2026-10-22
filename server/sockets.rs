@@ -208,6 +208,7 @@ async fn socket_loop(
                 if socket_access(&s, &id, &h, &a, &mut permission, true).await.is_err() { break; }
                 let Some(nonce) = heartbeat.ping() else { break; };
                 if !send_socket(&mut sender, WsMessage::Ping(nonce.to_vec().into())).await { break; }
+                if !send_socket(&mut sender, WsMessage::Binary(peers::Heartbeat::alive().into())).await { break; }
             }
         }
     }

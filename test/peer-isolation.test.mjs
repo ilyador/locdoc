@@ -55,7 +55,7 @@ function raw(options = {}) {
   return socket;
 }
 
-async function connected(owner = false) {
+async function connected(owner = false, id = document.id) {
   const ydoc = new Y.Doc();
   class Socket extends WebSocket {
     constructor(url) {
@@ -64,7 +64,7 @@ async function connected(owner = false) {
   }
   const provider = new WebsocketProvider(
     base.replace("http", "ws") + "/ws",
-    document.id,
+    id,
     ydoc,
     { params: { token }, WebSocketPolyfill: Socket, disableBc: true, connect: false },
   );
@@ -281,6 +281,29 @@ test("rotating IPv6 privacy addresses cannot bypass one prefix's visitor cap", a
     await close(other);
   } finally {
     await Promise.all(held.map(close));
+  }
+});
+
+test("an editor alone in a document stays connected while it idles", { timeout: 50_000 }, async () => {
+  // y-websocket closes a connection that brings it no message for 30 seconds,
+  // and an answered ping is not one. Alone, the editor gets no presence back.
+  const alone = await request("/api/files", { kind: "file", path: "alone.md" });
+  const { provider, ydoc } = await connected(true, alone.id);
+  let closes = 0;
+  provider.on("connection-close", () => { closes++; });
+  try {
+    await delay(36_000);
+    assert.equal(closes, 0, "the idle connection was closed by its own client");
+    assert.equal(provider.wsconnected, true);
+    assert.deepEqual(
+      [...provider.awareness.getStates().keys()],
+      [ydoc.clientID],
+      "staying connected shows no other peer",
+    );
+  } finally {
+    provider.destroy();
+    ydoc.destroy();
+    providers.delete(provider);
   }
 });
 
