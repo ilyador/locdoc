@@ -1437,4 +1437,129 @@ mod tests {
             assert_eq!(tool.input_schema["additionalProperties"], false);
         }
     }
+
+    const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=";
+
+    /// What a link visitor gets for one of the document's media references.
+    fn guest_media(s: &Store, doc: &str, path: &str, token: &str) -> StatusCode {
+        let request = Media {
+            path: path.into(),
+            token: Some(token.into()),
+        };
+        match media_file(s, doc, &request, &HeaderMap::new()) {
+            Ok(_) => StatusCode::OK,
+            Err(error) => error.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn restoring_a_version_cannot_publish_an_unapproved_local_file_to_link_visitors() {
+        let (_dir, s, d) = fixture();
+        // A private image the owner never approved for this document.
+        let png = BASE64.decode(ONE_PIXEL_PNG).unwrap();
+        fs::write(s.root.join("secret.png"), &png).unwrap();
+        // The connector controls the document's content, so one of its own
+        // saved versions can hold any text, including a reference to that file.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO revisions(id,doc,content,created,kind)
+                 VALUES('leak',?,?,?,'autosave')",
+                params![d.id, "![s](secret.png)\n", now()],
+            )
+            .unwrap();
+        // The document carries a public view link.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='view',token='leak-link' WHERE id=?",
+                [&d.id],
+            )
+            .unwrap();
+        let current = room_text(&s.room(&d).unwrap().lock().unwrap());
+        // Before the restore the file is private to its link visitors.
+        assert_eq!(
+            guest_media(&s, &d.id, "secret.png", "leak-link"),
+            StatusCode::FORBIDDEN
+        );
+        execute(
+            s.clone(),
+            access(&["locdoc:write"]),
+            "restore_version",
+            json!({"doc_id": d.id, "version_id": "leak", "expected_revision": hash(&current)}),
+        )
+        .await
+        .unwrap();
+        // Restoring a version must authorize media the same way an edit does:
+        // a reference the owner never approved stays private to link visitors.
+        assert_eq!(
+            guest_media(&s, &d.id, "secret.png", "leak-link"),
+            StatusCode::FORBIDDEN,
+            "a restored version must not publish an unapproved local file"
+        );
+    }
+
+    #[tokio::test]
+    async fn restoring_a_version_reactivates_an_already_approved_upload() {
+        let (_dir, s, d) = fixture();
+        let png = BASE64.decode(ONE_PIXEL_PNG).unwrap();
+        let upload = format!(".assets/{}/photo.png", d.id);
+        s.write_upload(&d, &upload, &png).unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "UPDATE docs SET permission='view',token='album-link' WHERE id=?",
+                [&d.id],
+            )
+            .unwrap();
+        let embed = format!("![photo]({upload})\n");
+        execute(
+            s.clone(),
+            access(&["locdoc:write"]),
+            "edit_document",
+            json!({"doc_id": d.id, "expected_revision": hash("# test\n\n"), "source": embed}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            guest_media(&s, &d.id, &upload, "album-link"),
+            StatusCode::OK
+        );
+        // Save this content as a version, then drop the reference.
+        s.db.lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO revisions(id,doc,content,created,kind)
+                 VALUES('album',?,?,?,'autosave')",
+                params![d.id, embed, now()],
+            )
+            .unwrap();
+        execute(
+            s.clone(),
+            access(&["locdoc:write"]),
+            "edit_document",
+            json!({"doc_id": d.id, "expected_revision": hash(&embed), "source": "# test\n\n"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            guest_media(&s, &d.id, &upload, "album-link"),
+            StatusCode::FORBIDDEN
+        );
+        // Restoring the version brings its own approved upload back.
+        let current = room_text(&s.room(&d).unwrap().lock().unwrap());
+        execute(
+            s.clone(),
+            access(&["locdoc:write"]),
+            "restore_version",
+            json!({"doc_id": d.id, "version_id": "album", "expected_revision": hash(&current)}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            guest_media(&s, &d.id, &upload, "album-link"),
+            StatusCode::OK,
+            "restoring re-activates media the document already approved"
+        );
+    }
 }

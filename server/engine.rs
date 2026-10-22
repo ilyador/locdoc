@@ -1202,8 +1202,12 @@ impl Room {
         }
         store.snapshot(document, self.engine.state.source(), true)?;
         let content = text::canonical(content);
-        store.grant_new_references(document, self.engine.state.source(), &content)?;
-        self.edit(store, document, |room| {
+        // Restoring a version re-activates media it already authorized, but it
+        // must not newly approve a file the document never had access to: the
+        // restored source may come from a connector that controls it. An edit
+        // cannot publish an unapproved local file, and neither can a restore.
+        let approved = store.authorized_references(document, &content)?;
+        self.edit_media(store, document, approved, |room| {
             apply_text(room.awareness.doc(), &room_text(room), &content);
             Vec::new()
         })?;
@@ -1270,6 +1274,20 @@ impl Room {
         document: &Document,
         command: impl FnOnce(&Room) -> Vec<Value>,
     ) -> Result<Vec<Value>> {
+        self.edit_media(store, document, HashSet::new(), command)
+    }
+
+    /// `edit`, additionally marking `media` references as approved for this
+    /// command so they stay authorized for link visitors. Callers pass only
+    /// references the document may already serve; an edit never approves a new
+    /// local file on its own.
+    pub(super) fn edit_media(
+        &mut self,
+        store: &Store,
+        document: &Document,
+        media: HashSet<String>,
+        command: impl FnOnce(&Room) -> Vec<Value>,
+    ) -> Result<Vec<Value>> {
         self.ensure_committed(store, document)?;
         if self.conflicted() {
             return Err(ApiError(
@@ -1278,7 +1296,7 @@ impl Room {
             ));
         }
         let rows = command(self);
-        self.accept(store, document, &rows, HashSet::new())?;
+        self.accept(store, document, &rows, media)?;
         self.reconcile(store, document)?;
         Ok(rows)
     }

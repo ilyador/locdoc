@@ -504,6 +504,18 @@ impl Store {
         }
         Ok(())
     }
+    /// References in `content` whose file this document may already serve.
+    /// A restore uses this to re-activate approved media without turning an
+    /// unapproved local file into a new grant, the way an edit cannot.
+    fn authorized_references(&self, d: &Document, content: &str) -> Result<HashSet<String>> {
+        Ok(Self::references(content)
+            .into_iter()
+            .filter(|reference| {
+                self.media_path(d, reference)
+                    .is_ok_and(|path| self.attachment_allowed(d, &path))
+            })
+            .collect())
+    }
     fn attachment_allowed(&self, d: &Document, path: &Path) -> bool {
         let db = self.db.lock().unwrap();
         let grant = db
