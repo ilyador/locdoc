@@ -457,6 +457,47 @@ fn a_duplicate_carries_only_the_image_approvals_the_original_had() {
     );
 }
 
+#[test]
+fn a_plain_text_duplicate_carries_no_image_approvals() {
+    let (_directory, s) = store();
+    let page = s.create_document("Album/page.md").unwrap();
+    let png = BASE64
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=")
+        .unwrap();
+    fs::write(s.root.join("Album/approved.png"), &png).unwrap();
+    fs::write(s.root.join("Album/page.md"), "![approved](approved.png)\n").unwrap();
+    let room = s.room(&page).unwrap();
+    assert!(s.persist(&page, &mut room.lock().unwrap()).unwrap());
+    drop(room);
+    let approved = s.media_path(&page, "approved.png").unwrap();
+    assert!(s.attachment_allowed(&page, &approved));
+    // As plain text the same characters are text, never media.
+    s.rename_document(&page.id, "Album/page.txt").unwrap();
+    let page = s.doc(&page.id).unwrap();
+    let room = s.room(&page).unwrap();
+    let source = room_text(&room.lock().unwrap());
+    let ending = room.lock().unwrap().engine.ending().to_owned();
+    drop(room);
+    let copy = s
+        .duplicate_document(&page, "Album/copy.txt", &source, &ending)
+        .unwrap();
+    let rows: i64 =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT (SELECT count(*) FROM active_media WHERE doc=?1)
+                  + (SELECT count(*) FROM trusted_references WHERE doc=?1)",
+                [&copy.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert_eq!(rows, 0);
+    // Turning the copy into Markdown later approves nothing either.
+    s.rename_document(&copy.id, "Album/copy.md").unwrap();
+    let copy = s.doc(&copy.id).unwrap();
+    assert!(!s.attachment_allowed(&copy, &approved));
+}
+
 /// One JSON-RPC exchange with the MCP endpoint.
 async fn rpc(endpoint: &str, request: Value) -> Value {
     let response = reqwest::Client::new()

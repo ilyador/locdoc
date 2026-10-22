@@ -494,7 +494,7 @@ impl Store {
         let path = relative_path(input, false)?;
         self.finish_pending_path(&path)?;
         if format(&path).is_none() {
-            return Err(bad("Document names must end with .md or .fountain."));
+            return Err(bad(FORMATS));
         }
         let full = self.safe(&path, false)?;
         let taken = || ApiError(StatusCode::CONFLICT, "That path already exists.".into());
@@ -583,7 +583,7 @@ impl Store {
         copy: &Document,
         source: &str,
     ) -> Vec<(String, Option<String>)> {
-        let mut approvals: Vec<(String, Option<String>)> = Self::references(source)
+        let mut approvals: Vec<(String, Option<String>)> = Self::media_references(copy, source)
             .into_iter()
             .filter_map(|reference| {
                 let path = self.media_path(original, &reference).ok()?;
