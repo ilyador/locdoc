@@ -723,6 +723,13 @@ impl Store {
             plan.records.retain(|(record, _)| record != id);
             plan.records.push((id.clone(), files[path].clone()));
         }
+        // Restored images are new files too. Identify each approval where its
+        // document's row places it, so a move pins what stayed behind.
+        let rows: Vec<(&str, &str)> = tracked
+            .iter()
+            .map(|document| (document.id.as_str(), document.path.as_str()))
+            .collect();
+        self.refresh_media_identities(&rows)?;
         self.apply(Pass::Settled, plan, &tracked, &reserved, complete, started)?;
         Ok(None)
     }

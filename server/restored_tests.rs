@@ -606,3 +606,30 @@ fn a_document_whose_folder_became_a_file_never_blocks_the_restore() {
     assert_eq!(placement(&report, &kept)["evidence"], "content");
     assert!(shared_text(&s, "old-link").is_none());
 }
+
+#[test]
+fn an_approved_image_stays_approved_for_a_document_moved_between_the_backup_steps() {
+    let (directory, s) = store();
+    let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+    fs::write(s.root.join("cover.png"), &png).unwrap();
+    s.create_folder("Album").unwrap();
+    let page = written(&s, "Album/page.md", "![cover](../cover.png)\n");
+    share(&s, &page.id);
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |root| {
+        fs::create_dir(root.join("Trip")).unwrap();
+        fs::rename(root.join("Album/page.md"), root.join("Trip/page.md")).unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(placement(&report, &page)["evidence"], "content");
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "Trip/page.md");
+    // The backup recorded the live image's identity, which no restored file
+    // has; the approval stays pinned to the restored cover where it was.
+    assert!(s.attachment_allowed(&moved, &s.root.join("cover.png")));
+    let request = Media {
+        path: "../cover.png".into(),
+        token: Some("old-link".into()),
+    };
+    assert!(media_file(&s, &page.id, &request, &HeaderMap::new()).is_ok());
+}
