@@ -11,6 +11,8 @@ export type Entry = {
   url?: string;
   format?: DocumentFormat;
 };
+// A media reference the owner sees but link visitors cannot.
+export type HiddenMedia = { path: string; reason: "unapproved" | "missing" };
 export type Document = {
   id: string;
   path: string;
@@ -28,6 +30,7 @@ export type Document = {
   lineEndingMigrated?: boolean;
   collaborationEpoch?: string;
   mediaToken?: string | null;
+  hiddenMedia?: HiddenMedia[];
 };
 export type Config = {
   owner: boolean;

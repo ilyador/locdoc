@@ -14,6 +14,7 @@ import {
   TextAa,
 } from "@phosphor-icons/react";
 import { ShareControls } from "./sharing";
+import { HiddenMediaSection } from "./hidden-media";
 import { CollaborationRecovery } from "./collaboration-recovery";
 import { RemovedDocumentRecovery } from "./removed-document-recovery";
 import { McpConnections } from "./mcp-authorization";
@@ -64,6 +65,9 @@ export function DocumentSharePanel({
         onChange={onChange}
         mcpTarget={doc.owner ? { kind: "document", id: doc.id } : undefined}
       />
+      {doc.owner && documentFormat(doc.path) === "markdown" && (
+        <HiddenMediaSection key={doc.id} doc={doc} />
+      )}
       {doc.owner && doc.path.includes("/") && (
         <button
           className="text-button"
