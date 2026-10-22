@@ -465,13 +465,17 @@ unit = Path(os.environ["FAKE_UNIT"])
 current = Path(os.environ["LOCDOC_RELEASES"]) / "current"
 action = sys.argv[2]
 
+# Only a live process of the release binary is the unit's, never a reused pid.
 def running():
     try:
         pid = int((unit / "pid").read_text())
         status = Path(f"/proc/{pid}/stat").read_text()
-    except (FileNotFoundError, ValueError):
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except (OSError, ValueError):
         return None
-    return None if status.rsplit(")", 1)[1].split()[0] == "Z" else pid
+    if status.rsplit(")", 1)[1].split()[0] == "Z" or exe != os.path.realpath(current / "locdoc"):
+        return None
+    return pid
 
 if action == "show":
     pid = running()
