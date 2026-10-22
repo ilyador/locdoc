@@ -343,31 +343,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        let previous = self
-            .db
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT id FROM docs WHERE path=? AND active=1",
-                [&path],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?;
-        if let Some(previous) = previous {
-            // A previous document whose file was found elsewhere follows it
-            // once a pass can place it; its name is not free yet.
-            let unplaced = self.discover_file_moves_locked()?;
-            if self.doc(&previous)?.path == path
-                && (unplaced.contains(&previous)
-                    || !self.retire_missing_identity(&previous, &full)?)
-            {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    "The previous document is busy or its file changed. Retry after its save finishes."
-                        .into(),
-                ));
-            }
-        }
+        self.free_document_path(&path, &full)?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -415,6 +391,165 @@ impl Store {
         // discovery after storage recovers. A desktop app may already have
         // written to it; rollback must never delete those bytes.
         result
+    }
+
+    /// Explicit creation reuses a path still recorded for a document only
+    /// once that document's file is known to be gone. One whose file was
+    /// found elsewhere follows it once a pass can place it; its name is not
+    /// free yet.
+    fn free_document_path(&self, path: &str, full: &Path) -> Result<()> {
+        let previous = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT id FROM docs WHERE path=? AND active=1",
+                [path],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(previous) = previous {
+            let unplaced = self.discover_file_moves_locked()?;
+            if self.doc(&previous)?.path == path
+                && (unplaced.contains(&previous)
+                    || !self.retire_missing_identity(&previous, full)?)
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "The previous document is busy or its file changed. Retry after its save finishes."
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// A new document at `input` holding `source`: another document's
+    /// accepted text without its comment records, written with that
+    /// document's line ending. It gets a fresh private identity and no
+    /// links. Its collaboration state starts from that text, so loading it
+    /// never approves media the way a desktop file's first read does; it
+    /// carries over only the original's approvals of files the same
+    /// spellings reach from its folder.
+    pub(super) fn duplicate_document(
+        &self,
+        original: &Document,
+        input: &str,
+        source: &str,
+        ending: &str,
+    ) -> Result<Document> {
+        use std::io::Write;
+        let _files = self.document_files.lock().unwrap();
+        let path = relative_path(input, false)?;
+        self.finish_pending_path(&path)?;
+        if format(&path).is_none() {
+            return Err(bad("Document names must end with .md or .fountain."));
+        }
+        let full = self.safe(&path, false)?;
+        let taken = || ApiError(StatusCode::CONFLICT, "That path already exists.".into());
+        match fs::symlink_metadata(&full) {
+            Ok(_) => return Err(taken()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+                return Err(bad("A file is in the way of that path."));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        fs::create_dir_all(full.parent().ok_or_else(|| bad("Invalid path."))?)?;
+        self.free_document_path(&path, &full)?;
+        let ending = text::uniform(ending);
+        let doc = Doc::with_options(Options {
+            offset_kind: OffsetKind::Utf16,
+            ..Options::default()
+        });
+        doc.get_or_insert_text("content")
+            .insert(&mut doc.transact_mut(), 0, source);
+        security::validate_document(&doc)?;
+        let state = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let copy = Document {
+            id: uuid::Uuid::new_v4().to_string(),
+            path,
+            permission: "private".into(),
+            token: None,
+        };
+        let approvals = if format(&copy.path) == format(&original.path) {
+            self.carried_approvals(original, &copy, source)
+        } else {
+            Vec::new()
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&full)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    taken()
+                } else {
+                    error.into()
+                }
+            })?;
+        file.write_all(text::render(source, ending).as_bytes())?;
+        file.sync_all()?;
+        disk::sync_directories(full.parent().unwrap(), &self.root)?;
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "INSERT INTO docs(id,path,state,disk_state,line_ending,media_initialized)
+             VALUES(?,?,?,?,?,1)",
+            params![copy.id, copy.path, state, state, ending],
+        )?;
+        namespace::record_identity(
+            &tx,
+            &copy.id,
+            namespace::Identity::of(&file.metadata()?).as_ref(),
+        )?;
+        for (reference, identity) in &approvals {
+            tx.execute(
+                "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
+                params![copy.id, reference],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO trusted_references(doc,reference,identity) VALUES(?,?,?)",
+                params![copy.id, reference, identity],
+            )?;
+        }
+        tx.commit()?;
+        drop(db);
+        self.permissions.invalidate();
+        // As with creation, a refused commit leaves the written file for
+        // private discovery once storage recovers.
+        Ok(copy)
+    }
+
+    /// References in `source` whose files the original may serve and which
+    /// the copy's same spelling reaches from its own folder, with the
+    /// identity of each file.
+    fn carried_approvals(
+        &self,
+        original: &Document,
+        copy: &Document,
+        source: &str,
+    ) -> Vec<(String, Option<String>)> {
+        let mut approvals: Vec<(String, Option<String>)> = Self::references(source)
+            .into_iter()
+            .filter_map(|reference| {
+                let path = self.media_path(original, &reference).ok()?;
+                if !self.attachment_allowed(original, &path)
+                    || self.media_path(copy, &reference).ok()? != path
+                {
+                    return None;
+                }
+                let identity = fs::metadata(&path)
+                    .ok()
+                    .and_then(|metadata| namespace::Identity::of(&metadata))
+                    .map(|identity| identity.as_str().to_owned());
+                Some((reference, identity))
+            })
+            .collect();
+        approvals.sort();
+        approvals
     }
 }
 

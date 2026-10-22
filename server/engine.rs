@@ -31,6 +31,10 @@ impl DocumentEngine {
     pub(super) fn source(&self) -> &str {
         self.state.source()
     }
+    /// The line endings its file uses, as text::render takes them.
+    pub(super) fn ending(&self) -> &str {
+        self.state.ending()
+    }
     pub(super) fn migrated(&self) -> bool {
         self.state.migrated()
     }

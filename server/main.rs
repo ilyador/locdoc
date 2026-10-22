@@ -1,3 +1,4 @@
+mod actions;
 mod browser_auth;
 mod comments;
 mod disk;

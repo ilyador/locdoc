@@ -47,6 +47,15 @@ pub(super) fn render(source: &str, ending: &str) -> String {
     }
     result
 }
+/// The one separator a new file takes from a document's line endings,
+/// which may record a separator for each line of another text.
+pub(super) fn uniform(ending: &str) -> &'static str {
+    match default_ending(ending) {
+        b'c' => "crlf",
+        b'r' => "cr",
+        _ => "lf",
+    }
+}
 fn default_ending(ending: &str) -> u8 {
     match ending {
         "crlf" => b'c',

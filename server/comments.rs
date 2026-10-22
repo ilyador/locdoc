@@ -167,6 +167,62 @@ pub(super) fn reading_source(source: &str) -> String {
     out.push_str(&source[from..]);
     out
 }
+/// Source without its comment records, for a copy that starts a new
+/// document. A record on a line of its own leaves with that line and with
+/// one of the blank lines that set it apart, so the copy keeps no gap where
+/// a conversation was. Text the parser leaves literal, as in code, stays.
+pub(super) fn without_records(source: &str) -> String {
+    fn leading_break(text: &str) -> usize {
+        if text.starts_with("\r\n") {
+            2
+        } else {
+            usize::from(text.starts_with(['\n', '\r']))
+        }
+    }
+    fn trailing_break(text: &str) -> usize {
+        if text.ends_with("\r\n") {
+            2
+        } else {
+            usize::from(text.ends_with(['\n', '\r']))
+        }
+    }
+    // Nothing, or a blank line, comes before the line starting here.
+    fn blank_before(text: &str) -> bool {
+        let line = text[..text.len() - trailing_break(text)].trim_end_matches([' ', '\t']);
+        text.is_empty() || line.is_empty() || line.ends_with(['\n', '\r'])
+    }
+    let mut out = source.to_owned();
+    for thread in parse(source).iter().rev() {
+        let before = out[..thread.from].trim_end_matches([' ', '\t']);
+        let rest = out[thread.to..].trim_start_matches([' ', '\t']);
+        let own_line = before.is_empty() || before.ends_with(['\n', '\r']);
+        let mut start = thread.from;
+        let mut end = thread.to;
+        if own_line || before.len() < thread.from {
+            // One space between the words either side is enough.
+            end = out.len() - rest.len();
+        }
+        if rest.is_empty() || rest.starts_with(['\n', '\r']) {
+            // Nothing of it stays at the end of its line.
+            start = before.len();
+            end = out.len() - rest.len();
+            if own_line {
+                end += leading_break(rest);
+                let after = &out[end..];
+                let separated = after.trim_start_matches([' ', '\t']);
+                if blank_before(before) {
+                    if after.is_empty() {
+                        start -= trailing_break(before);
+                    } else if separated.is_empty() || separated.starts_with(['\n', '\r']) {
+                        end += after.len() - separated.len() + leading_break(separated);
+                    }
+                }
+            }
+        }
+        out.replace_range(start..end, "");
+    }
+    out
+}
 fn utf16(source: &str, byte: usize) -> u32 {
     source[..byte].encode_utf16().count() as u32
 }
@@ -2003,5 +2059,71 @@ mod tests {
             reading_source("wor[[comment(alex): note]]\n[[comment(ana): reply]]d"),
             "word"
         );
+    }
+
+    #[test]
+    fn a_copy_without_records_leaves_no_gap_where_each_conversation_was() {
+        for (source, expected) in [
+            // Records the editor inserts as their own block, with replies.
+            (
+                "Para one.\n\n[[comment(alex): note]]\n[[comment(ana): reply]]\n\nPara two.\n",
+                "Para one.\n\nPara two.\n",
+            ),
+            ("Para one.\n\n[[comment(alex): note]]", "Para one.\n"),
+            ("Para one.\n\n[[comment(alex): note]]\n", "Para one.\n"),
+            ("[[comment(alex): note]]\n\nPara two.", "Para two."),
+            (
+                "Para one.\n\n[[comment(a): one]]\n\n[[comment(b): two]]\n\nPara two.",
+                "Para one.\n\nPara two.",
+            ),
+            (
+                "Line one\n  [[comment(alex): note]]\nLine two",
+                "Line one\nLine two",
+            ),
+            // Records written inside a line by a desktop editor.
+            (
+                "The passage[[comment(alex): note]]\nNext",
+                "The passage\nNext",
+            ),
+            (
+                "The passage [[comment(alex): note]]\r\nNext",
+                "The passage\r\nNext",
+            ),
+            ("Some [[comment(alex): note]] words", "Some words"),
+            ("Café[[comment(alex): note]] après", "Café après"),
+            ("wor[[comment(alex): note]]d", "word"),
+            (
+                "The passage[[comment(alex): note]]   \nNext",
+                "The passage\nNext",
+            ),
+            // Literal text stays.
+            (
+                "`[[comment(alex): code]]` and \\[[comment(alex): escaped]]",
+                "`[[comment(alex): code]]` and \\[[comment(alex): escaped]]",
+            ),
+            ("No comments here.\n", "No comments here.\n"),
+        ] {
+            assert_eq!(without_records(source), expected, "{source:?}");
+        }
+        // The editor's grammar cases: a copy renders as the source reads
+        // without its records, up to the spaces a removal leaves.
+        let rendered = |source: &str| {
+            let mut html = String::new();
+            pulldown_cmark::html::push_html(&mut html, parser(source));
+            html.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let cases: Vec<Value> =
+            serde_json::from_str(include_str!("../test/fixtures/file-comments.json")).unwrap();
+        for case in cases {
+            let source = case["source"].as_str().unwrap();
+            let copy = without_records(source);
+            assert!(parse(&copy).is_empty(), "{}", case["name"]);
+            assert_eq!(
+                rendered(&copy),
+                rendered(&reading_source(source)),
+                "{}",
+                case["name"]
+            );
+        }
     }
 }

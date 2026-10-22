@@ -263,6 +263,7 @@ pub(super) fn router(s: App) -> Router {
         .route("/api/files", post(create))
         .route("/api/shared/{token}", get(shared))
         .route("/api/docs/{id}", get(document).patch(rename))
+        .route("/api/docs/{id}/duplicate", post(actions::duplicate))
         .route("/api/docs/{id}/share", post(share))
         .route(
             "/api/docs/{id}/mcp",
