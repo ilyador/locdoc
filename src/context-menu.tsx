@@ -252,7 +252,9 @@ export function ContextMenu({
               }
             >
               {entry.icon && <entry.icon size={16} aria-hidden="true" />}
-              <span className="context-menu-label">{entry.label}</span>
+              <span className="context-menu-label" dir="auto">
+                {entry.label}
+              </span>
               {entry.detail && (
                 <span className="context-menu-detail">{entry.detail}</span>
               )}

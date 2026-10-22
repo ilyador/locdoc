@@ -5,6 +5,7 @@ import {
   Folder,
   Trash,
 } from "@phosphor-icons/react";
+import { isolateName, isolatePath } from "./bidi";
 import { trashItem, type FileActions } from "./file-actions";
 import { baseName, parentPath } from "./file-names";
 import type { TrashItem } from "./model";
@@ -22,7 +23,7 @@ const deletedWhen = (label: string) =>
 const contents = (item: TrashItem) =>
   item.kind === "folder"
     ? `Folder · ${item.documents} ${item.documents === 1 ? "document" : "documents"}`
-    : parentPath(item.path) || "Documents";
+    : isolatePath(parentPath(item.path)) || "Documents";
 
 // Settings › Recently deleted. Restoring puts an item back at its original
 // path, or explains why that path is taken; nothing is deleted for good here.
@@ -65,7 +66,7 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
       if (list.current?.contains(document.activeElement))
         refocus.current = index;
       setRestored((value) => ({ ...value, [item.id]: result.path }));
-      setStatus(`Restored to ${result.path}.`);
+      setStatus(`Restored to ${isolatePath(result.path)}.`);
     } else setErrors((value) => ({ ...value, [item.id]: result.error }));
   };
   return (
@@ -100,7 +101,9 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
               <li className="trash-row" key={item.id}>
                 <Glyph size={17} aria-hidden="true" />
                 <span className="trash-name">
-                  <strong title={item.path}>{baseName(item.path)}</strong>
+                  <strong title={item.path} dir="auto">
+                    {baseName(item.path)}
+                  </strong>
                   <small>
                     {contents(item)}
                     {stamp && (
@@ -170,7 +173,7 @@ export function TrashedNotice({
       <Trash size={16} aria-hidden="true" />
       <span>
         {folder
-          ? `This document is in Recently deleted with the folder ${baseName(item.path)}.`
+          ? `This document is in Recently deleted with the folder ${isolateName(baseName(item.path))}.`
           : "This document is in Recently deleted."}{" "}
         Links and MCP access are paused until you restore it.
       </span>
@@ -211,8 +214,8 @@ export function TrashedDocument({
       <h1>This document is in Recently deleted.</h1>
       <p>
         {folder
-          ? `${baseName(path)} was ${when} with the folder ${baseName(item.path)}. Restoring the folder brings back its documents with their comments, history and links.`
-          : `${baseName(path)} was ${when}. Restoring it brings back its comments, history and links.`}
+          ? `${isolateName(baseName(path))} was ${when} with the folder ${isolateName(baseName(item.path))}. Restoring the folder brings back its documents with their comments, history and links.`
+          : `${isolateName(baseName(path))} was ${when}. Restoring it brings back its comments, history and links.`}
       </p>
       {item.id ? (
         <button

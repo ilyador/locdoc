@@ -125,7 +125,9 @@ export function ShareControls({
       <div className="owner-access">
         <Avatar name={name} />
         <span>
-          <strong>{name}</strong>
+          <strong>
+            <bdi>{name}</bdi>
+          </strong>
           <small>Workspace owner</small>
         </span>
         <span>Always can edit</span>
@@ -222,8 +224,8 @@ export function FolderShare({
   return (
     <>
       <p className="dialog-description">
-        Share “{path.split("/").pop()}” and every document inside, including
-        nested folders and future additions.
+        Share “<bdi>{path.split("/").pop()}</bdi>” and every document inside,
+        including nested folders and future additions.
       </p>
       {value ? (
         <ShareControls

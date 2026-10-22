@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Entry } from "./model";
 import { documentTitle, webLink } from "./document-links";
+import { PathText } from "./ui";
 
 export function LinkPicker({
   entries,
@@ -62,6 +63,7 @@ export function LinkPicker({
         id="link-search"
         className="text-input"
         placeholder="Search documents or paste a URL…"
+        dir="auto"
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
@@ -120,8 +122,10 @@ export function LinkPicker({
             >
               <FileText size={18} />
               <span>
-                <strong>{documentTitle(entry)}</strong>
-                <small>{entry.path}</small>
+                <strong dir="auto">{documentTitle(entry)}</strong>
+                <small>
+                  <PathText path={entry.path} separator="/" />
+                </small>
               </span>
               {!entry.shared && (
                 <LockSimple size={13} aria-label="Private document" />

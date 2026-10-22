@@ -38,6 +38,7 @@ export function RenameDocument({
         <input
           id="rename"
           className="text-input"
+          dir="auto"
           name="path"
           value={path}
           disabled={pending}

@@ -1,4 +1,5 @@
-import React, { type CSSProperties } from "react";
+import React, { Fragment, type CSSProperties } from "react";
+import { hasRightToLeft } from "./bidi";
 import { normalizePresence } from "./presence";
 const colors = ["#487495", "#b46538", "#526db0", "#a04c73", "#80752c"];
 export function IconButton({
@@ -43,6 +44,29 @@ export function Avatar({
     >
       {safe.name.slice(0, 1).toUpperCase()}
     </span>
+  );
+}
+// A path reads left to right like the interface, each folder in its own
+// direction, so Hebrew folder names cannot swap places or carry the slashes
+// with them. A path without right-to-left letters stays one plain string.
+export function PathText({
+  path,
+  separator = " / ",
+}: {
+  path: string;
+  separator?: string;
+}) {
+  const parts = path.split("/");
+  if (!hasRightToLeft(path)) return <>{parts.join(separator)}</>;
+  return (
+    <>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {index > 0 && separator}
+          <bdi>{part}</bdi>
+        </Fragment>
+      ))}
+    </>
   );
 }
 export function timeAgo(t: number) {

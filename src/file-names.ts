@@ -6,6 +6,7 @@ import {
   type DocumentFormat,
 } from "./document-format";
 import type { Entry } from "./model";
+import { isolateName } from "./bidi";
 
 // Names and paths for the sidebar's file actions. Everything here is pure, so
 // the inline name field validates on every keystroke without a request.
@@ -75,8 +76,12 @@ export function checkName(
   if (options.original !== undefined && name === options.original)
     return { ...result, name, unchanged: true };
   if (options.siblings.includes(name))
-    return { ...result, name, error: `${name} already exists here.` };
-  let hint = name === value ? "" : `Saved as ${name}`;
+    return {
+      ...result,
+      name,
+      error: `${isolateName(name)} already exists here.`,
+    };
+  let hint = name === value ? "" : `Saved as ${isolateName(name)}`;
   if (options.kind === "file" && options.original !== undefined) {
     const before = documentExtension(options.original);
     const after = documentExtension(name);

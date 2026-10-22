@@ -68,6 +68,7 @@ export function InlineName({
           aria-describedby={message ? messageId : undefined}
           aria-busy={edit.saving || undefined}
           readOnly={edit.saving}
+          dir="auto"
           placeholder={edit.kind === "folder" ? "Folder name" : "Document name"}
           spellCheck={false}
           autoComplete="off"

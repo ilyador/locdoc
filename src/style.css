@@ -362,6 +362,13 @@ button:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A name in interface type reads in its own direction but keeps the
+   interface's alignment; a long one is cut at its own end. */
+.sidebar-folder-name,
+.trash-name strong,
+.link-results strong {
+  text-align: match-parent;
+}
 .file-tree {
   padding: 0 12px;
   overflow-y: auto;
@@ -1962,6 +1969,8 @@ button:hover {
   font: inherit;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+  /* Each line of a message reads in the direction of its own text. */
+  unicode-bidi: plaintext;
 }
 .comment-name {
   color: var(--secondary);

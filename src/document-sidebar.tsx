@@ -171,7 +171,7 @@ export function DocumentSidebar({
         {actions && <div className="sidebar-actions">{actions}</div>}
       </div>
       {label && (
-        <div className="sidebar-folder-name" title={label}>
+        <div className="sidebar-folder-name" title={label} dir="auto">
           {label}
         </div>
       )}

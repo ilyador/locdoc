@@ -3,6 +3,7 @@ import { api } from "./api";
 import { isDocumentPath } from "./document-format";
 import { archiveOwnerDrafts, type DraftArchive } from "./drafts";
 import { recoveredSource, type RemovedRecovery } from "./removed-recovery";
+import { PathText } from "./ui";
 import { useRemote } from "./use-remote";
 
 type RemovedDocument = { id: string; path: string; removed: number | null };
@@ -109,7 +110,9 @@ export function RemovedDocumentRecovery() {
       )}
       {remote.data?.map((entry) => (
         <div className="removed-recovery-row" key={entry.id}>
-          <span title={entry.path}>{entry.path}</span>
+          <span title={entry.path}>
+            <PathText path={entry.path} separator="/" />
+          </span>
           <button
             className="button small"
             disabled={busy !== null}
