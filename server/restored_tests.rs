@@ -808,3 +808,73 @@ fn a_file_replaced_after_the_pass_placed_it_is_never_compared() {
         "a file the pass never placed is not"
     );
 }
+
+#[test]
+fn a_restored_backup_keeps_deleted_documents_in_the_trash_ready_to_put_back() {
+    let (directory, s) = store();
+    let kept = written(&s, "kept.md", "Kept text\n");
+    let deleted = written(&s, "Notes/deleted.md", "Deleted text\n");
+    share(&s, &deleted.id);
+    let trash = s.trash_document(&deleted.id).unwrap();
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |_| {});
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &kept)["restoredPath"], "kept.md");
+    // The pass places active documents only; the trashed one is no file
+    // to match and none to retire.
+    assert!(
+        report["documents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|placed| placed["id"] != deleted.id.as_str())
+    );
+    assert_eq!(report["unclaimedFiles"], json!([]));
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert!(shared_text(&s, "old-link").is_none());
+    // Its copy in the trash has a new inode; the restore needs none of its
+    // old evidence.
+    assert_eq!(s.restore_trash(&trash).unwrap().0, "Notes/deleted.md");
+    assert_eq!(
+        shared_text(&s, "old-link").as_deref(),
+        Some("Deleted text\n")
+    );
+    assert_eq!(s.index_document("Notes/deleted.md").unwrap().id, deleted.id);
+}
+
+#[test]
+fn a_backup_without_the_trash_folder_retires_what_it_held_with_its_text() {
+    let (directory, s) = store();
+    let deleted = written(&s, "deleted.md", "Deleted text\n");
+    share(&s, &deleted.id);
+    s.trash_document(&deleted.id).unwrap();
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |root| {
+        fs::rename(
+            root.join(crate::namespace::TRASH),
+            root.with_extension("trash-aside"),
+        )
+        .unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    let (active, path): (i64, String) =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT active,retired_path FROM docs WHERE id=?",
+                [&deleted.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!((active, path.as_str()), (0, "deleted.md"));
+    assert!(crate::actions::items(&s).unwrap().is_empty());
+}
