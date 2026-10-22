@@ -1228,3 +1228,84 @@ fn a_backup_without_the_trash_folder_retires_what_it_held_with_its_text() {
     assert_eq!((active, path.as_str()), (0, "deleted.md"));
     assert!(crate::actions::items(&s).unwrap().is_empty());
 }
+
+/// Whether a visitor with the view link loads this media reference.
+fn visitor_media(s: &Store, document: &Document, reference: &str) -> bool {
+    let request = Media {
+        path: reference.into(),
+        token: Some("view-link".into()),
+    };
+    media_file(s, &document.id, &request, &HeaderMap::new()).is_ok()
+}
+
+#[test]
+fn a_document_back_from_the_trash_in_another_folder_never_lends_its_approvals_there() {
+    let (directory, s) = store();
+    let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+    s.create_folder("A").unwrap();
+    s.create_folder("B").unwrap();
+    fs::write(s.root.join("A/photo.png"), &png).unwrap();
+    fs::write(s.root.join("B/photo.png"), &png).unwrap();
+    // Its first load approves A/photo.png; B/photo.png is never approved.
+    let page = written(&s, "A/t.md", "![p](photo.png)\n");
+    link(&s, &page, "view-link");
+    assert!(visitor_media(&s, &page, "photo.png"));
+    let item = s.trash_document(&page.id).unwrap();
+    let backup = directory.path().join("backup");
+    back_up(&s, &backup, |_| {
+        s.restore_trash(&item).unwrap();
+        s.rename_document(&page.id, "B/t.md").unwrap();
+        let moved = s.doc(&page.id).unwrap();
+        assert!(!visitor_media(&s, &moved, "photo.png"));
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &page)["evidence"], "content");
+    assert_eq!(placement(&report, &page)["restoredPath"], "B/t.md");
+    let moved = s.doc(&page.id).unwrap();
+    // The image its spelling now names from B was never approved, and the
+    // one it approved stays approved where it is.
+    assert!(!visitor_media(&s, &moved, "photo.png"));
+    assert!(s.attachment_allowed(&moved, &s.root.join("A/photo.png")));
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    let moved = s.doc(&page.id).unwrap();
+    assert!(!visitor_media(&s, &moved, "photo.png"));
+    assert!(s.attachment_allowed(&moved, &s.root.join("A/photo.png")));
+}
+
+#[test]
+fn a_document_trashed_with_another_folder_never_lends_its_approvals_there() {
+    let (directory, s) = store();
+    let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
+    s.create_folder("A").unwrap();
+    s.create_folder("F").unwrap();
+    fs::write(s.root.join("A/photo.png"), &png).unwrap();
+    fs::write(s.root.join("F/photo.png"), &png).unwrap();
+    let page = written(&s, "A/x.md", "![p](photo.png)\n");
+    link(&s, &page, "view-link");
+    written(&s, "F/y.md", "Text of Y\n");
+    written(&s, "F/z.md", "Text of Z\n");
+    let backup = directory.path().join("backup");
+    let mut item = String::new();
+    // It joins F, which then goes to the trash: most of F's documents say
+    // the item came from F, so a restore puts it back there.
+    back_up(&s, &backup, |_| {
+        s.rename_document(&page.id, "F/x.md").unwrap();
+        item = s.trash_folder("F").unwrap();
+    });
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &page)["evidence"], "trashed");
+    let (root, data) = (s.root.clone(), s.data.clone());
+    drop(s);
+    let s = Store::open(root, data, "http://localhost".into()).unwrap();
+    s.retire_missing_documents().unwrap();
+    assert_eq!(s.restore_trash(&item).unwrap().0, "F");
+    let moved = s.doc(&page.id).unwrap();
+    assert_eq!(moved.path, "F/x.md");
+    assert!(!visitor_media(&s, &moved, "photo.png"));
+    assert!(s.attachment_allowed(&moved, &s.root.join("A/photo.png")));
+}

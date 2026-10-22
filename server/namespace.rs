@@ -590,8 +590,8 @@ struct TrashChanges {
     /// and location.
     items: Vec<(String, EntryKind, String, String)>,
     /// Trashed documents whose text it found outside the trash, with that
-    /// file's path and evidence.
-    restored: Vec<(String, String, Option<Identity>)>,
+    /// file's path and evidence and the path a restore would give them.
+    restored: Vec<(String, String, Option<Identity>, String)>,
     /// Items trashed documents leave, which may be left empty.
     left: HashSet<String>,
 }
@@ -610,6 +610,9 @@ struct Trashing {
     /// The path a restore gives it.
     original: String,
     evidence: Option<Identity>,
+    /// Where its media approvals name files from: its row path, or the path
+    /// a restore would have given it.
+    from: String,
 }
 
 /// Turn the restore pass's matches into the trash's changes. A document
@@ -650,9 +653,12 @@ fn trash_changes(
         let Some(inside) = below(path, TRASH) else {
             if let Some(item) = item(id) {
                 changes.left.insert(item);
-                changes
-                    .restored
-                    .push((id.clone(), path.clone(), files[path].clone()));
+                changes.restored.push((
+                    id.clone(),
+                    path.clone(),
+                    files[path].clone(),
+                    originals[id.as_str()].to_owned(),
+                ));
             }
             continue;
         };
@@ -715,6 +721,7 @@ fn trash_changes(
                     original.clone()
                 },
                 evidence: trash.files[path].clone(),
+                from: originals[document].to_owned(),
             });
         }
     }
@@ -1162,7 +1169,7 @@ impl Store {
         let returning: Vec<(&str, &Identity)> = changes
             .restored
             .iter()
-            .filter_map(|(id, _, evidence)| Some((id.as_str(), evidence.as_ref()?)))
+            .filter_map(|(id, _, evidence, _)| Some((id.as_str(), evidence.as_ref()?)))
             .collect();
         // Every restored file is new, so an earlier gap is no evidence here.
         let mut plan = classify(&tracked, &returning, &files, &HashSet::new());
@@ -1194,24 +1201,31 @@ impl Store {
             changes
                 .restored
                 .iter()
-                .map(|(id, path, _)| (id.clone(), path.clone())),
+                .map(|(id, path, ..)| (id.clone(), path.clone())),
         );
-        // Rows going to the trash first leave paths active documents may
-        // take; trashed documents come back once those have left theirs.
-        self.commit_trashed(&changes)?;
         // Restored images are new files too. Identify each approval where its
-        // document's row places it, so a move pins what stayed behind.
+        // document's row places it, or a trashed one's restore would, so a
+        // move pins what stayed behind.
         let rows: Vec<(&str, &str)> = tracked
             .iter()
             .map(|document| (document.id.as_str(), document.path.as_str()))
             .chain(
                 changes
+                    .trashed
+                    .iter()
+                    .map(|trashed| (trashed.id.as_str(), trashed.from.as_str())),
+            )
+            .chain(
+                changes
                     .restored
                     .iter()
-                    .map(|(id, path, _)| (id.as_str(), path.as_str())),
+                    .map(|(id, _, _, from)| (id.as_str(), from.as_str())),
             )
             .collect();
         self.refresh_media_identities(&rows)?;
+        // Rows going to the trash first leave paths active documents may
+        // take; trashed documents come back once those have left theirs.
+        self.commit_trashed(&changes)?;
         self.apply(Pass::Settled, plan, &tracked, &reserved, &unlisted, started)?;
         self.commit_restored(&changes)?;
         Ok(None)
@@ -1830,11 +1844,41 @@ impl Store {
             )?;
             tx.execute("DELETE FROM document_gaps WHERE doc=?", [&trashed.id])?;
             record_identity(&tx, &trashed.id, trashed.evidence.as_ref())?;
+            self.reanchor_restored_media(&tx, &trashed.id, &trashed.from, &trashed.original)?;
         }
         tx.commit()?;
         drop(db);
         self.permissions.invalidate();
         Ok(())
+    }
+
+    /// A document the restore pass places in another folder than the one its
+    /// media approvals name files from moved as a pass would move it: they
+    /// are checked against the files they resolved to there, so they never
+    /// lend the new folder another image with their spelling.
+    fn reanchor_restored_media(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        if Path::new(from).parent() == Path::new(to).parent() {
+            return Ok(());
+        }
+        let document = tx.query_row(
+            "SELECT permission,token FROM docs WHERE id=?",
+            [id],
+            |row| {
+                Ok(Document {
+                    id: id.to_owned(),
+                    path: from.to_owned(),
+                    permission: row.get(0)?,
+                    token: row.get(1)?,
+                })
+            },
+        )?;
+        self.reanchor_moved_media(tx, &document, to)
     }
 
     /// Bring back the trashed documents the restore pass found outside the
@@ -1848,7 +1892,7 @@ impl Store {
         }
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        for (id, path, evidence) in &changes.restored {
+        for (id, path, evidence, from) in &changes.restored {
             vacate(&tx, path, id)?;
             let updated = tx.execute(
                 "UPDATE docs SET active=1,path=? WHERE id=? AND active=2",
@@ -1859,6 +1903,7 @@ impl Store {
             }
             tx.execute("DELETE FROM trashed_documents WHERE doc=?", [id])?;
             record_identity(&tx, id, evidence.as_ref())?;
+            self.reanchor_restored_media(&tx, id, from, path)?;
         }
         for item in &changes.left {
             let documents: i64 = tx.query_row(
