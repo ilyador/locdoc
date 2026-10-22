@@ -142,6 +142,13 @@ elif command == "signed-clients":
         clients = []
     legacy = lambda client: len(client) == 70 and all(c in "0123456789abcdef" for c in client[6:])
     print(sum(not legacy(client) for client in clients))
+elif command == "trash-items":
+    # Items in Recently deleted, which builds from before the trash can
+    # neither list nor restore.
+    try:
+        print(connect(args[0]).execute("SELECT count(*) FROM trash").fetchone()[0])
+    except sqlite3.OperationalError:
+        print(0)
 elif command == "space":
     # destination=source pairs. Copies onto one filesystem must fit together,
     # with 64 MiB to spare.
@@ -631,7 +638,7 @@ cmd_deploy() {
 }
 
 cmd_rollback() {
-  local current name output signed
+  local current name output signed kind items
   resolve_paths
   lock_releases
   current=$(current_release)
@@ -644,10 +651,18 @@ cmd_rollback() {
   [[ -x $releases/$name/locdoc && -f $releases/$name/web/index.html && -f $releases/$name/manifest.json ]] ||
     die "release $name is incomplete"
   [[ ! -f $releases/$name/FAILED ]] || say "warning: $name failed its checks when it was deployed"
-  if [[ $(py get "$releases/$name/manifest.json" kind) == adopted ]]; then
+  kind=$(py get "$releases/$name/manifest.json" kind)
+  if [[ $kind == adopted ]]; then
     signed=$(py signed-clients "$state/locdoc.sqlite")
     ((signed == 0)) || say "warning: $name was adopted from a build that may predate signed MCP clients;" \
       "$signed MCP connection(s) would stop refreshing and need connecting again, or roll forward"
+  fi
+  # The adopted build predates the trash, as does every build whose commit
+  # lacks it: those binaries never name its folder.
+  if [[ $kind == adopted ]] || ! grep -qaF -- .locdoc-trash "$releases/$name/locdoc"; then
+    items=$(py trash-items "$state/locdoc.sqlite")
+    ((items == 0)) || say "warning: $name predates the trash;" \
+      "$items Recently deleted item(s) stay in .locdoc-trash but cannot be listed or restored until you roll forward"
   fi
   make_work
   py inspect "$state/locdoc.sqlite" >"$work/before.json"
