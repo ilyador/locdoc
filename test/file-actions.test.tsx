@@ -790,8 +790,38 @@ test("Recently deleted lists the trash newest first, restores, and keeps a confl
     assert.match(screen.getByRole("alert").textContent!, /a\.md is taken/),
   );
   assert.ok(screen.getByRole("button", { name: "Restore a.md" }), "The conflict keeps its row");
-  fireEvent.click(screen.getByRole("button", { name: "Restore b.txt" }));
+  const restoreB = screen.getByRole("button", { name: "Restore b.txt" });
+  restoreB.focus();
+  const releaseRestore = api.hold("POST /api/trash/trash-2/restore");
+  fireEvent.click(restoreB);
+  await waitFor(() => assert.equal(restoreB.textContent, "Restoring…"));
+  assert.ok(
+    document.activeElement === restoreB,
+    "A restore in progress keeps keyboard focus on its button",
+  );
+  assert.equal(restoreB.getAttribute("aria-disabled"), "true");
+  await act(async () => {
+    releaseRestore();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
   await waitFor(() => assert.ok(screen.queryByRole("button", { name: "Restore b.txt" }) === null, "No such element"));
   await waitFor(() => assert.ok(row("b.txt")));
   assert.match(document.querySelector(".recently-deleted [role=status]")!.textContent!, /Restored to b\.txt/);
+  assert.ok(
+    document.activeElement === screen.getByRole("button", { name: "Restore a.md" }),
+    "Focus moves to the next item instead of leaving the dialog",
+  );
+  // The last item leaves only the section's own heading to return to.
+  await act(async () => {
+    await api.fetch("/api/docs/new-1", {
+      method: "PATCH",
+      body: JSON.stringify({ path: "a2.md" }),
+    });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Restore a.md" }));
+  await waitFor(() => assert.ok(screen.queryByRole("button", { name: "Restore a.md" }) === null, "No such element"));
+  assert.ok(
+    document.activeElement === document.querySelector(".recently-deleted summary"),
+    "With nothing left, focus returns to Recently deleted",
+  );
 });

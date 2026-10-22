@@ -110,7 +110,8 @@ button {
   border: 0;
   background: none;
 }
-button:disabled {
+button:disabled,
+.button[aria-disabled="true"] {
   cursor: default;
   opacity: 0.48;
 }

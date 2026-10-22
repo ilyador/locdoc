@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   ArrowCounterClockwise,
   FileText,
@@ -33,18 +33,37 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState("");
+  const working = useRef(false);
+  const list = useRef<HTMLUListElement>(null);
+  const summary = useRef<HTMLElement>(null);
+  // A restored row leaves the list; the keyboard stays where that row was.
+  const refocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const index = refocus.current;
+    if (index === null) return;
+    refocus.current = null;
+    const buttons = Array.from(
+      list.current?.querySelectorAll<HTMLButtonElement>(".trash-row button") ||
+        [],
+    );
+    (buttons[Math.min(index, buttons.length - 1)] || summary.current)?.focus();
+  });
   const items = (remote.data?.items || [])
     .map(trashItem)
     .filter((item): item is TrashItem => !!item && !(item.id in restored))
     .sort((a, b) => b.deleted - a.deleted);
-  const restore = async (item: TrashItem) => {
-    if (busy) return;
+  const restore = async (item: TrashItem, index: number) => {
+    if (working.current) return;
+    working.current = true;
     setBusy(item.id);
     setErrors(({ [item.id]: _, ...rest }) => rest);
     setStatus("");
     const result = await files.restore(item, { quiet: true });
+    working.current = false;
     setBusy(null);
     if (result.ok) {
+      if (list.current?.contains(document.activeElement))
+        refocus.current = index;
       setRestored((value) => ({ ...value, [item.id]: result.path }));
       setStatus(`Restored to ${result.path}.`);
     } else setErrors((value) => ({ ...value, [item.id]: result.error }));
@@ -62,7 +81,7 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
         }
       }}
     >
-      <summary>Recently deleted</summary>
+      <summary ref={summary}>Recently deleted</summary>
       <p className="field-help">
         Deleted documents and folders keep their comments, history and links
         here. Restoring puts them back where they were.
@@ -73,8 +92,8 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
         <p className="field-help">Nothing has been deleted.</p>
       )}
       {items.length > 0 && (
-        <ul className="trash-list">
-          {items.map((item) => {
+        <ul className="trash-list" ref={list}>
+          {items.map((item, index) => {
             const stamp = deletedAgo(item);
             const Glyph = item.kind === "folder" ? Folder : FileText;
             return (
@@ -99,11 +118,13 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
                     </span>
                   )}
                 </span>
+                {/* Never disabled while a restore runs: a disabled button
+                    would drop keyboard focus out of the dialog. */}
                 <button
                   className="button quiet small-button"
                   aria-label={`Restore ${item.path}`}
-                  disabled={busy !== null}
-                  onClick={() => void restore(item)}
+                  aria-disabled={busy !== null || undefined}
+                  onClick={() => void restore(item, index)}
                 >
                   <ArrowCounterClockwise size={15} aria-hidden="true" />
                   {busy === item.id ? "Restoring…" : "Restore"}
