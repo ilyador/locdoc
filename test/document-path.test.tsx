@@ -147,7 +147,11 @@ test("an external rename updates the title and breadcrumb, and a new format reop
   assert.equal(document.title, "Later plan · locdoc", "Text names drop .txt too");
   assert.equal(crumbs().extension, ".txt");
   await waitFor(() => assert.equal(reads("/api/docs/notes-plan-md"), opened + 1));
-  await waitFor(() => assert.ok(editor()));
+  // Plain text has its own editor, without Markdown.
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("textbox", { name: "Plain text document" })),
+  );
+  assert.equal(editor(), null);
 });
 
 test("Fountain and text documents open with their names, without extensions, as titles", async () => {

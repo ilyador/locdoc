@@ -178,6 +178,7 @@ let fireEvent: typeof import("@testing-library/react").fireEvent;
 let waitFor: typeof import("@testing-library/react").waitFor;
 let WorkspaceView: typeof import("../src/app").WorkspaceView;
 let useAppearance: typeof import("../src/appearance").useAppearance;
+let useFileActions: typeof import("../src/file-actions").useFileActions;
 let MarkdownEditor: typeof import("../src/editor").MarkdownEditor;
 const sockets: any[] = [];
 const requests: { path: string; method: string }[] = [];
@@ -265,6 +266,7 @@ before(async () => {
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app"));
   ({ useAppearance } = await import("../src/appearance"));
+  ({ useFileActions } = await import("../src/file-actions"));
   ({ MarkdownEditor } = await import("../src/editor"));
   globalThis.fetch = (async (
     input: RequestInfo | URL,
@@ -471,33 +473,51 @@ test("plain text ignores Markdown commands and keeps hidden comment records atom
 function WorkspaceFixture() {
   const appearance = useAppearance();
   const [id, setId] = useState("plain");
+  const entries = Object.values(docs).map((doc: any) => ({
+    path: doc.path,
+    id: doc.id,
+    kind: "file" as const,
+    shared: false,
+  }));
+  const navigate = async (
+    from: string | null,
+    next: string | null,
+    prepare: () => Promise<void>,
+  ) => {
+    await prepare();
+    setId((current) => (current === from ? (next ?? current) : current));
+    return true;
+  };
+  // The sidebar's file actions belong to the workspace.
+  const files = useFileActions({
+    owner: true,
+    root: "/tmp/fixture",
+    entries,
+    patchEntries() {},
+    async loadTree() {},
+    currentId: () => id,
+    navigate,
+    setExpanded() {},
+    view: "date",
+    setView() {},
+    setQuery() {},
+    setSidebar() {},
+  });
   return (
     <WorkspaceView
       workspace={
         {
           appearance,
           id,
-          async navigate(
-            from: string,
-            next: string,
-            prepare: () => Promise<void>,
-          ) {
-            await prepare();
-            setId((current) => (current === from ? next : current));
-            return true;
-          },
+          navigate,
+          files,
           config: {
             owner: true,
             guest: "test",
             root: "/tmp/fixture",
             publicUrl: "http://localhost",
           },
-          entries: Object.values(docs).map((doc: any) => ({
-            path: doc.path,
-            id: doc.id,
-            kind: "file",
-            shared: false,
-          })),
+          entries,
           initialDocument: null,
           error: "",
           name: "Owner",
