@@ -1485,6 +1485,9 @@ button:hover {
   .find-toggle {
     width: 40px;
   }
+  .find-text-button {
+    min-width: 44px;
+  }
   .find-replace {
     padding-inline-start: 44px;
   }
@@ -1506,7 +1509,9 @@ button:hover {
   }
   .find-tools {
     flex: 1 1 100%;
-    justify-content: space-between;
+  }
+  .find-navigation {
+    margin-inline-start: auto;
   }
   .find-replace {
     padding-inline-start: 0;
