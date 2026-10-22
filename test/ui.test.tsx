@@ -1188,6 +1188,45 @@ test("MCP consent identifies the callback origin and never approves access autom
   }
 });
 
+test("MCP consent shows an OAuth error's description, or its code without one", async () => {
+  const { McpAuthorization } = await import("../src/mcp-authorization");
+  const original = globalThis.fetch;
+  const failures = [
+    {
+      error: "invalid_request",
+      error_description:
+        "This connection request expired. Start connecting again from the app.",
+    },
+    { error: "server_error" },
+  ];
+  globalThis.fetch = async (_url, init = {}) => {
+    if (init.method === "POST")
+      return new Response(JSON.stringify(failures.shift()), { status: 400 });
+    return response({
+      clientName: "ChatGPT",
+      redirectUri: "https://callback.example.test/oauth/complete",
+      scopes: ["locdoc:read"],
+    });
+  };
+  const page = render(<McpAuthorization request="mcp_q_e30.Zm9v" />);
+  try {
+    await page.findByText("https://callback.example.test");
+    fireEvent.click(page.getByRole("button", { name: "Allow access" }));
+    const alert = await page.findByRole("alert");
+    assert.equal(
+      alert.textContent,
+      "This connection request expired. Start connecting again from the app.",
+    );
+    fireEvent.click(page.getByRole("button", { name: "Allow access" }));
+    await waitFor(() =>
+      assert.equal(page.getByRole("alert").textContent, "server_error"),
+    );
+  } finally {
+    page.unmount();
+    globalThis.fetch = original;
+  }
+});
+
 test("disconnecting an MCP connection keeps it visible on failure and removes it only after success", async () => {
   const { McpConnections } = await import("../src/mcp-authorization");
   const original = globalThis.fetch;

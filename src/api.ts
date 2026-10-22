@@ -51,9 +51,12 @@ export async function api<T = unknown>(
   const body = await response
     .json()
     .catch(() => ({ error: "The server returned an unexpected response." }));
+  // OAuth endpoints answer {error: code, error_description: message}.
   if (!response.ok)
     throw new ApiError(
-      body.error || `Request failed (${response.status}).`,
+      body.error_description ||
+        body.error ||
+        `Request failed (${response.status}).`,
       response.status,
     );
   if ((path === "/api/login" || path === "/api/redeem") && body.session)
