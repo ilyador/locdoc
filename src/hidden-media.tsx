@@ -12,17 +12,16 @@ const reasons: Record<string, string> = {
   unapproved: "Not approved for link visitors",
   missing: "File not found",
 };
-// The server names a refusal; known codes read as sentences, anything else
-// is shown as inert text.
+// The codes POST /api/docs/{id}/media/share refuses with read as sentences;
+// anything else is shown as inert text.
 const refusals: Record<string, string> = {
   missing: "File not found",
-  "not-found": "File not found",
+  // Also a remote link, a hidden folder or Locdoc's own data.
   outside: "Outside your documents folder",
-  hidden: "In a hidden folder",
-  state: "Inside Locdoc's own data",
-  "not-image": "Not an image or video",
-  unsupported: "Not an image or video",
-  "not-file": "Not a regular file",
+  // Another kind of file, or over the size limit.
+  unsupported: "Not an image or video Locdoc can show",
+  // The document no longer names it.
+  unreferenced: "No longer in this document",
 };
 
 function Preview({ doc, item }: { doc: Document; item: HiddenMedia }) {

@@ -206,6 +206,37 @@ test("hidden images list their reason and are shown to link visitors on request"
   assert.ok(screen.getByText("pics/b.png"));
 });
 
+test("each refusal the server sends reads as its reason", async () => {
+  const hidden: HiddenMedia[] = [
+    { path: "pics/gone.png", reason: "unapproved" },
+    { path: "pics/huge.jpg", reason: "unapproved" },
+    { path: "pics/odd.png", reason: "unapproved" },
+  ];
+  const reasons: Record<string, string> = {
+    "pics/gone.png": "unreferenced",
+    "pics/huge.jpg": "unsupported",
+    "pics/odd.png": "<b>new code</b>",
+  };
+  respond = (request) =>
+    request.method === "POST"
+      ? response({
+          ok: true,
+          shared: [],
+          refused: request.body.paths.map((path: string) => ({
+            path,
+            reason: reasons[path],
+          })),
+        })
+      : response({ ...makeDoc("doc-r"), hiddenMedia: hidden });
+  render(panel(makeDoc("doc-r")));
+  fireEvent.click(await screen.findByRole("button", { name: "Show all" }));
+  await screen.findByText("Not shown: No longer in this document");
+  assert.ok(screen.getByText("Not shown: Not an image or video Locdoc can show"));
+  // An unknown reason is inert text, never markup.
+  assert.ok(screen.getByText("Not shown: <b>new code</b>"));
+  assert.equal(document.querySelector(".hidden-media b"), null);
+});
+
 test("a hidden-image answer for another document is never shown", async () => {
   const held = new Map<string, () => void>();
   respond = (request) => {
