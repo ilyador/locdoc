@@ -232,7 +232,7 @@ impl Preview {
         // Include the layout revision and structure: a list and a paragraph can
         // have identical metadata while requiring different preview images.
         hash(&format!(
-            "card-4\0{}\0{}\0{}\0{:?}",
+            "card-6\0{}\0{}\0{}\0{:?}",
             self.title, self.description, self.filename, self.blocks
         ))
     }
@@ -341,14 +341,84 @@ pub(super) fn escape(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize) -> Vec<String> {
+// Hebrew points and cantillation sit on their letter and take no width, also
+// where the face lacks them and usvg draws the line in a face that has them.
+fn hebrew_point(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0591..=0x05BD | 0x05BF | 0x05C1 | 0x05C2 | 0x05C4 | 0x05C5 | 0x05C7
+    )
+}
+
+// Right-to-left letters, as src/bidi.ts finds them: Hebrew, Arabic, Syriac,
+// Thaana, N'Ko, Samaritan and Mandaic, their presentation forms and historic
+// blocks.
+fn right_to_left(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFC | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF
+    )
+}
+
+// Whether a line reads right to left, from its first strong character as the
+// editor and dir="auto" choose it (src/bidi.ts), or None when it has none.
+fn reads_right_to_left(line: &str) -> Option<bool> {
+    static STRONG: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"[\p{L}\x{200E}\x{200F}\x{061C}]").unwrap());
+    let c = STRONG.find(line)?.as_str().chars().next()?;
+    Some(c == '\u{200F}' || right_to_left(c))
+}
+
+// Bidi controls, which usvg follows and never draws: a right-to-left isolate,
+// a first-strong isolate, which takes the direction of its own text, and the
+// end of an isolate.
+const RLI: char = '\u{2067}';
+const FSI: char = '\u{2068}';
+const PDI: char = '\u{2069}';
+
+// A right-to-left line ends at the right margin. usvg lays out every line
+// left to right, so the line is an isolate that reads right to left inside it.
+fn text_line(left: f32, right: f32, y: f32, rtl: bool, style: &str, line: &str) -> String {
+    let line = escape(line);
+    if rtl {
+        format!(r##"<text x="{right}" y="{y}" text-anchor="end" {style}>{RLI}{line}{PDI}</text>"##)
+    } else {
+        format!(r##"<text x="{left}" y="{y}" {style}>{line}</text>"##)
+    }
+}
+
+// A name keeps its own direction, with its extension after it where the
+// sidebar shows it (src/bidi.ts).
+fn isolate_name(name: &str) -> String {
+    static EXTENSION: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?i)\.(?:md|fountain|txt)$").unwrap());
+    let (stem, extension) = name.split_at(EXTENSION.find(name).map_or(name.len(), |m| m.start()));
+    if stem.chars().any(right_to_left) {
+        format!("{FSI}{stem}{PDI}{extension}")
+    } else {
+        name.into()
+    }
+}
+
+// Lines that fit the width, each with the index of the source line it shows.
+fn wrap(
+    value: &str,
+    font: &[u8],
+    size: f32,
+    width_limit: f32,
+    max_lines: usize,
+) -> Vec<(usize, String)> {
     let face = ttf_parser::Face::parse(font, 0).unwrap();
     let advance = |c| {
+        if hebrew_point(c) {
+            return 0.;
+        }
         face.glyph_index(c)
             .and_then(|g| face.glyph_hor_advance(g))
             .map_or(size, |v| v as f32 * size / face.units_per_em() as f32)
     };
     let mut remaining = value.trim();
+    let mut source = 0;
     let mut lines = Vec::new();
     while !remaining.is_empty() && lines.len() < max_lines {
         let mut width = 0.;
@@ -369,7 +439,7 @@ fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize)
             }
         }
         if cut == remaining.len() {
-            lines.push(remaining.to_string());
+            lines.push((source, remaining.to_string()));
             break;
         }
         let split = if newline == Some(cut) || space == 0 {
@@ -378,28 +448,41 @@ fn wrap(value: &str, font: &[u8], size: f32, width_limit: f32, max_lines: usize)
             space
         };
         let mut line = remaining[..split].trim_end().to_string();
-        remaining = remaining[split..].trim_start();
+        let skipped = &remaining[split..];
+        remaining = skipped.trim_start();
         if lines.len() + 1 == max_lines {
             while line.chars().map(&advance).sum::<f32>() + advance('…') > width_limit {
                 line.pop();
             }
             line.push('…');
         }
-        lines.push(line);
+        lines.push((source, line));
+        source += skipped[..skipped.len() - remaining.len()]
+            .matches('\n')
+            .count();
     }
     lines
 }
 
 fn svg(value: &Preview) -> String {
+    // Each line reads in the direction of its first strong character, and a
+    // line without one continues the line before it, as in the editor.
+    let mut rtl = reads_right_to_left(&value.title).unwrap_or(false);
     let title = wrap(&value.title, SEMIBOLD, 82., 1056., 2);
-    let filename = wrap(&value.filename, LABEL, 29., 674., 1).join("");
+    let filename = wrap(&value.filename, LABEL, 29., 674., 1)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<String>();
     let mut svg = format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630"><defs><clipPath id="icon"><rect x="1000" y="470" width="128" height="128" rx="18"/></clipPath></defs><rect width="1200" height="630" fill="#ffffff"/><rect width="1200" height="16" fill="#ff634c"/><path d="M72 501h1056" stroke="#d8dee2"/><image x="1000" y="470" width="128" height="128" clip-path="url(#icon)" href="data:image/png;base64,{}"/><text x="72" y="582" font-family="Locdoc Social Display" font-size="54" fill="#263f50">LOCDOC.</text><text x="286" y="578" font-family="Locdoc Social Sans" font-size="29" fill="#66737d">{}</text>"##,
         *ICON,
-        escape(&filename)
+        escape(&isolate_name(&filename))
     );
-    for (i, line) in title.iter().enumerate() {
-        svg.push_str(&format!(r##"<text x="72" y="{}" font-family="Locdoc Social Mono" font-weight="600" font-size="82" fill="#252b31">{}</text>"##, 140 + i * 92, escape(line)));
+    let style =
+        r##"font-family="Locdoc Social Mono" font-weight="600" font-size="82" fill="#252b31""##;
+    for (i, (_, line)) in title.iter().enumerate() {
+        let baseline = 140. + i as f32 * 92.;
+        svg.push_str(&text_line(72., 1128., baseline, rtl, style, line));
     }
     let mut y = 246. + title.len().saturating_sub(1) as f32 * 92.;
     for (index, block) in value.blocks.iter().enumerate() {
@@ -414,6 +497,14 @@ fn svg(value: &Preview) -> String {
             y += 32.;
             continue;
         }
+        let directions = block
+            .text
+            .split('\n')
+            .map(|line| {
+                rtl = reads_right_to_left(line).unwrap_or(rtl);
+                rtl
+            })
+            .collect::<Vec<_>>();
         let heading = matches!(block.kind, Kind::Heading);
         let (size, step, font, weight) = if heading {
             (43., 58., SEMIBOLD, 600)
@@ -427,7 +518,10 @@ fn svg(value: &Preview) -> String {
             Kind::Bullet | Kind::Task(_) => 44.4,
             _ => 0.,
         };
+        // A right-to-left line mirrors the layout: it ends where a
+        // left-to-right line starts, measured from the other margin.
         let x = 72. + indent + marker;
+        let right = 1128. - indent - marker;
         let available = ((450. - y) / step) as usize + 1;
         let mut lines = wrap(&block.text, font, size, 1056. - indent - marker, available);
         let gap = if matches!(block.kind, Kind::Bullet | Kind::Number(_) | Kind::Task(_)) {
@@ -439,31 +533,44 @@ fn svg(value: &Preview) -> String {
         };
         if index + 1 < value.blocks.len()
             && y + lines.len() as f32 * step + gap > 450.
-            && let Some(last) = lines.last_mut()
+            && let Some((_, last)) = lines.last_mut()
             && !last.ends_with('…')
         {
             last.push('…');
-            *last = wrap(last, font, size, 1056. - indent - marker, 1).remove(0);
+            *last = wrap(last, font, size, 1056. - indent - marker, 1)
+                .remove(0)
+                .1;
         }
+        // The marker and the quote rule stand where the first line starts.
+        let first = directions[0];
         match block.kind {
-            Kind::Bullet => svg.push_str(&format!(r##"<circle cx="{}" cy="{}" r="4" fill="#353d45"/>"##, x - 33.3, y - 13.)),
+            Kind::Bullet => svg.push_str(&format!(r##"<circle cx="{}" cy="{}" r="4" fill="#353d45"/>"##, if first { right + 33.3 } else { x - 33.3 }, y - 13.)),
+            Kind::Number(n) if first => svg.push_str(&format!(r##"<text x="{}" y="{y}" font-family="Locdoc Social Mono" font-size="37" fill="#353d45">{RLI}{n}.{PDI}</text>"##, right + 14.)),
             Kind::Number(n) => svg.push_str(&format!(r##"<text x="{}" y="{y}" text-anchor="end" font-family="Locdoc Social Mono" font-size="37" fill="#353d45">{n}.</text>"##, x - 14.)),
             Kind::Task(checked) => {
-                svg.push_str(&format!(r##"<rect x="{}" y="{}" width="26" height="26" rx="4" fill="none" stroke="#353d45" stroke-width="2"/>"##, x - 44.4, y - 27.));
-                if checked { svg.push_str(&format!(r##"<path d="M{} {}l6 6 12-14" fill="none" stroke="#353d45" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>"##, x - 40.4, y - 14.)); }
+                let (frame, mark) = if first { (right + 18.4, right + 22.4) } else { (x - 44.4, x - 40.4) };
+                svg.push_str(&format!(r##"<rect x="{frame}" y="{}" width="26" height="26" rx="4" fill="none" stroke="#353d45" stroke-width="2"/>"##, y - 27.));
+                if checked { svg.push_str(&format!(r##"<path d="M{mark} {}l6 6 12-14" fill="none" stroke="#353d45" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>"##, y - 14.)); }
             }
             _ => {}
         }
         if block.quote {
             svg.push_str(&format!(
                 r##"<path d="M{} {}v{}" stroke="#d8dee2"/>"##,
-                72. + indent - 22.,
+                if first {
+                    1128. - indent + 22.
+                } else {
+                    72. + indent - 22.
+                },
                 y - size * 0.8,
                 lines.len() as f32 * step
             ));
         }
-        for line in lines {
-            svg.push_str(&format!(r##"<text x="{x}" y="{y}" font-family="Locdoc Social Mono" font-weight="{weight}" font-size="{size}" fill="{color}">{}</text>"##, escape(&line)));
+        let style = format!(
+            r##"font-family="Locdoc Social Mono" font-weight="{weight}" font-size="{size}" fill="{color}""##
+        );
+        for (source, line) in lines {
+            svg.push_str(&text_line(x, right, y, directions[source], &style, &line));
             y += step;
         }
         y += gap;
@@ -528,6 +635,7 @@ pub(super) async fn image(value: Preview) -> Result<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     #[test]
     fn fountain_cards_use_the_title_and_exclude_contact_notes_and_boneyards() {
         let value = Preview::new(
@@ -591,7 +699,7 @@ mod tests {
         );
         let lines = wrap(&value.title, SEMIBOLD, 82., 1056., 2);
         assert_eq!(lines.len(), 2);
-        assert!(lines[1].ends_with('…'));
+        assert!(lines[1].1.ends_with('…'));
         let png = render(&value).unwrap();
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 1200);
@@ -627,7 +735,7 @@ mod tests {
         assert!(value.blocks[7].quote);
         assert_eq!(
             wrap("First line\nSecond line", REGULAR, 37., 1056., 5),
-            ["First line", "Second line"]
+            [(0, "First line".into()), (1, "Second line".into())]
         );
     }
 
@@ -646,7 +754,7 @@ mod tests {
         let long = Preview::new("# Title", &format!("{}.md", "Long filename ".repeat(20)));
         let label = wrap(&long.filename, LABEL, 29., 674., 1);
         assert_eq!(label.len(), 1);
-        assert!(label[0].ends_with('…'));
+        assert!(label[0].1.ends_with('…'));
     }
 
     #[test]
@@ -657,6 +765,171 @@ mod tests {
         assert_eq!(paragraph.description, list.description);
         assert_ne!(paragraph.fingerprint(), list.fingerprint());
         assert_ne!(render(&paragraph).unwrap(), render(&list).unwrap());
+    }
+
+    // A text element as usvg lays it out: its box, the characters its glyphs
+    // draw from left to right, with □ for a missing glyph, and the faces they
+    // come from. The isolates' hidden controls draw nothing.
+    struct Drawn {
+        left: f32,
+        right: f32,
+        text: String,
+        faces: BTreeSet<String>,
+    }
+
+    fn face(name: &str) -> BTreeSet<String> {
+        BTreeSet::from([name.to_string()])
+    }
+
+    fn drawn(value: &Preview) -> Vec<Drawn> {
+        let options = usvg::Options {
+            fontdb: FONTS.clone(),
+            ..Default::default()
+        };
+        let tree = usvg::Tree::from_str(&svg(value), &options).unwrap();
+        let mut elements = Vec::new();
+        for node in tree.root().children() {
+            let usvg::Node::Text(element) = node else {
+                continue;
+            };
+            let mut glyphs = element
+                .layouted()
+                .iter()
+                .flat_map(|span| &span.positioned_glyphs)
+                .filter(|glyph| !glyph.text.chars().all(|c| [RLI, FSI, PDI].contains(&c)))
+                .collect::<Vec<_>>();
+            glyphs.sort_by(|a, b| a.transform().tx.total_cmp(&b.transform().tx));
+            elements.push(Drawn {
+                left: element.bounding_box().left(),
+                right: element.bounding_box().right(),
+                text: glyphs
+                    .iter()
+                    .map(|glyph| match glyph.id.0 {
+                        0 => "□".into(),
+                        _ => glyph.text.clone(),
+                    })
+                    .collect(),
+                faces: glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let face = tree.fontdb().face(glyph.font).unwrap();
+                        format!("{} {}", face.families[0].0, face.weight.0)
+                    })
+                    .collect(),
+            });
+        }
+        elements
+    }
+
+    #[test]
+    fn hebrew_titles_and_names_draw_real_letters_in_their_paired_faces() {
+        let letters = ('\u{05D0}'..='\u{05EA}').collect::<String>();
+        let value = Preview::new(
+            &format!("# שלום עולם\n\n{letters} ו־₪100 English\n\n## כותרת משנה"),
+            "תכנון 2024.md",
+        );
+        let elements = drawn(&value);
+        assert!(elements.iter().all(|element| !element.text.contains('□')));
+        let [_, name, title, paragraph, heading] = &elements[..] else {
+            panic!("{} text elements", elements.len());
+        };
+        // The title, the excerpt and the name draw Hebrew in the face the app
+        // pairs with their family: Cascadia Mono, then IBM Plex Sans Hebrew.
+        assert_eq!(title.faces, face("Locdoc Social Mono 600"));
+        assert!(letters.chars().all(|c| paragraph.text.contains(c)));
+        assert!(paragraph.text.contains('₪') && paragraph.text.contains("English"));
+        assert_eq!(paragraph.faces, face("Locdoc Social Mono 400"));
+        assert_eq!(heading.faces, face("Locdoc Social Mono 600"));
+        assert!(name.text.contains('ת') && name.text.contains(".md"));
+        assert_eq!(name.faces, face("Locdoc Social Sans 400"));
+        // Points Cascadia Mono lacks leave the line to IBM Plex Sans Hebrew.
+        let pointed = drawn(&Preview::new("# בְּרֵאשִׁית בָּרָא", "note.md"));
+        assert!(!pointed[2].text.contains('□'), "{}", pointed[2].text);
+    }
+
+    #[test]
+    fn hebrew_lines_read_right_to_left_from_the_right_margin() {
+        let value = Preview::new(
+            "# שלום world, מה נשמע?\n\n- פריט ראשון\n- [x] בוצע\n\n1. אחד",
+            "שלום world.md",
+        );
+        let elements = drawn(&value);
+        // Hebrew reads right to left, an English phrase inside it left to right,
+        // and the punctuation between them follows the line. A list marker
+        // stands on the right, so its number reads .1 as in the editor. The
+        // name keeps its own direction and its extension after it.
+        assert_eq!(
+            elements
+                .iter()
+                .map(|element| element.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "LOCDOC.",
+                "world םולש.md",
+                "?עמשנ המ ,world םולש",
+                "ןושאר טירפ",
+                "עצוב",
+                ".1",
+                "דחא"
+            ]
+        );
+        // The lines end at the right margin, list items one marker in from it.
+        // usvg gives the hidden isolate controls a pixel of width.
+        let ends = |element: &Drawn, right: f32| (element.right - right).abs() <= 1.;
+        assert!(ends(&elements[2], 1128.));
+        assert!(
+            elements[3..]
+                .iter()
+                .filter(|e| e.text != ".1")
+                .all(|e| ends(e, 1083.6))
+        );
+        assert!((elements[5].left - 1097.6).abs() < 0.01);
+        let markup = svg(&value);
+        assert!(markup.contains(r##"<circle cx="1116.9" cy="233" r="4""##));
+        assert!(markup.contains(r##"<rect x="1102" y="277" width="26""##));
+        // A Latin card keeps its markup exactly.
+        let latin = svg(&Preview::new("# A plan\n\n- [x] Pack", "note.md"));
+        assert!(latin.contains(r##"<text x="72" y="140" font-family="Locdoc Social Mono" font-weight="600" font-size="82" fill="#252b31">A plan</text>"##));
+        assert!(latin.contains(r##"<rect x="72" y="219" width="26""##));
+        assert!(!latin.contains([RLI, FSI, PDI]));
+    }
+
+    #[test]
+    fn each_excerpt_line_reads_in_the_direction_of_its_first_letter() {
+        // A line without a letter, such as a year, continues the line before.
+        let value = Preview::new(
+            "# Notes on שלום עולם\n\nFirst line\nשורה שנייה\n2024",
+            "notes.md",
+        );
+        let elements = drawn(&value);
+        let [_, _, title, first, second, year] = &elements[..] else {
+            panic!("{} text elements", elements.len());
+        };
+        assert_eq!(title.text, "Notes on םלוע םולש");
+        assert_eq!(title.left, 72.);
+        assert_eq!(first.text, "First line");
+        assert_eq!(first.left, 72.);
+        assert_eq!(second.text, "היינש הרוש");
+        assert!((second.right - 1128.).abs() <= 1.);
+        assert_eq!(year.text, "2024");
+        assert!((year.right - 1128.).abs() <= 1.);
+    }
+
+    #[test]
+    fn pointed_hebrew_wraps_where_the_same_letters_do() {
+        let plain = "שלום וברכה לכל החברים ".repeat(6);
+        let pointed = "שָׁלוֹם וּבְרָכָה לְכָל הַחֲבֵרִים ".repeat(6);
+        let letters =
+            |(_, line): &(usize, String)| line.chars().filter(|&c| !hebrew_point(c)).collect();
+        let lines = wrap(&pointed, SEMIBOLD, 82., 1056., 9);
+        assert!(lines.len() > 1);
+        assert_eq!(
+            lines.iter().map(letters).collect::<Vec<String>>(),
+            wrap(&plain, SEMIBOLD, 82., 1056., 9)
+                .into_iter()
+                .map(|(_, line)| line)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
