@@ -15,6 +15,7 @@ import {
 import { tags } from "@lezer/highlight";
 import { commentMarkdown } from "./comment-syntax";
 import { visibleTextRanges } from "./editor-comments";
+import { selectionReveals, userEngagement } from "./editor-engagement";
 import { resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
@@ -66,7 +67,10 @@ export function livePreview(
     const decorations: ReturnType<Decoration["range"]>[] = [];
     const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
     const images: ReturnType<Decoration["range"]>[] = [];
-    const active = (state.readOnly ? [] : state.selection.ranges).map((r) => ({
+    // Read-only views, and editors the user has not engaged with yet, reveal
+    // no source: every line renders as if no selection touched it.
+    const selection = selectionReveals(state) ? state.selection.ranges : [];
+    const active = selection.map((r) => ({
       from: state.doc.lineAt(r.from).from,
       to: state.doc.lineAt(r.to).to,
     }));
@@ -75,8 +79,7 @@ export function livePreview(
     // Inline media reveals its source only when a selection touches it, so
     // writing elsewhere on a long line keeps the picture in place.
     const touched = (from: number, to: number) =>
-      !state.readOnly &&
-      state.selection.ranges.some((r) => r.from <= to && r.to >= from);
+      selection.some((r) => r.from <= to && r.to >= from);
     const codeLines = new Set<number>();
     const tableLines = new Set<number>();
     const blockEnds = new Set<number>();
@@ -356,7 +359,8 @@ export function livePreview(
       if (
         !tr.docChanged &&
         !(
-          tr.selection &&
+          (tr.selection ||
+            selectionReveals(tr.state) !== selectionReveals(tr.startState)) &&
           (previewLines(tr.state) !== previewLines(tr.startState) ||
             touchedImages(tr.state, value.images) !==
               touchedImages(tr.startState, value.images))
@@ -400,7 +404,7 @@ export function livePreview(
       EditorView.blockWrappers.from(f, (value) => value.wrappers),
     ],
   });
-  return [field, mediaPreview.of(true)];
+  return [userEngagement, field, mediaPreview.of(true)];
 }
 
 // The extent of every rendered-inline image, kept to notice when a selection
@@ -408,7 +412,7 @@ export function livePreview(
 const inlineImage = Decoration.mark({});
 
 function touchedImages(state: EditorState, images: DecorationSet) {
-  if (state.readOnly) return "";
+  if (!selectionReveals(state)) return "";
   const touched: number[] = [];
   for (const range of state.selection.ranges)
     images.between(range.from, range.to, (from) => {
@@ -418,14 +422,14 @@ function touchedImages(state: EditorState, images: DecorationSet) {
 }
 
 function previewLines(state: EditorState) {
-  return state.readOnly
-    ? ""
-    : state.selection.ranges
+  return selectionReveals(state)
+    ? state.selection.ranges
         .map(
           (range) =>
             `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
         )
-        .join(",");
+        .join(",")
+    : "";
 }
 
 // Sidebar metadata refreshes must not replace the parser and discard its tree.
