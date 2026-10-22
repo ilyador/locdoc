@@ -262,11 +262,18 @@ export function useFileActions({
           ? extensionOf(current.original || "") || ".md"
           : extension,
     });
-  // An edit holding text the user may still want is never replaced.
+  // An edit holding text the user may still want is never replaced; one
+  // renaming an item that has since gone holds nothing.
   const editInUse = () => {
     const current = editRef.current;
     if (!current) return false;
-    if (current.saving || current.error) return true;
+    if (current.saving) return true;
+    if (
+      current.mode === "rename" &&
+      !latest.current.some((item) => item.path === current.path)
+    )
+      return false;
+    if (current.error) return true;
     const check = checkEdit(current);
     return current.touched && !check.empty && !check.unchanged;
   };
@@ -276,6 +283,10 @@ export function useFileActions({
     if (!owner) return false;
     setSidebar(true);
     if (editInUse()) {
+      // Bring the waiting field back into view instead.
+      const waiting = editRef.current!;
+      const listedInBoth = waiting.mode === "rename" && waiting.kind === "file";
+      if (waiting.view !== view && !listedInBoth) setView(waiting.view);
       setFieldFocus((value) => value + 1);
       return false;
     }

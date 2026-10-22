@@ -346,6 +346,30 @@ test("a late create cannot redirect a later choice, and a late rename keeps a la
   assert.ok(row("a.md") === null, "The rename did not bring the deleted row back");
 });
 
+test("a waiting name field comes back into view, and one for a vanished item gives way", async () => {
+  await open(workspaceFiles);
+  row("Notes").focus();
+  key(row("Notes"), "F2");
+  const field = screen.getByRole("textbox", { name: "Rename Notes" });
+  fireEvent.change(field, { target: { value: ".bad" } });
+  key(field, "Enter");
+  act(() => workspace.setSidebarView("date"));
+  assert.ok(screen.queryByRole("textbox") === null, "Folders are not listed by date");
+  act(() => workspace.files.startCreate("file"));
+  assert.equal(workspace.sidebarView, "folders", "The waiting folder rename shows again");
+  assert.equal(screen.getByRole("textbox", { name: "Rename Notes" }).value, ".bad");
+  // The folder is deleted elsewhere; its waiting rename no longer blocks.
+  await act(async () => {
+    await api.fetch("/api/folders", {
+      method: "DELETE",
+      body: JSON.stringify({ path: "Notes" }),
+    });
+    await workspace.loadTree();
+  });
+  act(() => workspace.files.startCreate("folder", ""));
+  assert.ok(screen.getByRole("textbox", { name: "New folder name" }));
+});
+
 test("F2 renames in place, keeps text on failure, and a stale listing cannot revert it", async () => {
   await open(workspaceFiles, { expanded: ["Notes"] });
   row("Notes/Plan.md").focus();

@@ -490,10 +490,9 @@ export function FileTree({
     const folder = e.kind === "folder";
     const open = folder && isOpen(e.path);
     const active = !folder && e.id === id;
+    // A rename shows wherever its row is listed.
     const editing =
-      files?.edit?.mode === "rename" &&
-      files.edit.view === view &&
-      files.edit.path === e.path;
+      files?.edit?.mode === "rename" && files.edit.path === e.path;
     const busy = !!files?.isBusy(e.path);
     const nested = view === "folders";
     const stamp = !folder ? sidebarTimestamp(e.modified) : null;
