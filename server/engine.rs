@@ -557,6 +557,84 @@ impl Store {
         contents.dedup();
         Ok(contents)
     }
+    /// For the owner's restore pass only, before the folder is accepted. The
+    /// database backup can hold accepted edits still waiting for their
+    /// projection, which may have reached the file before the documents
+    /// folder was copied. Importing that file against the older baseline
+    /// would apply those edits a second time. Unless the file still holds the
+    /// last projected text, it wins as any file changed between the backup
+    /// steps does: the accepted state becomes its baseline and the accepted
+    /// text stays in version history. An interrupted write keeps its own
+    /// recovery.
+    pub(super) fn rebase_restored(&self, d: &Document) -> Result<()> {
+        const STORED: &str = "SELECT state,disk_state,write_intent FROM docs WHERE id=?";
+        let (state, baseline, intent): (Option<Vec<u8>>, Option<Vec<u8>>, i64) =
+            self.db.lock().unwrap().query_row(STORED, [&d.id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+        let Some(state) = state.filter(|_| intent == 0) else {
+            return Ok(());
+        };
+        let updates: Vec<Vec<u8>> = {
+            let db = self.db.lock().unwrap();
+            let mut q = db.prepare("SELECT content FROM doc_updates WHERE doc=? ORDER BY seq")?;
+            q.query_map([&d.id], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let decoded = |parts: &[&[u8]]| {
+            let doc = Doc::with_options(Options {
+                offset_kind: OffsetKind::Utf16,
+                ..Options::default()
+            });
+            for part in parts {
+                doc.transact_mut()
+                    .apply_update(security::decode_update(part).ok()?)
+                    .ok()?;
+            }
+            let source = text::canonical(&security::validate_document(&doc).ok()?);
+            Some((doc, source))
+        };
+        let parts: Vec<&[u8]> = std::iter::once(state.as_slice())
+            .chain(updates.iter().map(Vec::as_slice))
+            .collect();
+        // Undecodable state needs owner recovery whatever the file holds.
+        let (Some((accepted, source)), Some((_, projected))) = (
+            decoded(&parts),
+            decoded(&[baseline.as_deref().unwrap_or(&state)]),
+        ) else {
+            return Ok(());
+        };
+        if source == projected {
+            return Ok(());
+        }
+        let mut file = DiskFile::open_read(&self.safe(&d.path, false)?)?.ok_or_else(|| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "The file is busy or cannot be read.".into(),
+            )
+        })?;
+        // An import refuses such a file anyway.
+        let Ok(raw) = file.read() else {
+            return Ok(());
+        };
+        let restored = text::canonical(&raw);
+        if restored == projected {
+            return Ok(());
+        }
+        if restored != source {
+            self.snapshot(d, &source, true)?;
+        }
+        self.db.lock().unwrap().execute(
+            "UPDATE docs SET disk_state=? WHERE id=?",
+            params![
+                accepted
+                    .transact()
+                    .encode_state_as_update_v1(&StateVector::default()),
+                d.id
+            ],
+        )?;
+        Ok(())
+    }
     fn archive_observed(&self, d: &Document, bytes: &[u8]) -> Result<()> {
         use std::io::Write;
         let folder = self.data.join("recovery");

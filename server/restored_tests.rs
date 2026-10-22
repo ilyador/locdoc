@@ -633,3 +633,107 @@ fn an_approved_image_stays_approved_for_a_document_moved_between_the_backup_step
     };
     assert!(media_file(&s, &page.id, &request, &HeaderMap::new()).is_ok());
 }
+
+/// The text a document opens with, after any import of its file.
+fn opened_text(s: &Store, document: &Document) -> String {
+    let document = s.doc(&document.id).unwrap();
+    let room = s.room(&document).unwrap();
+    let mut room = room.lock().unwrap();
+    room.reconcile(s, &document).unwrap();
+    room_text(&room)
+}
+
+#[test]
+fn edits_waiting_for_projection_in_the_database_backup_are_applied_once() {
+    let (directory, s) = store();
+    let projected = written(&s, "p.md", "First text\n");
+    let continued = written(&s, "q.md", "Second text\n");
+    let waiting = written(&s, "r.md", "Third text\n");
+    let mut accepted = Vec::new();
+    let mut rooms = Vec::new();
+    for document in [&projected, &continued, &waiting] {
+        let room = s.room(document).unwrap();
+        let frame = append_frame(&room, "Accepted browser edit\n");
+        process_frame(
+            &s,
+            document,
+            &room,
+            &frame,
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        accepted.push(room_text(&room.lock().unwrap()));
+        rooms.push(room);
+    }
+    let backup = directory.path().join("backup");
+    // The database backup holds each edit still waiting for its projection.
+    // Two projections reach their files before the documents folder is
+    // copied, one of them followed by another edit; the third never does.
+    back_up(&s, &backup, |root| {
+        for (document, room) in [(&projected, &rooms[0]), (&continued, &rooms[1])] {
+            assert!(s.persist(document, &mut room.lock().unwrap()).unwrap());
+        }
+        let frame = append_frame(&rooms[1], "Later browser edit\n");
+        process_frame(
+            &s,
+            &continued,
+            &rooms[1],
+            &frame,
+            true,
+            true,
+            &mut Peer::default(),
+        )
+        .unwrap();
+        assert!(
+            s.persist(&continued, &mut rooms[1].lock().unwrap())
+                .unwrap()
+        );
+        assert_eq!(fs::read_to_string(root.join("p.md")).unwrap(), accepted[0]);
+        assert_eq!(
+            fs::read_to_string(root.join("r.md")).unwrap(),
+            "Third text\n"
+        );
+    });
+    drop(rooms);
+    let later = format!("{}Later browser edit\n", accepted[1]);
+    let (s, report) = restored(s, &backup);
+    assert_eq!(report["completed"], true);
+    assert_eq!(placement(&report, &projected)["evidence"], "content");
+    assert_eq!(placement(&report, &continued)["evidence"], "path");
+    assert_eq!(placement(&report, &waiting)["evidence"], "content");
+    drop(s);
+    let root = directory.path().join("docs");
+    let s = Store::open(
+        root.clone(),
+        directory.path().join("state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    for (document, path, text) in [
+        (&projected, "p.md", &accepted[0]),
+        (&continued, "q.md", &later),
+        (&waiting, "r.md", &accepted[2]),
+    ] {
+        assert_eq!(
+            &opened_text(&s, document),
+            text,
+            "{path} opens with each edit once"
+        );
+        let room = s.room(&s.doc(&document.id).unwrap()).unwrap();
+        assert!(s.persist(document, &mut room.lock().unwrap()).unwrap());
+        assert_eq!(&fs::read_to_string(root.join(path)).unwrap(), text);
+    }
+    // The newer file replaced the accepted text, which stays restorable.
+    let kept: i64 =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM revisions WHERE doc=? AND content=?",
+                params![continued.id, accepted[1]],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert!(kept > 0, "The accepted text is in version history");
+}

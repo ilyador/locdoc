@@ -15,6 +15,22 @@ pub(super) fn restore(store: &Store) -> Result<Value> {
     documents::hold_root(&store.data)?;
     let outcome = store.restore_documents()?;
     let mut problem = outcome.problem;
+    if problem.is_none() {
+        for placed in &outcome.documents {
+            let Some(path) = &placed.restored else {
+                continue;
+            };
+            if let Err(error) = store
+                .doc(&placed.id)
+                .and_then(|document| store.rebase_restored(&document))
+            {
+                problem = Some(format!(
+                    "Could not compare {path} with its accepted text: {error} Fix it, then run locdoc --restored again."
+                ));
+                break;
+            }
+        }
+    }
     if problem.is_none()
         && let Err(error) = documents::record_root(&store.data, &store.root_identity)
     {
