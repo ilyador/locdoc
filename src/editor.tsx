@@ -352,7 +352,9 @@ export const MarkdownEditor = forwardRef<
       ]),
     });
   }, [id, token, path, previewEntries, owner]);
-  useEffect(() => {
+  // A permission change applies in the commit that shows it, before the
+  // browser paints or takes another keystroke.
+  useLayoutEffect(() => {
     view.current?.dispatch({
       effects: access.current.reconfigure(editorAccess(editable)),
     });
