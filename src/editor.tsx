@@ -48,7 +48,7 @@ import {
   lineEndingError,
 } from "./line-endings";
 import { documentPreview } from "./markdown-preview";
-import { explainMedia } from "./markdown-widgets";
+import { explainMedia, retryUnavailableMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
 import type { Comment, Entry } from "./model";
 
@@ -62,6 +62,9 @@ export const MarkdownEditor = forwardRef<
     token?: string;
     // The owner's editor says why the server refuses media.
     owner?: boolean;
+    // Grows each time the server says more of the document's media may be
+    // served: media this view could not load is requested once more.
+    mediaRetry?: number;
     onChange?: (text: string) => void;
     onIntegrityError?: (message: string) => void;
     onComment: () => void;
@@ -85,6 +88,7 @@ export const MarkdownEditor = forwardRef<
     id,
     token,
     owner,
+    mediaRetry,
     onChange,
     onIntegrityError,
     onComment,
@@ -351,6 +355,9 @@ export const MarkdownEditor = forwardRef<
       effects: access.current.reconfigure(editorAccess(editable)),
     });
   }, [editable]);
+  useEffect(() => {
+    if (mediaRetry && view.current) retryUnavailableMedia(view.current.dom);
+  }, [mediaRetry]);
   return (
     <>
       <div className="markdown-editor" ref={host} />

@@ -132,6 +132,18 @@ function describeUnavailable(
     alt && why ? `${alt} · ${why}` : alt || why || unavailable;
 }
 
+// The placeholder of each medium a view could not load, with how to request
+// it once more.
+const retries = new WeakMap<Element, () => void>();
+
+// Requests once more each medium shown as unavailable inside `root`, as when
+// the server says an approval may let it serve more of the document's media.
+// One that is still refused becomes a placeholder again, until the next time.
+export function retryUnavailableMedia(root: ParentNode) {
+  for (const holder of Array.from(root.querySelectorAll(".media-missing")))
+    retries.get(holder)?.();
+}
+
 // Why the server refuses media to its owner, as its error names it, or ""
 // when it gives none or now serves the file.
 async function refusal(src: string) {
@@ -171,6 +183,10 @@ function mediaElement(
     "error",
     () => {
       const holder = unavailableMedia(alt, video);
+      retries.set(holder, () => {
+        retries.delete(holder);
+        holder.replaceWith(mediaElement(src, alt, title, explain));
+      });
       el.replaceWith(holder);
       if (explain)
         void refusal(src).then((reason) => {

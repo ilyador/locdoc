@@ -77,6 +77,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     storageWarning,
     setError,
     trashed,
+    mediaRetry,
     reload,
     checkTrashed,
   } = useDocument(
@@ -434,6 +435,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
                         scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
                         token={doc.mediaToken || sharedToken}
                         owner={doc.owner}
+                        mediaRetry={mediaRetry}
                         path={doc.path}
                         entries={entries}
                         onLink={setLinkTarget}
