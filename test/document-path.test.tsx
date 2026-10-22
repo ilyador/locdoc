@@ -176,7 +176,8 @@ test("a trashed document opens to Recently deleted, and Restore brings it back",
     ),
   );
   assert.ok(screen.queryByRole("alert") === null, "A trashed document is not an error");
-  assert.equal(document.title, "Plan · locdoc");
+  // The title follows in an effect after the panel renders.
+  await waitFor(() => assert.equal(document.title, "Plan · locdoc"));
   assert.deepEqual(crumbs(), { folder: "Notes", title: "Plan", extension: ".md" });
   fireEvent.click(screen.getByRole("button", { name: "Restore document" }));
   await waitFor(() => assert.ok(editor()));
