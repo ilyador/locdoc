@@ -2171,6 +2171,41 @@ fn a_pinned_grant_follows_its_image_when_the_image_later_moves_after_its_page() 
 }
 
 #[test]
+fn a_pinned_grant_keeps_following_its_image_after_locdoc_moves_the_image_folder() {
+    let (_directory, s, page, _upload) = album();
+    s.create_folder("Trip").unwrap();
+    s.rename_document(&page.id, "Trip/page.md").unwrap();
+    assert_eq!(approval_rows(&s, &page), (1, 0));
+    // The folder the image stayed in moves through Locdoc. Its pinned
+    // grant moves along and must still know which file it approved.
+    s.rename_folder("Album", "Pictures").unwrap();
+    assert_eq!(approval_rows(&s, &page), (1, 0));
+    let identity: Option<String> =
+        s.db.lock()
+            .unwrap()
+            .query_row(
+                "SELECT identity FROM grants WHERE doc=?",
+                [&page.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert!(
+        identity.is_some(),
+        "a rebased grant keeps its file identity"
+    );
+    // The image later follows its page: link visitors keep seeing it.
+    fs::rename(
+        s.root.join("Pictures/photo.png"),
+        s.root.join("Trip/photo.png"),
+    )
+    .unwrap();
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+    s.discover_file_moves().unwrap();
+    assert_eq!(approval_rows(&s, &page), (0, 1));
+    assert_eq!(guest_media(&s, &page, "photo.png"), StatusCode::OK);
+}
+
+#[test]
 fn a_pinned_grant_never_follows_a_second_name_of_an_image_still_in_place() {
     let (_directory, s, page, _upload) = album();
     s.create_folder("Trip").unwrap();

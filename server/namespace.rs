@@ -2928,12 +2928,16 @@ impl Store {
         let from = self.root.join(from).to_string_lossy().into_owned();
         let to = self.root.join(to).to_string_lossy().into_owned();
         let grants = tx
-            .prepare("SELECT doc,path FROM grants")?
+            .prepare("SELECT doc,path,identity FROM grants")?
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        for (document, path) in grants {
+        for (document, path, identity) in grants {
             let Some(moved) = rebase(&path, &from, &to) else {
                 continue;
             };
@@ -2941,9 +2945,12 @@ impl Store {
                 "DELETE FROM grants WHERE doc=? AND path=?",
                 params![document, path],
             )?;
+            // The file moved with its folder: the grant keeps its identity,
+            // so it can still follow that file later.
             tx.execute(
-                "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
-                params![document, moved],
+                "INSERT INTO grants(doc,path,identity) VALUES(?,?,?)
+                 ON CONFLICT(doc,path) DO UPDATE SET identity=COALESCE(identity,excluded.identity)",
+                params![document, moved, identity],
             )?;
         }
         Ok(())
