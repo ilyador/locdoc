@@ -1145,6 +1145,8 @@ async fn serve(
     public: String,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bind = std::env::var("LOCDOC_BIND").unwrap_or_else(|_| "127.0.0.1:3477".into());
+    // systemd stops and restarts the unit with SIGTERM; handle it as ctrl-c.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let s = Store::open(root, data, public)?;
     job(s.clone(), |s| s.recover_pending()).await?;
     let _watcher = projection::watch(s.clone())?;
@@ -1164,8 +1166,11 @@ async fn serve(
             }),
         router(s).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+    .with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
     })
     .await?;
     Ok(())
