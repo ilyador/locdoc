@@ -3354,6 +3354,52 @@ button:hover {
     align-self: center;
     margin-block: -6px;
   }
+  /* The title keeps the first line; time, sharing and folder move under it,
+     and More stays centered at the end, in line with the folder rows'. */
+  .file-tree .tree-item.file:not(.editing) {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "icon title title actions"
+      "icon meta path actions";
+    align-items: center;
+    gap: 0;
+    height: auto;
+    padding-block: 8px;
+  }
+  .file-tree .tree-item.file:not(.editing) > .doc-name {
+    display: contents;
+  }
+  .file-tree .tree-item.file:not(.editing) > svg {
+    grid-area: icon;
+    align-self: start;
+    margin: 3px 8px 0 0;
+  }
+  .folder-tree .tree-item.file:not(.editing) > svg {
+    margin-right: 6px;
+  }
+  .file-tree .tree-item.file .doc-label {
+    grid-area: title;
+  }
+  .file-tree .tree-item.file > .doc-meta {
+    grid-area: meta;
+    margin: 0;
+    padding: 0;
+  }
+  .file-tree .tree-item.file small {
+    grid-area: path;
+  }
+  .file-tree .tree-item.file:has(.doc-time) small::before {
+    content: "·";
+    margin-inline: 5px;
+  }
+  .file-tree .tree-item.file > .tree-actions {
+    grid-area: actions;
+    margin: 0 0 0 4px;
+  }
+  .date-list .tree-item.file > .tree-actions {
+    margin-right: -4px;
+  }
 }
 .tree-item.dragging {
   opacity: 0.45;
