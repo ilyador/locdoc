@@ -7,7 +7,8 @@ import {
 } from "@phosphor-icons/react";
 import type * as Y from "yjs";
 import { countDocumentWords } from "./word-count";
-import { documentFormat, formatLabel } from "./document-format";
+import { documentFormat } from "./document-format";
+import { FormatReference } from "./format-reference";
 import type { Document } from "./model";
 
 export function DocumentWordMetrics({
@@ -120,7 +121,7 @@ export function DocumentFooter({
               {(doc.usage / 1e6).toFixed(1)} / 50 MB
             </span>
           )}
-          <span className="markdown-tag">{formatLabel(format)}</span>
+          <FormatReference format={format} />
         </div>
       )}
     </footer>

@@ -992,11 +992,186 @@ button:hover {
   grid-column: -2;
   grid-row: 1;
 }
+/* The format label opens its syntax reference. Its hit area fills the
+   footer's height without changing the quiet chip. */
 .markdown-tag {
+  position: relative;
   border: 1px solid var(--line);
   border-radius: 3px;
   padding: 1px 5px;
   font-size: var(--ui-caption-size);
+  transition:
+    background-color 150ms ease-out,
+    border-color 150ms ease-out,
+    color 150ms ease-out;
+}
+.markdown-tag::before {
+  content: "";
+  position: absolute;
+  inset: -7px -6px;
+}
+.markdown-tag:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.markdown-tag[aria-expanded="true"] {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+.markdown-tag:focus-visible {
+  outline-offset: 2px;
+}
+/* Syntax reference: a menu-family layer above the format label. Source sits
+   beside a plain meaning; typed syntax is ink, the writer's words muted. */
+.syntax-reference {
+  --syntax-width: 456px;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: min(var(--syntax-width), calc(100vw - 32px));
+  max-height: calc(100dvh - 24px);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  box-shadow: var(--menu-shadow);
+  font-family: var(--ui-font);
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-regular);
+  line-height: 1.4;
+  text-align: start;
+  white-space: normal;
+  container: syntax / inline-size;
+  animation: menu-in 0.12s cubic-bezier(0.23, 1, 0.32, 1);
+  transform-origin: bottom right;
+}
+.syntax-reference[data-columns="2"] {
+  --syntax-width: 800px;
+}
+.syntax-reference-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 6px 9px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.syntax-reference-head h2 {
+  margin: 0;
+  font-size: var(--ui-control-size);
+  font-weight: var(--weight-semibold);
+  line-height: 1.35;
+}
+.syntax-reference-head p {
+  margin: 1px 0 0;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  line-height: 1.45;
+}
+.syntax-reference-close {
+  width: 28px;
+  height: 28px;
+  margin-top: -2px;
+}
+.syntax-reference-close svg {
+  width: 16px;
+  height: 16px;
+}
+.syntax-reference-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 6px 10px;
+}
+.syntax-reference-body:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.syntax-columns {
+  display: grid;
+  column-gap: 20px;
+}
+@container syntax (min-width: 680px) {
+  [data-columns="2"] .syntax-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* Each column aligns every meaning in it on one edge. */
+.syntax-column {
+  display: grid;
+  grid-template-columns: fit-content(60%) minmax(0, 1fr);
+  align-content: start;
+  column-gap: 14px;
+}
+.syntax-group,
+.syntax-group dl,
+.syntax-entry {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  margin: 0;
+}
+.syntax-group h3 {
+  grid-column: 1 / -1;
+  margin: 10px 8px 2px;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  font-weight: var(--weight-semibold);
+  line-height: 1.5;
+}
+.syntax-entry {
+  align-items: baseline;
+  padding: 3px 8px;
+}
+.syntax-entry dt {
+  min-width: 0;
+}
+.syntax-entry dd {
+  margin: 0;
+  color: var(--secondary);
+  font-size: var(--ui-meta-size);
+  line-height: 1.45;
+}
+.syntax-entry code {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--subtle);
+  color: var(--text);
+  font:
+    0.75rem/1.6 "JetBrains Mono",
+    ui-monospace,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.syntax-entry var {
+  color: var(--muted);
+  font-style: normal;
+}
+/* Narrow: each meaning under its source. */
+@container syntax (max-width: 439px) {
+  .syntax-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .syntax-entry {
+    row-gap: 2px;
+    padding-block: 4px;
+  }
+}
+@media (pointer: coarse) {
+  .syntax-reference-close {
+    width: 40px;
+    height: 40px;
+    margin: -6px -2px -6px 0;
+  }
 }
 .markdown-editor {
   width: 100%;
@@ -2864,8 +3039,7 @@ button:hover {
   .statusbar > div {
     gap: 10px;
   }
-  .attachment-usage,
-  .markdown-tag {
+  .attachment-usage {
     display: none;
   }
   .statusbar > div:first-child {

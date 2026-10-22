@@ -79,6 +79,7 @@ export function livePreview(
       state.selection.ranges.some((r) => r.from <= to && r.to >= from);
     const codeLines = new Set<number>();
     const tableLines = new Set<number>();
+    const quoteLines = new Set<number>();
     const blockEnds = new Set<number>();
     const listPrefixes = new Map<number, { content: number; indent: string }>();
     for (const range of ranges)
@@ -189,12 +190,14 @@ export function livePreview(
             decorations.push(
               Decoration.mark({ class: "md-strike" }).range(from, to),
             );
-          if (name === "Blockquote") {
-            const line = state.doc.lineAt(from);
-            decorations.push(
-              Decoration.line({ class: "md-quote" }).range(line.from),
-            );
-          }
+          // Every line of a quote is quoted, its lazy continuations too.
+          if (name === "Blockquote")
+            for (
+              let line = state.doc.lineAt(from).number;
+              line <= state.doc.lineAt(Math.max(from, to - 1)).number;
+              line++
+            )
+              quoteLines.add(line);
           if (name === "ListItem") {
             const mark = n.node.getChild("ListMark");
             if (mark) {
@@ -307,6 +310,14 @@ export function livePreview(
           }
         },
       });
+    // Code and tables inside a quote keep their own presentation.
+    for (const line of quoteLines)
+      if (!codeLines.has(line) && !tableLines.has(line))
+        decorations.push(
+          Decoration.line({ class: "md-quote" }).range(
+            state.doc.line(line).from,
+          ),
+        );
     for (const from of blockEnds)
       decorations.push(Decoration.line({ class: "md-block-end" }).range(from));
     for (const [from, { content, indent }] of listPrefixes) {
