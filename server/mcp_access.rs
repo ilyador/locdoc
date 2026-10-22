@@ -137,7 +137,8 @@ fn set_document(s: &Store, id: &str, allowed: bool) -> Result<Access> {
 }
 
 /// Folders whose MCP grant no longer matches them, as after a restore copied
-/// every folder. The owner allows them again.
+/// every folder. The owner allows them again. Grants of folders in the trash
+/// wait for their restore.
 pub(super) fn unmatched_folders(s: &Store) -> Result<Vec<String>> {
     let grants =
         s.db.lock()
@@ -150,7 +151,8 @@ pub(super) fn unmatched_folders(s: &Store) -> Result<Vec<String>> {
     Ok(grants
         .into_iter()
         .filter(|(path, identity)| {
-            folders::directory_identity(s, path).ok().as_ref() != Some(identity)
+            !path.starts_with(namespace::TRASH)
+                && folders::directory_identity(s, path).ok().as_ref() != Some(identity)
         })
         .map(|(path, _)| path)
         .collect())

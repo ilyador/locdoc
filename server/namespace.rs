@@ -4,7 +4,7 @@
 //! applies all path and identity changes in one transaction. A recorded file
 //! identity outranks a path: a pathname alone never moves a document's links,
 //! history or text onto another document's file.
-use super::documents::{format, relative_path, retire};
+use super::documents::{format, relative_path, retire, retire_trashed};
 use super::*;
 use std::hash::Hash;
 use std::os::unix::ffi::OsStrExt;
@@ -203,6 +203,172 @@ enum Outcome {
     Dropped,
 }
 
+/// Locdoc's trash, a hidden folder at the documents root. Walks, listings
+/// and media never enter it, so nothing in it is found, listed or served.
+/// Each deleted entry keeps its name inside a folder named by its item.
+pub(super) const TRASH: &str = ".locdoc-trash";
+
+/// What a journaled entry move does once its file or folder is in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    /// A folder moves to another visible path.
+    Rename,
+    /// A document's file or a folder moves into the trash.
+    Trash,
+    /// A trash item moves back to its original path.
+    Restore,
+}
+impl Action {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rename => "rename",
+            Self::Trash => "trash",
+            Self::Restore => "restore",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        [Self::Rename, Self::Trash, Self::Restore]
+            .into_iter()
+            .find(|action| action.as_str() == value)
+    }
+}
+
+/// What a trash item or an entry move carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EntryKind {
+    Document,
+    Folder,
+}
+impl EntryKind {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Document => "document",
+            Self::Folder => "folder",
+        }
+    }
+    pub(super) fn parse(value: &str) -> Option<Self> {
+        [Self::Document, Self::Folder]
+            .into_iter()
+            .find(|entry| entry.as_str() == value)
+    }
+}
+
+/// A folder move, a delete into the trash or a restore: the file or folder
+/// by device, inode and birth time, with its final destination, journaled
+/// before the filesystem changes. Every pass settles what is left from
+/// where that entry is now, as a document rename does, before it observes
+/// the tree.
+struct EntryMove {
+    /// The trash item, for a delete or a restore.
+    id: String,
+    action: Action,
+    entry: EntryKind,
+    /// The document whose file a document delete moves.
+    document: Option<String>,
+    source: String,
+    destination: String,
+    device: String,
+    inode: String,
+    born: Option<String>,
+}
+impl EntryMove {
+    fn new(
+        id: String,
+        action: Action,
+        entry: EntryKind,
+        document: Option<String>,
+        (source, destination): (String, String),
+        metadata: &fs::Metadata,
+    ) -> Self {
+        Self {
+            id,
+            action,
+            entry,
+            document,
+            source,
+            destination,
+            device: metadata.dev().to_string(),
+            inode: metadata.ino().to_string(),
+            born: FileMove::birth(metadata),
+        }
+    }
+    /// Whether `path` holds the journaled file or folder.
+    fn contains(&self, path: &Path) -> std::io::Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => Ok(match self.entry {
+                EntryKind::Document => metadata.is_file(),
+                EntryKind::Folder => metadata.is_dir(),
+            } && metadata.dev().to_string() == self.device
+                && metadata.ino().to_string() == self.inode
+                && self
+                    .born
+                    .as_ref()
+                    .is_none_or(|born| FileMove::birth(&metadata).as_ref() == Some(born))),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    /// Whether this move carries the active document recorded at `path`.
+    /// A restore carries trashed documents, which no pass tracks.
+    fn carries(&self, id: &str, path: &str) -> bool {
+        match (self.action, self.entry) {
+            (Action::Restore, _) => false,
+            (_, EntryKind::Document) => self.document.as_deref() == Some(id),
+            (_, EntryKind::Folder) => below(path, &self.source).is_some(),
+        }
+    }
+    /// Whether settling this move may change what `path` names.
+    fn covers(&self, path: &str) -> bool {
+        overlap(path, &self.source) || overlap(path, &self.destination)
+    }
+}
+
+/// The part of `path` below `folder`: empty for the folder itself.
+fn below<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
+    if path == folder {
+        return Some("");
+    }
+    path.strip_prefix(folder)?.strip_prefix('/')
+}
+
+/// Where `path` is once `from` has moved to `to`.
+fn rebase(path: &str, from: &str, to: &str) -> Option<String> {
+    below(path, from).map(|rest| {
+        if rest.is_empty() {
+            to.to_owned()
+        } else {
+            format!("{to}/{rest}")
+        }
+    })
+}
+
+/// Whether one path is the other or inside it.
+fn overlap(a: &str, b: &str) -> bool {
+    below(a, b).is_some() || below(b, a).is_some()
+}
+
+fn busy_entry() -> ApiError {
+    ApiError(
+        StatusCode::CONFLICT,
+        "A file here is busy or still being matched to its document. Retry after its save finishes."
+            .into(),
+    )
+}
+
+fn pending_entry() -> ApiError {
+    ApiError(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "A file move is being recovered. Try again shortly.".into(),
+    )
+}
+
 /// What one observation shows at a document's path.
 #[derive(Clone, Debug, PartialEq)]
 enum Seen<E> {
@@ -399,8 +565,12 @@ enum Pass {
 /// Active documents as the database records them.
 struct Namespace {
     tracked: Vec<Tracked<Identity>>,
-    /// Documents whose rename is still pending, with their evidence.
+    /// Documents whose rename or entry move is still pending, with their
+    /// evidence. A pass neither moves nor retires them.
     pending: Vec<(String, Option<Identity>)>,
+    /// Trashed documents with their evidence. Their files are in the trash,
+    /// where no walk looks, and no other document takes a file of theirs.
+    trashed: Vec<(String, Option<Identity>)>,
     /// Paths a pending rename still owns. Nothing moves onto them.
     reserved: HashSet<String>,
 }
@@ -465,6 +635,22 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
     if !has_move_birth {
         db.execute("ALTER TABLE document_moves ADD COLUMN born TEXT", [])?;
     }
+    // Folder moves, deletes into the trash and restores, each journaled
+    // with the identity of the file or folder it moves. A trash item keeps
+    // its original path; each document in it keeps its own, and its row's
+    // path names where its file is in the trash.
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entry_moves(
+            id TEXT PRIMARY KEY,action TEXT NOT NULL,kind TEXT NOT NULL,document TEXT,
+            source TEXT NOT NULL,destination TEXT NOT NULL UNIQUE,
+            device TEXT NOT NULL,inode TEXT NOT NULL,born TEXT);
+         CREATE TABLE IF NOT EXISTS trash(
+            id TEXT PRIMARY KEY,kind TEXT NOT NULL,path TEXT NOT NULL,
+            location TEXT NOT NULL,deleted INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS trashed_documents(
+            doc TEXT PRIMARY KEY,trash TEXT NOT NULL,path TEXT NOT NULL);
+         CREATE INDEX IF NOT EXISTS trashed_documents_item ON trashed_documents(trash);",
+    )?;
     db.commit()?;
     Ok(())
 }
@@ -576,7 +762,9 @@ impl Store {
     }
 
     /// Whether the file at an indexed path carries its document's recorded
-    /// evidence, or a file at an unindexed path carries no document's.
+    /// evidence, or a file at an unindexed path carries no document's. A
+    /// trashed document's file stays its own, not a new document, wherever
+    /// it turns up; it is free once its document retires.
     fn assigned(&self, path: &str, evidence: Option<&Identity>) -> Result<bool> {
         let db = self.db.lock().unwrap();
         let indexed = db
@@ -594,7 +782,7 @@ impl Store {
             (None, None) => true,
             (None, Some(Identity(identity))) => !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM document_identities f JOIN docs d ON d.id=f.doc
-                 WHERE f.identity=? AND d.active=1)",
+                 WHERE f.identity=? AND d.active IN (1,2))",
                 [identity],
                 |row| row.get::<_, bool>(0),
             )?,
@@ -736,15 +924,18 @@ impl Store {
             ));
         }
         // Restored files are new, so an interrupted rename settles under
-        // neither name and its document is placed below.
+        // neither name and its document is placed below. So does an
+        // interrupted folder move, delete or restore; trashed documents keep
+        // their place in the trash, which the pass leaves alone.
         self.settle_intents(false)?;
         let started = clock();
         let Namespace {
             mut tracked,
             pending,
             reserved,
+            ..
         } = self.namespace()?;
-        if !pending.is_empty() {
+        if !pending.is_empty() || !self.pending_entries()?.is_empty() {
             return Ok(Some("An interrupted rename could not be settled. Check that every folder can be read, then run locdoc --restored again.".into()));
         }
         for document in &mut tracked {
@@ -802,7 +993,20 @@ impl Store {
     /// One pass under document_files. A busy room or an undecidable file
     /// defers only that document and asks the maintenance loop to retry.
     /// Returns the documents left unplaced, as `discover_file_moves_locked`.
+    /// A settled pass also retires trashed documents whose files a desktop
+    /// application removed from the trash.
     fn reconcile(&self, pass: Pass) -> Result<HashSet<String>> {
+        let unplaced = self.reconcile_tree(pass)?;
+        if pass == Pass::Settled
+            && let Err(error) = self.settle_trash()
+        {
+            tracing::debug!("trash check pending: {error}");
+            self.reconciliation.after(INCOMPLETE_RETRY);
+        }
+        Ok(unplaced)
+    }
+
+    fn reconcile_tree(&self, pass: Pass) -> Result<HashSet<String>> {
         if !self.root_identity.matches(&self.root) {
             // A missing mount is never evidence about its documents.
             return Ok(HashSet::new());
@@ -814,6 +1018,7 @@ impl Store {
         let Namespace {
             mut tracked,
             pending,
+            trashed,
             reserved,
         } = self.namespace()?;
         // Walk only when a tracked path no longer shows its recorded evidence.
@@ -840,8 +1045,11 @@ impl Store {
             return Ok(HashSet::new());
         }
         let (files, _, unlisted) = self.survey(&mut tracked);
+        // A trashed document's file found in the tree is still its own, as a
+        // pending rename's is: no other document takes it as an atomic save.
         let held: Vec<(&str, &Identity)> = pending
             .iter()
+            .chain(&trashed)
             .filter_map(|(id, evidence)| Some((id.as_str(), evidence.as_ref()?)))
             .collect();
         let lapsed: HashSet<&str> = tracked
@@ -983,19 +1191,43 @@ impl Store {
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        const TRASHED: &str = "SELECT d.id,f.identity FROM docs d
+            LEFT JOIN document_identities f ON f.doc=d.id WHERE d.active=2";
+        let trashed = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(TRASHED)?
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?.map(Identity),
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let entries = self.pending_entries()?;
         let mut namespace = Namespace {
             tracked: Vec::new(),
             pending: Vec::new(),
+            trashed,
             reserved: HashSet::new(),
         };
         for (id, path, identity, destination, gap) in rows {
             let recorded = identity.map(Identity);
-            match destination {
-                Some(destination) => {
+            let entry = entries.iter().find(|entry| entry.carries(&id, &path));
+            match (destination, entry) {
+                (Some(destination), _) => {
                     namespace.reserved.extend([path, destination]);
                     namespace.pending.push((id, recorded));
                 }
-                None => namespace.tracked.push(Tracked {
+                // Its folder move, delete or restore settles it first.
+                (None, Some(entry)) => {
+                    let moved = rebase(&path, &entry.source, &entry.destination);
+                    namespace.reserved.extend(moved);
+                    namespace.reserved.insert(path);
+                    namespace.pending.push((id, recorded));
+                }
+                (None, None) => namespace.tracked.push(Tracked {
                     id,
                     path,
                     recorded,
@@ -1003,6 +1235,20 @@ impl Store {
                     gap,
                 }),
             }
+        }
+        // A pending restore brings its documents back to their own paths.
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.action == Action::Restore)
+        {
+            namespace.reserved.extend(
+                self.db
+                    .lock()
+                    .unwrap()
+                    .prepare("SELECT path FROM trashed_documents WHERE trash=?")?
+                    .query_map([&entry.id], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            );
         }
         Ok(namespace)
     }
@@ -1840,9 +2086,17 @@ impl Store {
         Ok(movements)
     }
 
+    /// Settle any journaled move that can change what `path` names before
+    /// it is read, indexed or reused. A folder move, delete or restore that
+    /// cannot settle yet leaves the path unavailable, never a new document.
     pub(super) fn finish_pending_path(&self, path: &str) -> Result<()> {
         for movement in self.pending_file_moves(Some(path))? {
             self.settle_intent(&movement, true)?;
+        }
+        for movement in self.pending_entries()? {
+            if movement.covers(path) && self.settle_entry(&movement, true).is_err() {
+                return Err(pending_entry());
+            }
         }
         Ok(())
     }
@@ -1875,6 +2129,19 @@ impl Store {
                         document = movement.document,
                         "Rename still pending: {error}"
                     );
+                }
+            }
+        }
+        for movement in self.pending_entries()? {
+            if let Err(error) = self.settle_entry(&movement, true) {
+                let action = movement.action.as_str();
+                if startup {
+                    tracing::error!(
+                        path = movement.source,
+                        "Interrupted {action} is still pending: {error}"
+                    );
+                } else {
+                    tracing::debug!(path = movement.source, "{action} still pending: {error}");
                 }
             }
         }
@@ -1922,6 +2189,1051 @@ impl Store {
     }
 }
 
+/// Folder moves, deletes into the trash and restores. Each journals the
+/// identity of the file or folder it moves and where it goes before the
+/// filesystem changes, renames without replacing anything, syncs both
+/// folders and then commits what the move means in one transaction.
+/// Settling an interrupted move finishes it from where its entry is found.
+impl Store {
+    /// Rename or move a folder. Its documents keep their ids, links,
+    /// comments and history; folder links, MCP folder grants and pinned
+    /// media grants follow it. Open documents keep their rooms, which hold
+    /// still while it moves, so accepted edits waiting for projection reach
+    /// their files at the new paths. Returns the new path.
+    pub(super) fn rename_folder(&self, from: &str, to: &str) -> Result<String> {
+        let _files = self.document_files.lock().unwrap();
+        let from = relative_path(from, false)?;
+        let to = relative_path(to, false)?;
+        if below(&to, &from).is_some_and(|rest| !rest.is_empty()) {
+            return Err(bad(
+                "A folder cannot move into itself or into one of its own folders.",
+            ));
+        }
+        let unplaced = self.reconcile(Pass::Discover)?;
+        let source = self.existing_folder(&from)?;
+        if to == from {
+            return Ok(to);
+        }
+        let destination = self.safe(&to, false)?;
+        if !destination.parent().is_some_and(Path::is_dir) {
+            return Err(bad("Choose an existing destination folder."));
+        }
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "That path already exists.".into(),
+            ));
+        }
+        let moving = self.documents_below(&from)?;
+        self.settled_below(&from, &moving, &unplaced)?;
+        self.settled_below(&to, &[], &unplaced)?;
+        self.free_rows_below(&to, &unplaced)?;
+        let ids: Vec<&str> = moving.iter().map(|document| document.id.as_str()).collect();
+        let held = self.hold_rooms(&ids);
+        let live: Vec<_> = held
+            .rooms
+            .iter()
+            .map(|(_, room)| room.lock().unwrap())
+            .collect();
+        // Approvals recorded before file identities are identified while
+        // the folder is still in place, so the commit can tell what moved.
+        let rows: Vec<(&str, &str)> = moving
+            .iter()
+            .map(|document| (document.id.as_str(), document.path.as_str()))
+            .collect();
+        self.refresh_media_identities(&rows)?;
+        let metadata = fs::symlink_metadata(&source)?;
+        let movement = EntryMove::new(
+            uuid::Uuid::new_v4().to_string(),
+            Action::Rename,
+            EntryKind::Folder,
+            None,
+            (from, to.clone()),
+            &metadata,
+        );
+        self.rehearse(&movement)?;
+        self.journal_entry(&movement)?;
+        let closed = self.carry_out(&movement, &source, &destination)?;
+        drop(live);
+        for id in closed {
+            self.close_document(&id);
+        }
+        Ok(to)
+    }
+
+    /// Move a document's file into the trash. It keeps its id, comments,
+    /// history and links, which are suspended until it is restored. Edits
+    /// accepted but not yet projected stay durable and reach the file once
+    /// it is back. Returns the trash item.
+    pub(super) fn trash_document(&self, id: &str) -> Result<String> {
+        let _files = self.document_files.lock().unwrap();
+        self.finish_pending_path(&self.doc(id)?.path)?;
+        let unplaced = self.reconcile(Pass::Discover)?;
+        let document = self.doc(id)?;
+        if unplaced.contains(&document.id) {
+            return Err(busy_entry());
+        }
+        self.settled_below(&document.path, &[], &unplaced)?;
+        let source = self.safe(&document.path, false)?;
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Err(error.into());
+            }
+            _ => {
+                return Err(ApiError(
+                    StatusCode::NOT_FOUND,
+                    "This document's file is no longer in the documents folder.".into(),
+                ));
+            }
+        };
+        // A deferred pass can leave another file at this path; move only ours.
+        if !self.assigned(&document.path, Identity::of(&metadata).as_ref())? {
+            return Err(busy_entry());
+        }
+        let trash = uuid::Uuid::new_v4().to_string();
+        let name = Path::new(&document.path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let movement = EntryMove::new(
+            trash.clone(),
+            Action::Trash,
+            EntryKind::Document,
+            Some(document.id.clone()),
+            (document.path.clone(), format!("{TRASH}/{trash}/{name}")),
+            &metadata,
+        );
+        let held = self.hold_rooms(&[document.id.as_str()]);
+        let mut live = Vec::new();
+        for (_, room) in &held.rooms {
+            let mut room = room.lock().unwrap();
+            // Edits a failed commit left in memory become durable first.
+            room.ensure_committed(self, &document)?;
+            live.push(room);
+        }
+        let closed = self.trash_entry(&movement, &source)?;
+        // Their sockets close as a retired document's do. A room one of them
+        // still holds belongs to the incarnation the delete ended, so it
+        // never accepts again, even after a restore.
+        for room in &live {
+            let _ = room.tx.send(vec![126]);
+        }
+        drop(live);
+        for id in closed {
+            self.close_document(&id);
+        }
+        Ok(trash)
+    }
+
+    /// Move a folder and everything in it into the trash. Its documents keep
+    /// their ids, comments, history and links; those links, its folder links
+    /// and its MCP folder grants are suspended until it is restored.
+    /// Returns the trash item.
+    pub(super) fn trash_folder(&self, input: &str) -> Result<String> {
+        let _files = self.document_files.lock().unwrap();
+        let path = relative_path(input, false)?;
+        let unplaced = self.reconcile(Pass::Discover)?;
+        let source = self.existing_folder(&path)?;
+        let documents = self.documents_below(&path)?;
+        self.settled_below(&path, &documents, &unplaced)?;
+        let metadata = fs::symlink_metadata(&source)?;
+        let trash = uuid::Uuid::new_v4().to_string();
+        let name = Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let movement = EntryMove::new(
+            trash.clone(),
+            Action::Trash,
+            EntryKind::Folder,
+            None,
+            (path, format!("{TRASH}/{trash}/{name}")),
+            &metadata,
+        );
+        let ids: Vec<&str> = documents
+            .iter()
+            .map(|document| document.id.as_str())
+            .collect();
+        let held = self.hold_rooms(&ids);
+        let mut live = Vec::new();
+        for (id, room) in &held.rooms {
+            let mut room = room.lock().unwrap();
+            let document = documents.iter().find(|document| &document.id == id);
+            room.ensure_committed(self, document.unwrap())?;
+            live.push(room);
+        }
+        let closed = self.trash_entry(&movement, &source)?;
+        for room in &live {
+            let _ = room.tx.send(vec![126]);
+        }
+        drop(live);
+        for id in closed {
+            self.close_document(&id);
+        }
+        Ok(trash)
+    }
+
+    /// Put a trash item back at its original path, its documents' links,
+    /// folder links and MCP folder grants working again. Folders missing on
+    /// the way are created; a path something else took meanwhile is a
+    /// conflict. Returns the path and the documents restored.
+    pub(super) fn restore_trash(&self, id: &str) -> Result<(String, Vec<String>)> {
+        let _files = self.document_files.lock().unwrap();
+        let unplaced = self.reconcile(Pass::Discover)?;
+        let not_found = || {
+            ApiError(
+                StatusCode::NOT_FOUND,
+                "This item is no longer in the trash.".into(),
+            )
+        };
+        let (kind, original, location) = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT kind,path,location FROM trash WHERE id=?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(not_found)?;
+        let entry = EntryKind::parse(&kind).ok_or_else(not_found)?;
+        if self
+            .pending_entries()?
+            .iter()
+            .any(|movement| movement.id == id)
+        {
+            return Err(pending_entry());
+        }
+        let source = self.safe(&location, true)?;
+        let metadata = match fs::symlink_metadata(&source) {
+            Ok(metadata)
+                if match entry {
+                    EntryKind::Document => metadata.is_file(),
+                    EntryKind::Folder => metadata.is_dir(),
+                } =>
+            {
+                metadata
+            }
+            Err(error)
+                if !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Err(error.into());
+            }
+            _ => {
+                // Something removed it from the trash; its documents retire
+                // as missing ones do.
+                self.settle_trash()?;
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "The deleted files are no longer in Locdoc's trash folder. Their last accepted text is in Removed document recovery.".into(),
+                ));
+            }
+        };
+        let destination = self.safe(&original, false)?;
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("{original} already exists. Rename or move it, then restore again."),
+            ));
+        }
+        let documents: Vec<String> = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare("SELECT doc FROM trashed_documents WHERE trash=? ORDER BY path")?
+            .query_map([id], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        self.settled_below(&original, &[], &unplaced)?;
+        self.free_rows_below(&original, &unplaced)?;
+        let created = self.create_parents(&destination, &original)?;
+        let movement = EntryMove::new(
+            id.to_owned(),
+            Action::Restore,
+            entry,
+            (entry == EntryKind::Document)
+                .then(|| documents.first().cloned())
+                .flatten(),
+            (location, original.clone()),
+            &metadata,
+        );
+        let restored = self
+            .rehearse(&movement)
+            .and_then(|()| self.journal_entry(&movement))
+            .and_then(|()| self.carry_out(&movement, &source, &destination));
+        let closed = match restored {
+            Ok(closed) => closed,
+            Err(error) => {
+                // Folders made for a restore that did not happen go again;
+                // anything placed in them meanwhile keeps them.
+                if destination.symlink_metadata().is_err() {
+                    for folder in created {
+                        let _ = fs::remove_dir(folder);
+                    }
+                }
+                return Err(error);
+            }
+        };
+        for id in closed {
+            self.close_document(&id);
+        }
+        Ok((original, documents))
+    }
+
+    /// The shared steps of a delete: the item's own folder in the trash,
+    /// durable before the journal, then the rename and its commit.
+    fn trash_entry(&self, movement: &EntryMove, source: &Path) -> Result<Vec<String>> {
+        self.rehearse(movement)?;
+        let folder = self.safe(&format!("{TRASH}/{}", movement.id), true)?;
+        fs::create_dir_all(&folder)?;
+        let prepared =
+            disk::sync_directories(&folder, &self.root).and_then(|()| self.journal_entry(movement));
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir(&folder);
+            return Err(error);
+        }
+        let name = Path::new(&movement.destination).file_name().unwrap();
+        self.carry_out(movement, source, &folder.join(name))
+    }
+
+    /// Carry out a journaled move's filesystem step and commit it. A
+    /// destination something else took leaves everything in place, and a
+    /// source replaced before the rename goes back. Returns the documents
+    /// whose rooms close.
+    fn carry_out(
+        &self,
+        movement: &EntryMove,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<Vec<String>> {
+        match disk::rename_new(source, destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.drop_entry(movement)?;
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "That path already exists.".into(),
+                ));
+            }
+            Err(error) => {
+                // A failed rename normally changes neither name. Settle from
+                // what is there rather than leave an intent holding the files.
+                return match self.settle_entry(movement, false)? {
+                    Outcome::Moved => Ok(Vec::new()),
+                    Outcome::Dropped => Err(error.into()),
+                };
+            }
+        }
+        if !movement.contains(destination)? {
+            self.put_back_entry(movement, source, destination)?;
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "It changed while it was being moved. Try again.".into(),
+            ));
+        }
+        self.commit_entry(movement)
+    }
+
+    fn pending_entries(&self) -> Result<Vec<EntryMove>> {
+        let rows = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT id,action,kind,document,source,destination,device,inode,born
+                 FROM entry_moves ORDER BY rowid",
+            )?
+            .query_map([], |row| {
+                let action: String = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let (id, document, source, destination, device, inode, born) = (
+                    row.get(0)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                );
+                // A move a newer version journaled is left to that version.
+                Ok(Action::parse(&action)
+                    .zip(EntryKind::parse(&kind))
+                    .map(|(action, entry)| EntryMove {
+                        id,
+                        action,
+                        entry,
+                        document,
+                        source,
+                        destination,
+                        device,
+                        inode,
+                        born,
+                    }))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows.into_iter().flatten().collect())
+    }
+
+    fn journal_entry(&self, movement: &EntryMove) -> Result<()> {
+        self.db.lock().unwrap().execute(
+            "INSERT INTO entry_moves(id,action,kind,document,source,destination,device,inode,born)
+             VALUES(?,?,?,?,?,?,?,?,?)",
+            params![
+                movement.id,
+                movement.action.as_str(),
+                movement.entry.as_str(),
+                movement.document,
+                movement.source,
+                movement.destination,
+                movement.device,
+                movement.inode,
+                movement.born
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// A journaled path, hidden ones included, or None once it no longer
+    /// resolves safely inside the root. An unavailable root retries.
+    fn entry_path(&self, path: &str) -> Result<Option<PathBuf>> {
+        match self.safe(path, true) {
+            Ok(path) => Ok(Some(path)),
+            Err(error) if error.0 == StatusCode::SERVICE_UNAVAILABLE => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Settle a journaled move from where its file or folder is now: at its
+    /// destination it commits; only at its source, with the destination
+    /// free, the move is carried out again; anywhere else the intent ends
+    /// and passes place what it held from file evidence. Only an I/O error
+    /// keeps the intent for a later pass.
+    fn settle_entry(&self, movement: &EntryMove, redo: bool) -> Result<Outcome> {
+        let source = self.entry_path(&movement.source)?;
+        let destination = self.entry_path(&movement.destination)?;
+        let holds = |path: &Option<PathBuf>| {
+            path.as_deref()
+                .map_or(Ok(false), |path| movement.contains(path))
+        };
+        let at_source = holds(&source)?;
+        let at_destination = holds(&destination)?;
+        match (at_source, at_destination, source, destination) {
+            (false, true, _, _) => self.finish_entry(movement),
+            (true, false, Some(source), Some(destination)) if redo => {
+                self.prepare_destination(movement, &destination);
+                match disk::rename_new(&source, &destination) {
+                    Ok(()) if movement.contains(&destination)? => self.finish_entry(movement),
+                    Ok(()) => self.put_back_entry(movement, &source, &destination),
+                    // It stays where it is; whatever took the destination wins.
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        self.drop_entry(movement)
+                    }
+                    // A failed rename normally leaves both names unchanged.
+                    Err(_) => self.settle_entry(movement, false),
+                }
+            }
+            // Only a delete's rename puts anything at its destination, a new
+            // folder in the trash. Something else there is what a desktop
+            // save left at the source before that rename carried it, which
+            // stopped before putting it back: return it while the source is
+            // free, so its document keeps it.
+            (false, false, Some(source), Some(destination))
+                if movement.action == Action::Trash
+                    && fs::symlink_metadata(&destination).is_ok() =>
+            {
+                if fs::symlink_metadata(&source).is_ok() {
+                    tracing::warn!(
+                        path = movement.destination,
+                        "a file a delete carried stays in the trash folder"
+                    );
+                    return self.drop_entry(movement);
+                }
+                self.put_back_entry(movement, &source, &destination)
+            }
+            // Still only at its source, at both names, or under neither.
+            _ => self.drop_entry(movement),
+        }
+    }
+
+    /// A delete recreates its item's folder in the trash and a restore the
+    /// folders its path needs; a rename never recreates a removed folder.
+    /// A failure is left to the rename.
+    fn prepare_destination(&self, movement: &EntryMove, destination: &Path) {
+        if movement.action == Action::Rename {
+            return;
+        }
+        if let Some(parent) = destination.parent().filter(|parent| !parent.is_dir())
+            && fs::create_dir_all(parent).is_ok()
+        {
+            let _ = disk::sync_directories(parent, &self.root);
+        }
+    }
+
+    fn finish_entry(&self, movement: &EntryMove) -> Result<Outcome> {
+        for id in self.commit_entry(movement)? {
+            self.close_document(&id);
+        }
+        Ok(Outcome::Moved)
+    }
+
+    fn drop_entry(&self, movement: &EntryMove) -> Result<Outcome> {
+        self.db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM entry_moves WHERE id=?", [&movement.id])?;
+        if movement.action == Action::Trash
+            && let Some(folder) = self.entry_path(&format!("{TRASH}/{}", movement.id))?
+        {
+            // The item's own folder, unless something reached it.
+            let _ = fs::remove_dir(folder);
+        }
+        // What it held may not be at its row paths; a pass places it.
+        self.reconciliation.after(RETRY);
+        Ok(Outcome::Dropped)
+    }
+
+    /// The source was replaced after its identity was journaled, so the
+    /// rename carried another file or folder. Return that while the source
+    /// name is free; what the move held stays where it is.
+    fn put_back_entry(
+        &self,
+        movement: &EntryMove,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<Outcome> {
+        let _ = disk::rename_new(destination, source);
+        for folder in [source.parent().unwrap(), destination.parent().unwrap()] {
+            if folder.is_dir() {
+                disk::sync_directories(folder, &self.root)?;
+            }
+        }
+        self.drop_entry(movement)
+    }
+
+    /// The journaled entry is at its destination. Make both directory
+    /// entries durable, then commit what the move means for documents,
+    /// links and grants in one transaction. Returns the documents whose
+    /// rooms close: trashed ones, and any whose files the move proved gone.
+    fn commit_entry(&self, movement: &EntryMove) -> Result<Vec<String>> {
+        let destination = self.entry_path(&movement.destination)?.ok_or_else(|| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "A moved file is no longer inside the documents folder.".into(),
+            )
+        })?;
+        disk::sync_directories(destination.parent().unwrap(), &self.root)?;
+        if let Some(source) = self.entry_path(&movement.source)?
+            && source.parent().unwrap().is_dir()
+        {
+            disk::sync_directories(source.parent().unwrap(), &self.root)?;
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        let closed = self.apply_entry(&tx, movement, true)?;
+        tx.execute("DELETE FROM entry_moves WHERE id=?", [&movement.id])?;
+        tx.commit()?;
+        drop(db);
+        self.permissions.invalidate();
+        if movement.action == Action::Restore
+            && let Some(folder) = self.entry_path(&format!("{TRASH}/{}", movement.id))?
+        {
+            // The item's folder in the trash is empty now.
+            let _ = fs::remove_dir(folder);
+        }
+        Ok(closed)
+    }
+
+    /// Exercise the commit's constraints before the filesystem changes. The
+    /// transaction rolls back; only commit_entry publishes a move.
+    fn rehearse(&self, movement: &EntryMove) -> Result<()> {
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        self.apply_entry(&tx, movement, false)?;
+        tx.rollback()?;
+        Ok(())
+    }
+
+    /// What a move means in the database. While rehearsing, before anything
+    /// moved, the steps that read the moved files are left to the commit.
+    fn apply_entry(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        movement: &EntryMove,
+        committing: bool,
+    ) -> Result<Vec<String>> {
+        match movement.action {
+            Action::Rename => self.apply_rename(tx, movement, committing),
+            Action::Trash => self.apply_trash(tx, movement),
+            Action::Restore => self.apply_restore(tx, movement, committing),
+        }
+    }
+
+    fn apply_rename(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        movement: &EntryMove,
+        committing: bool,
+    ) -> Result<Vec<String>> {
+        let (from, to) = (movement.source.as_str(), movement.destination.as_str());
+        let mut closed = Vec::new();
+        let moving = active_documents(tx)?
+            .into_iter()
+            .filter(|document| below(&document.path, from).is_some());
+        for document in moving {
+            let path = rebase(&document.path, from, to).unwrap();
+            closed.extend(vacate(tx, &path, &document.id)?);
+            let updated = tx.execute(
+                "UPDATE docs SET path=? WHERE id=? AND active=1",
+                params![path, document.id],
+            )?;
+            if updated != 1 {
+                return Err(bad("A document identity changed during the folder move."));
+            }
+            tx.execute("DELETE FROM document_gaps WHERE doc=?", [&document.id])?;
+            if committing {
+                // Approvals are checked against the files they resolved to
+                // in the old folder, as for a document moving alone.
+                self.reanchor_moved_media(tx, &document, &path)?;
+            }
+        }
+        rebase_rows(tx, "folder_shares", from, to)?;
+        rebase_rows(tx, "mcp_folders", from, to)?;
+        self.rebase_grants(tx, from, to)?;
+        Ok(closed)
+    }
+
+    fn apply_trash(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        movement: &EntryMove,
+    ) -> Result<Vec<String>> {
+        let (original, location) = (movement.source.as_str(), movement.destination.as_str());
+        let documents: Vec<Document> = active_documents(tx)?
+            .into_iter()
+            .filter(|document| match movement.entry {
+                EntryKind::Document => {
+                    movement.document.as_deref() == Some(document.id.as_str())
+                        && document.path == original
+                }
+                EntryKind::Folder => below(&document.path, original).is_some(),
+            })
+            .collect();
+        for document in &documents {
+            let trashed = rebase(&document.path, original, location).unwrap();
+            // A new incarnation: no room loaded before the delete accepts
+            // anything once it is back.
+            let updated = tx.execute(
+                "UPDATE docs SET active=2,path=?,incarnation=incarnation+1
+                 WHERE id=? AND active=1",
+                params![trashed, document.id],
+            )?;
+            if updated != 1 {
+                return Err(bad("A document identity changed during the delete."));
+            }
+            tx.execute(
+                "INSERT INTO trashed_documents(doc,trash,path) VALUES(?,?,?)
+                 ON CONFLICT(doc) DO UPDATE SET trash=excluded.trash,path=excluded.path",
+                params![document.id, movement.id, document.path],
+            )?;
+            tx.execute("DELETE FROM document_gaps WHERE doc=?", [&document.id])?;
+        }
+        if movement.entry == EntryKind::Folder {
+            // Hidden paths open nothing, so these stay suspended until the
+            // restore brings them back.
+            rebase_rows(tx, "folder_shares", original, location)?;
+            rebase_rows(tx, "mcp_folders", original, location)?;
+            self.rebase_grants(tx, original, location)?;
+        }
+        tx.execute(
+            "INSERT OR IGNORE INTO trash(id,kind,path,location,deleted) VALUES(?,?,?,?,?)",
+            params![
+                movement.id,
+                movement.entry.as_str(),
+                original,
+                location,
+                now()
+            ],
+        )?;
+        Ok(documents.into_iter().map(|document| document.id).collect())
+    }
+
+    fn apply_restore(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        movement: &EntryMove,
+        committing: bool,
+    ) -> Result<Vec<String>> {
+        let (location, original) = (movement.source.as_str(), movement.destination.as_str());
+        let documents = tx
+            .prepare(
+                "SELECT t.doc,t.path FROM trashed_documents t JOIN docs d ON d.id=t.doc
+                 WHERE t.trash=? AND d.active=2",
+            )?
+            .query_map([&movement.id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut closed = Vec::new();
+        for (id, path) in &documents {
+            closed.extend(vacate(tx, path, id)?);
+            let updated = tx.execute(
+                "UPDATE docs SET active=1,path=? WHERE id=? AND active=2",
+                params![path, id],
+            )?;
+            if updated != 1 {
+                return Err(bad("A document identity changed during the restore."));
+            }
+        }
+        // A file replaced while it was in the trash is the one that is back.
+        if committing
+            && movement.entry == EntryKind::Document
+            && let Some((id, path)) = documents.first()
+        {
+            let metadata = fs::symlink_metadata(self.safe(path, false)?)?;
+            record_identity(tx, id, Identity::of(&metadata).as_ref())?;
+        }
+        if movement.entry == EntryKind::Folder {
+            rebase_rows(tx, "folder_shares", location, original)?;
+            rebase_rows(tx, "mcp_folders", location, original)?;
+            self.rebase_grants(tx, location, original)?;
+        }
+        tx.execute(
+            "DELETE FROM trashed_documents WHERE trash=?",
+            [&movement.id],
+        )?;
+        tx.execute("DELETE FROM trash WHERE id=?", [&movement.id])?;
+        Ok(closed)
+    }
+
+    /// Pinned media grants name files by absolute path. Files below a
+    /// moved folder moved with it, so their grants follow.
+    fn rebase_grants(&self, tx: &Connection, from: &str, to: &str) -> Result<()> {
+        let from = self.root.join(from).to_string_lossy().into_owned();
+        let to = self.root.join(to).to_string_lossy().into_owned();
+        let grants = tx
+            .prepare("SELECT doc,path FROM grants")?
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (document, path) in grants {
+            let Some(moved) = rebase(&path, &from, &to) else {
+                continue;
+            };
+            tx.execute(
+                "DELETE FROM grants WHERE doc=? AND path=?",
+                params![document, path],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO grants(doc,path) VALUES(?,?)",
+                params![document, moved],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A trashed document whose file a desktop application removed from the
+    /// trash retires as any missing document does: its links end and its
+    /// text stays in Removed document recovery. An item with nothing left
+    /// to bring back leaves the trash. Items a pending move involves wait.
+    fn settle_trash(&self) -> Result<()> {
+        let pending: HashSet<String> = self
+            .pending_entries()?
+            .into_iter()
+            .map(|movement| movement.id)
+            .collect();
+        let (trashed, items) = {
+            let db = self.db.lock().unwrap();
+            let trashed = db
+                .prepare(
+                    "SELECT t.doc,d.path,t.trash,t.path FROM trashed_documents t
+                     JOIN docs d ON d.id=t.doc WHERE d.active=2",
+                )?
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let items = db
+                .prepare("SELECT id,location FROM trash")?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            (trashed, items)
+        };
+        let absent = |path: &str| self.trashed_seen(path) == Seen::Absent;
+        // Seen absent twice, as a missing document must be.
+        let gone: Vec<&(String, String, String, String)> = trashed
+            .iter()
+            .filter(|(_, path, item, _)| !pending.contains(item) && absent(path))
+            .filter(|(_, path, ..)| absent(path))
+            .collect();
+        let kept: HashSet<&str> = trashed
+            .iter()
+            .filter(|document| !gone.iter().any(|gone| gone.0 == document.0))
+            .map(|(_, _, item, _)| item.as_str())
+            .collect();
+        let emptied: Vec<&str> = items
+            .iter()
+            .filter(|(id, location)| {
+                !pending.contains(id) && !kept.contains(id.as_str()) && absent(location)
+            })
+            .map(|(id, _)| id.as_str())
+            .collect();
+        if (gone.is_empty() && emptied.is_empty()) || !self.root_identity.matches(&self.root) {
+            return Ok(());
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        for (id, _, _, original) in &gone {
+            retire_trashed(&tx, id, original)?;
+        }
+        for id in &emptied {
+            tx.execute("DELETE FROM trash WHERE id=?", [id])?;
+        }
+        tx.commit()?;
+        drop(db);
+        if !gone.is_empty() {
+            self.permissions.invalidate();
+            for (id, ..) in gone {
+                self.close_document(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// What a path in the trash shows. Inaccessibility is no evidence.
+    fn trashed_seen(&self, path: &str) -> Seen<Identity> {
+        let Ok(full) = self.safe(path, true) else {
+            return Seen::Unknown;
+        };
+        match fs::symlink_metadata(full) {
+            Ok(metadata) => Seen::File(Identity::of(&metadata)),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Seen::Absent
+            }
+            Err(_) => Seen::Unknown,
+        }
+    }
+
+    fn existing_folder(&self, path: &str) -> Result<PathBuf> {
+        let full = self.safe(path, false)?;
+        match fs::symlink_metadata(&full) {
+            Ok(metadata) if metadata.is_dir() => Ok(full),
+            Ok(_) => Err(bad("Choose a folder.")),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Err(ApiError(StatusCode::NOT_FOUND, "Folder not found.".into()))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Active documents recorded at `folder` or below it.
+    fn documents_below(&self, folder: &str) -> Result<Vec<Document>> {
+        Ok(active_documents(&self.db.lock().unwrap())?
+            .into_iter()
+            .filter(|document| below(&document.path, folder).is_some())
+            .collect())
+    }
+
+    /// A path moves only once passes have placed everything it holds or
+    /// could hold, and no other journaled move involves it. A file found
+    /// inside before its row could follow would leave unrecorded.
+    fn settled_below(
+        &self,
+        path: &str,
+        documents: &[Document],
+        unplaced: &HashSet<String>,
+    ) -> Result<()> {
+        let found_inside = unplaced.iter().any(|id| {
+            self.found_elsewhere(id)
+                .is_some_and(|found| below(&found, path).is_some())
+        });
+        if found_inside
+            || documents
+                .iter()
+                .any(|document| unplaced.contains(&document.id))
+        {
+            return Err(busy_entry());
+        }
+        let renaming = self.pending_file_moves(None)?.iter().any(|movement| {
+            overlap(&movement.source, path) || overlap(&movement.destination, path)
+        });
+        if renaming
+            || self
+                .pending_entries()?
+                .iter()
+                .any(|movement| movement.covers(path))
+        {
+            return Err(pending_entry());
+        }
+        Ok(())
+    }
+
+    /// Rows of documents whose files are gone may still name paths at or
+    /// below `folder`, which does not exist. They retire as path reuse
+    /// retires a missing document, keeping their final accepted text.
+    fn free_rows_below(&self, folder: &str, unplaced: &HashSet<String>) -> Result<()> {
+        for document in self.documents_below(folder)? {
+            let full = self.safe(&document.path, false)?;
+            if unplaced.contains(&document.id)
+                || !self.retire_missing_identity(&document.id, &full)?
+            {
+                return Err(busy_entry());
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep every room of `ids` from loading and return the open ones in one
+    /// order, to lock while their files move. Nothing that holds a room
+    /// waits for document_files or for another room's load.
+    fn hold_rooms(&self, ids: &[&str]) -> Held {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let loads = ids.iter().map(|id| self.room_loads.acquire(id)).collect();
+        let cached = self.rooms.lock().unwrap();
+        let rooms = ids
+            .iter()
+            .filter_map(|id| Some(((*id).to_owned(), cached.get(*id)?.clone())))
+            .collect();
+        Held {
+            _loads: loads,
+            rooms,
+        }
+    }
+
+    /// Create the folders a restored path needs. Returns those it created,
+    /// deepest first, to remove again if the restore does not happen.
+    fn create_parents(&self, destination: &Path, original: &str) -> Result<Vec<PathBuf>> {
+        let in_the_way = || {
+            ApiError(
+                StatusCode::CONFLICT,
+                format!("A file is in the way of {original}. Move it, then restore again."),
+            )
+        };
+        let parent = destination.parent().unwrap();
+        let mut created = Vec::new();
+        let mut folder = parent;
+        while folder != self.root && fs::symlink_metadata(folder).is_err() {
+            created.push(folder.to_path_buf());
+            folder = folder.parent().unwrap();
+        }
+        if created.is_empty() {
+            return if parent.is_dir() {
+                Ok(created)
+            } else {
+                Err(in_the_way())
+            };
+        }
+        if fs::create_dir_all(parent).is_err() {
+            for folder in &created {
+                let _ = fs::remove_dir(folder);
+            }
+            return Err(in_the_way());
+        }
+        disk::sync_directories(parent, &self.root)?;
+        Ok(created)
+    }
+}
+
+/// The rooms of documents whose files move: none of them loads meanwhile,
+/// and the open ones are locked in this order.
+struct Held {
+    _loads: Vec<work::LoadGuard>,
+    rooms: Vec<(String, Arc<Mutex<Room>>)>,
+}
+
+fn active_documents(db: &Connection) -> Result<Vec<Document>> {
+    Ok(db
+        .prepare("SELECT id,path,permission,token FROM docs WHERE active=1")?
+        .query_map([], |row| {
+            Ok(Document {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                permission: row.get(2)?,
+                token: row.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+/// Make `path` free for the document `arriving` there. A row an older
+/// version retired may still hold it; an active one belongs to a document
+/// whose file the arrival proves gone, which retires and is returned.
+fn vacate(tx: &Connection, path: &str, arriving: &str) -> Result<Option<String>> {
+    tx.execute(
+        "UPDATE docs SET retired_path=COALESCE(retired_path,path),
+         path='.retired/'||id WHERE path=? AND active=0",
+        [path],
+    )?;
+    let previous = tx
+        .query_row(
+            "SELECT id FROM docs WHERE path=? AND active=1 AND id!=?",
+            params![path, arriving],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(previous) = &previous {
+        retire(tx, previous)?;
+    }
+    Ok(previous)
+}
+
+/// Move folder links or MCP folder grants recorded at `from` or below it
+/// along with their folder. A row the arriving one replaces recorded a
+/// folder no longer there.
+fn rebase_rows(tx: &Connection, table: &str, from: &str, to: &str) -> Result<()> {
+    let paths = tx
+        .prepare(&format!("SELECT path FROM {table}"))?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for path in paths {
+        let Some(moved) = rebase(&path, from, to) else {
+            continue;
+        };
+        tx.execute(&format!("DELETE FROM {table} WHERE path=?"), [&moved])?;
+        tx.execute(
+            &format!("UPDATE {table} SET path=? WHERE path=?"),
+            params![moved, path],
+        )?;
+    }
+    Ok(())
+}
+
 fn changed_during_rename() -> ApiError {
     ApiError(
         StatusCode::CONFLICT,
@@ -1939,3 +3251,7 @@ fn walk_step(_path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "namespace_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "namespace_entry_tests.rs"]
+mod entry_tests;

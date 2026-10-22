@@ -1,12 +1,14 @@
 //! Document share links and the page a share or folder link opens.
 use super::*;
 
+/// The document a share link opens. A trashed document keeps its link for
+/// a restore, but refuses it meanwhile exactly as a removed one does.
 pub(super) fn shared_document(s: &Store, token: &str) -> Result<Document> {
     let id: Option<String> =
         s.db.lock()
             .unwrap()
             .query_row(
-                "SELECT id FROM docs WHERE token=? AND permission!='private'",
+                "SELECT id FROM docs WHERE token=? AND permission!='private' AND active=1",
                 [token],
                 |r| r.get(0),
             )

@@ -171,6 +171,22 @@ pub(super) fn retire(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A trashed document whose file left the trash retires like any missing
+/// document. Removed document recovery lists it under its original path.
+pub(super) fn retire_trashed(db: &Connection, id: &str, original: &str) -> Result<()> {
+    const RETIRE: &str = "UPDATE docs SET active=0,
+        retired_path=COALESCE(retired_path,?),retired_at=?,path=?,
+        permission='private',token=NULL WHERE id=? AND active=2";
+    db.execute(
+        RETIRE,
+        params![original, now(), format!(".retired/{id}"), id],
+    )?;
+    db.execute("DELETE FROM document_identities WHERE doc=?", [id])?;
+    db.execute("DELETE FROM document_gaps WHERE doc=?", [id])?;
+    db.execute("DELETE FROM trashed_documents WHERE doc=?", [id])?;
+    Ok(())
+}
+
 pub(super) fn migrate(connection: &Connection) -> Result<()> {
     let db = connection.unchecked_transaction()?;
     let has_active = db
@@ -199,6 +215,8 @@ pub(super) fn migrate(connection: &Connection) -> Result<()> {
         ("protected_generation", "INTEGER NOT NULL DEFAULT -1"),
         ("retired_path", "TEXT"),
         ("retired_at", "INTEGER"),
+        // Starts again with each delete into the trash; see DocumentEngine.
+        ("incarnation", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let exists = db
             .prepare("PRAGMA table_info(docs)")?

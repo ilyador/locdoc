@@ -306,12 +306,14 @@ pub(super) async fn export(
         doc_job(store, id.clone(), move |store| {
             // Retired identities remain private recovery records. Never open
             // their former path: it may now belong to an unrelated document.
+            // A trashed one is listed under the path a restore returns it to.
             let (document, active) = store
                 .db
                 .lock()
                 .unwrap()
                 .query_row(
-                    "SELECT COALESCE(retired_path,path),active FROM docs WHERE id=?",
+                    "SELECT COALESCE(t.path,d.retired_path,d.path),d.active FROM docs d
+                     LEFT JOIN trashed_documents t ON t.doc=d.id WHERE d.id=?",
                     [&id],
                     |row| {
                         Ok((
@@ -321,7 +323,7 @@ pub(super) async fn export(
                                 permission: "private".into(),
                                 token: None,
                             },
-                            row.get::<_, bool>(1)?,
+                            row.get::<_, i64>(1)?,
                         ))
                     },
                 )
@@ -329,12 +331,14 @@ pub(super) async fn export(
                 .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Document not found.".into()))?;
             let room = store.rooms.lock().unwrap().get(&id).cloned();
             let live = room.as_ref().map(|room| room.lock().unwrap());
-            let filesystem = if active {
-                read_file(store, &document)
+            let filesystem = match active {
+                1 => read_file(store, &document)
                     .map(|(_, _, source)| source)
-                    .map_err(|error| error.1)
-            } else {
-                Err("This document was removed. Its former path is not read or restored.".into())
+                    .map_err(|error| error.1),
+                2 => Err("This document is in the trash. Restore it to read its file.".into()),
+                _ => Err(
+                    "This document was removed. Its former path is not read or restored.".into(),
+                ),
             };
             capture(
                 store,

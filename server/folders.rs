@@ -107,6 +107,7 @@ pub(super) fn active(s: &Store) -> Result<Vec<Grant>> {
 }
 /// Folders whose link no longer opens them, as after a restore copied every
 /// folder. A pathname alone never revives a link; the owner shares again.
+/// Links of folders in the trash wait for their restore.
 pub(super) fn unmatched(s: &Store) -> Result<Vec<String>> {
     let values =
         s.db.lock()
@@ -119,7 +120,7 @@ pub(super) fn unmatched(s: &Store) -> Result<Vec<String>> {
             .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(values
         .into_iter()
-        .filter(|value| !value.valid(s))
+        .filter(|value| !value.path.starts_with(namespace::TRASH) && !value.valid(s))
         .map(|value| value.path)
         .collect())
 }

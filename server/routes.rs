@@ -259,10 +259,19 @@ pub(super) fn router(s: App) -> Router {
             "/api/folders/mcp",
             get(mcp_access::read_folder).post(mcp_access::change_folder),
         )
+        .route(
+            "/api/folders",
+            patch(actions::move_folder).delete(actions::delete_folder),
+        )
+        .route("/api/trash", get(actions::trash))
+        .route("/api/trash/{id}/restore", post(actions::restore))
         .route("/api/tree", get(tree))
         .route("/api/files", post(create))
         .route("/api/shared/{token}", get(shared))
-        .route("/api/docs/{id}", get(document).patch(rename))
+        .route(
+            "/api/docs/{id}",
+            get(document).patch(rename).delete(actions::delete_document),
+        )
         .route("/api/docs/{id}/duplicate", post(actions::duplicate))
         .route("/api/docs/{id}/share", post(share))
         .route(

@@ -14,6 +14,10 @@ pub(super) struct DocumentEngine {
     journal: save::Journal,
     usage: Option<usize>,
     validation: validation::Validated,
+    /// The document's incarnation when this room loaded. A delete into the
+    /// trash starts a new one, so a room a socket or request still holds
+    /// never accepts beside the fresh room a restore loads.
+    incarnation: i64,
 }
 impl DocumentEngine {
     pub(super) fn conflicted(&self) -> bool {
@@ -68,6 +72,7 @@ struct StoredRoom {
     migrated: bool,
     browser_generation: i64,
     protected_generation: i64,
+    incarnation: i64,
 }
 
 impl Store {
@@ -243,17 +248,33 @@ impl Store {
         }
     }
 
-    fn check_identity(db: &Connection, id: &str) -> Result<()> {
-        let identity = db.query_row(
-            "SELECT active,EXISTS(SELECT 1 FROM document_moves WHERE doc=docs.id) FROM docs WHERE id=?",
-            [id], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
-        ).optional()?;
+    fn check_identity(db: &Connection, id: &str, incarnation: i64) -> Result<()> {
+        let identity = db
+            .query_row(
+                "SELECT active,EXISTS(SELECT 1 FROM document_moves WHERE doc=docs.id),incarnation
+                 FROM docs WHERE id=?",
+                [id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
         match identity {
-            Some((true, false)) => Ok(()),
-            Some((true, true)) => Err(ApiError(
+            Some((1, false, current)) if current == incarnation => Ok(()),
+            Some((1, true, current)) if current == incarnation => Err(ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "A file move is being recovered. Your draft is kept here; try again shortly."
                     .into(),
+            )),
+            // Its accepted state waits, unchanged, for a restore; a room
+            // loaded before the delete stays closed after it.
+            Some((1 | 2, _, _)) => Err(ApiError(
+                StatusCode::NOT_FOUND,
+                "This document was moved to the trash. Your draft is kept here.".into(),
             )),
             _ => Err(ApiError(
                 StatusCode::NOT_FOUND,
@@ -295,7 +316,8 @@ impl Store {
         }
         const STORED: &str = "SELECT state,disk_state,write_intent,line_ending,
             line_ending_migrated,browser_generation,protected_generation,
-            write_target,write_before_hash,write_before,write_state FROM docs WHERE id=?";
+            write_target,write_before_hash,write_before,write_state,incarnation
+            FROM docs WHERE id=?";
         let StoredRoom {
             state: saved,
             baseline,
@@ -308,6 +330,7 @@ impl Store {
             migrated: mut line_ending_migrated,
             browser_generation,
             protected_generation,
+            incarnation,
         } = self.db.lock().unwrap().query_row(STORED, [&d.id], |row| {
             Ok(StoredRoom {
                 state: row.get(0)?,
@@ -321,6 +344,7 @@ impl Store {
                 before_hash: row.get(8)?,
                 before: row.get(9)?,
                 target_state: row.get(10)?,
+                incarnation: row.get(11)?,
             })
         })?;
         if !(0..=2).contains(&recovering) || (recovering == 2 && target.is_none()) {
@@ -501,6 +525,7 @@ impl Store {
                 pending_media: HashSet::new(),
                 pending_metadata: HashMap::new(),
                 published_projection: None,
+                incarnation,
             },
         }));
         self.commit_pending(d, &mut r.lock().unwrap())?;
@@ -671,21 +696,23 @@ impl Store {
         result?;
         Ok(())
     }
+    /// Documents whose durable state still has edits to project, or one of
+    /// them.
+    fn unprojected(&self, id: Option<&str>) -> Result<Vec<Document>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare("SELECT id,path,permission,token FROM docs WHERE active=1 AND (?1 IS NULL OR id=?1) AND state IS NOT NULL AND (write_intent!=0 OR disk_state IS NULL OR state!=disk_state OR EXISTS(SELECT 1 FROM doc_updates WHERE doc=docs.id))")?;
+        Ok(q.query_map([id], |r| {
+            Ok(Document {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                permission: r.get(2)?,
+                token: r.get(3)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?)
+    }
     pub(super) fn recover_pending(&self) -> Result<()> {
-        let documents: Vec<Document> = {
-            let db = self.db.lock().unwrap();
-            let mut q = db.prepare("SELECT id,path,permission,token FROM docs WHERE active=1 AND state IS NOT NULL AND (write_intent!=0 OR disk_state IS NULL OR state!=disk_state OR EXISTS(SELECT 1 FROM doc_updates WHERE doc=docs.id))")?;
-            q.query_map([], |r| {
-                Ok(Document {
-                    id: r.get(0)?,
-                    path: r.get(1)?,
-                    permission: r.get(2)?,
-                    token: r.get(3)?,
-                })
-            })?
-            .collect::<std::result::Result<_, _>>()?
-        };
-        for d in documents {
+        for d in self.unprojected(None)? {
             let result = (|| -> Result<bool> {
                 let room = self.room(&d)?;
                 self.project_now(&d, &mut room.lock().unwrap())
@@ -699,6 +726,24 @@ impl Store {
             }
         }
         Ok(())
+    }
+    /// Documents back from the trash may hold accepted edits that were
+    /// still waiting for projection when they left. Project them now rather
+    /// than when someone next opens them. Their rooms stay open: a socket
+    /// may already have joined one.
+    pub(super) fn recover_restored(&self, ids: &[String]) {
+        for id in ids {
+            let result = self.unprojected(Some(id)).and_then(|documents| {
+                for d in documents {
+                    let room = self.room(&d)?;
+                    room.lock().unwrap().reconcile(self, &d)?;
+                }
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::warn!(document = id, "restored edits wait for projection: {error}");
+            }
+        }
     }
     pub(super) fn snapshot(&self, d: &Document, content: &str, force: bool) -> Result<()> {
         let db = self.db.lock().unwrap();
@@ -1029,13 +1074,13 @@ impl Store {
         {
             // Retirement and command admission use the same room lock. Even
             // a no-op sync/checkpoint must not revive an inactive identity.
-            Self::check_identity(&self.db.lock().unwrap(), &d.id)?;
+            Self::check_identity(&self.db.lock().unwrap(), &d.id, r.engine.incarnation)?;
             return Ok(());
         }
         let current_references = r.engine.validation.references(r.awareness.doc())?;
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
-        Self::check_identity(&tx, &d.id)?;
+        Self::check_identity(&tx, &d.id, r.engine.incarnation)?;
         if let Some(state) = &state {
             tx.execute("UPDATE docs SET state=? WHERE id=?", params![state, d.id])?;
             tx.execute("DELETE FROM doc_updates WHERE doc=?", [&d.id])?;

@@ -415,7 +415,7 @@ impl Store {
         self.resolve_media(Path::new(&d.path).parent().unwrap(), rel)
     }
     /// The file a media reference names from a folder, inside the root and
-    /// outside `.trash`.
+    /// outside `.trash` and Locdoc's own trash.
     fn resolve_media(&self, folder: &Path, rel: &str) -> Result<PathBuf> {
         if rel.contains("://") || rel.starts_with('/') || rel.contains('\\') {
             return Err(bad("Only local attachments are supported."));
@@ -430,7 +430,9 @@ impl Store {
         let canonical = fs::canonicalize(path)
             .map_err(|_| ApiError(StatusCode::NOT_FOUND, "Attachment not found.".into()))?;
         if !canonical.starts_with(&self.root)
-            || canonical.components().any(|p| p.as_os_str() == ".trash")
+            || canonical
+                .components()
+                .any(|p| p.as_os_str() == ".trash" || p.as_os_str() == namespace::TRASH)
         {
             return Err(denied());
         }
@@ -1009,13 +1011,24 @@ async fn document(
     AxPath(id): AxPath<String>,
     Query(a): Query<Access>,
     h: HeaderMap,
-) -> Result<Json<Value>> {
-    Ok(Json(
-        doc_job(s, id.clone(), move |s| {
-            document_payload(s, &h, &s.doc(&id)?, &a)
-        })
-        .await?,
-    ))
+) -> Result<Response> {
+    doc_job(s, id.clone(), move |s| match s.doc(&id) {
+        Ok(d) => Ok(Json(document_payload(s, &h, &d, &a)?).into_response()),
+        // Only the owner learns that a document is in the trash. Links and
+        // MCP find it as they find a removed one.
+        Err(error) if error.0 == StatusCode::NOT_FOUND && s.owner(&h) => {
+            match actions::holding(s, &id)? {
+                Some(item) => Ok((
+                    StatusCode::GONE,
+                    Json(json!({"error": "trashed", "trash": item})),
+                )
+                    .into_response()),
+                None => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    })
+    .await
 }
 #[derive(Deserialize)]
 struct Rename {
