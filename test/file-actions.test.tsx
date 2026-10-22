@@ -545,6 +545,28 @@ test("Undo focuses the restored row once a slower listing shows it", async () =>
   assert.equal(focused(), "Archive", "A later move is never undone");
 });
 
+test("name fields line their glyph up with the tree's row icons", async () => {
+  await open(workspaceFiles, { expanded: ["Notes"] });
+  const rowIcons = row("Notes/Plan.md").style.paddingLeft;
+  row("Notes/Sub").focus();
+  key(row("Notes/Sub"), "F2");
+  const rename = screen.getByRole("textbox", { name: "Rename Sub" });
+  assert.equal(
+    rename.closest<HTMLElement>(".tree-edit")!.style.paddingLeft,
+    rowIcons,
+    "A folder's field has no caret, so its glyph sits where icons sit",
+  );
+  key(rename, "Escape");
+  act(() => workspace.files.startCreate("folder", "Notes"));
+  const create = screen.getByRole("textbox", {
+    name: "New folder name in Notes",
+  });
+  assert.equal(
+    create.closest<HTMLElement>(".tree-edit")!.style.paddingLeft,
+    rowIcons,
+  );
+});
+
 test("deleting a folder reports its documents and failures leave the tree alone", async () => {
   await open(workspaceFiles);
   api.fail("DELETE /api/folders", 503, "Storage is busy.");

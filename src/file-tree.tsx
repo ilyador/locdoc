@@ -52,6 +52,8 @@ const MOVE_TYPE = "application/x-locdoc-entry";
 const EXPAND_DELAY = 600;
 const indentOf = (depth: number, folder: boolean) =>
   12 + depth * 16 + (folder ? 0 : 18);
+// A name field has no disclosure caret: its glyph sits where row icons sit.
+const fieldIndent = (depth: number) => indentOf(depth, false);
 
 type Menu = {
   path: string | null;
@@ -608,7 +610,7 @@ export function FileTree({
         {editing && files ? (
           <InlineName
             files={files}
-            indent={nested ? indentOf(row.depth, folder) : 12}
+            indent={nested ? fieldIndent(row.depth) : 12}
             prepare={prepare}
           />
         ) : (
@@ -713,11 +715,7 @@ export function FileTree({
       >
         <InlineName
           files={files}
-          indent={
-            view === "folders"
-              ? indentOf(row.depth, files.edit.kind === "folder")
-              : 12
-          }
+          indent={view === "folders" ? fieldIndent(row.depth) : 12}
           prepare={prepare}
         />
       </li>
