@@ -11,7 +11,7 @@ import { createPortal } from "react-dom";
 import { EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, drawSelection } from "@codemirror/view";
 import { defaultKeymap, indentWithTab } from "@codemirror/commands";
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search";
+import { highlightSelectionMatches } from "@codemirror/search";
 import { yCollab } from "y-codemirror.next";
 import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
@@ -38,6 +38,7 @@ import {
   readOnlyInputGuard,
 } from "./editor-permissions";
 import { rememberEditorScroll } from "./editor-scroll";
+import { findExtension, findKeymap } from "./find-panel";
 import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
 import { toggleInlineFormat } from "./inline-format";
 import { lineBackspaceIntent } from "./line-backspace";
@@ -216,6 +217,7 @@ export const MarkdownEditor = forwardRef<
         doc: source,
         extensions: [
           EditorState.lineSeparator.of("\n"),
+          EditorState.allowMultipleSelections.of(true),
           integrity.current.of(integrityAccess()),
           canonicalLineEndings,
           sourceCommentLayer,
@@ -224,6 +226,7 @@ export const MarkdownEditor = forwardRef<
           EditorView.lineWrapping,
           drawSelection(),
           highlightSelectionMatches(),
+          findExtension(),
           layer.extension,
           access.current.of(editorAccess(editable)),
           preview.current.of(documentPreview(id, token, path, entries)),
@@ -247,7 +250,7 @@ export const MarkdownEditor = forwardRef<
             },
             ...guardedUndoKeymap,
             ...defaultKeymap,
-            ...searchKeymap,
+            ...findKeymap,
             indentWithTab,
           ]),
           EditorView.updateListener.of((u) => {
