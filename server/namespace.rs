@@ -2225,6 +2225,12 @@ impl Store {
                 "That path already exists.".into(),
             ));
         }
+        // A folder moved into the state folder could never move out again.
+        if self.holds_state(&destination) {
+            return Err(bad(
+                "Locdoc keeps its own state in that folder. Choose another destination.",
+            ));
+        }
         let moving = self.documents_below(&from)?;
         self.settled_below(&from, &moving, &unplaced)?;
         self.settled_below(&to, &[], &unplaced)?;
@@ -3172,12 +3178,22 @@ impl Store {
     /// archives the running server uses. A folder action never moves it,
     /// a folder holding it or a folder inside it.
     fn outside_state(&self, folder: &Path) -> Result<()> {
-        if self.data.starts_with(folder) || folder.starts_with(&self.data) {
+        if self.holds_state(folder) {
             return Err(bad(
-                "This folder holds Locdoc's own state folder, which Locdoc never moves or deletes.",
+                "Locdoc keeps its own state in this folder, so it never moves or deletes it.",
             ));
         }
         Ok(())
+    }
+
+    /// Whether `path` is the state folder, holds it or is inside it, for a
+    /// state folder configured inside the documents folder, as
+    /// `media::publishable` decides. A documents folder kept inside the
+    /// state folder holds none of the state's own files.
+    fn holds_state(&self, path: &Path) -> bool {
+        self.data != self.root
+            && self.data.starts_with(&self.root)
+            && (self.data.starts_with(path) || path.starts_with(&self.data))
     }
 
     /// Active documents recorded at `folder` or below it.

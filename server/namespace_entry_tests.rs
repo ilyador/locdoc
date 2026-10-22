@@ -1067,6 +1067,11 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
             "delete a state subfolder",
             s.trash_folder("state/fonts").map(|_| ()),
         ),
+        // A folder moved in could never move out again.
+        (
+            "move a folder into state",
+            s.rename_folder("Elsewhere", "state/Elsewhere").map(|_| ()),
+        ),
     ];
     for (what, result) in attempts {
         assert_eq!(
@@ -1078,6 +1083,8 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
     assert!(s.data.join("locdoc.sqlite").is_file());
     assert!(s.data.join("owner.key").is_file());
     assert!(s.data.join("fonts").is_dir());
+    assert!(s.root.join("Elsewhere").is_dir());
+    assert!(!s.data.join("Elsewhere").exists());
     assert!(trash_items(&s).is_empty());
     assert_eq!(journaled(&s), 0);
     // A folder that holds the state folder stays where it is too.
@@ -1106,6 +1113,29 @@ fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
     s.rename_folder("Drafts", "Kept").unwrap();
     assert_eq!(s.doc(&kept.id).unwrap().path, "Kept/page.md");
     s.trash_folder("Kept").unwrap();
+}
+
+#[test]
+fn a_documents_folder_kept_inside_the_state_folder_moves_and_deletes_its_folders() {
+    // A state folder holding the documents folder, as in /srv/locdoc with
+    // /srv/locdoc/docs: every folder is inside it, none holds its files.
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    let s = Store::open(state.join("docs"), state, "http://localhost".into()).unwrap();
+    assert!(s.root.starts_with(&s.data));
+    let page = s.create_document("Drafts/page.md").unwrap();
+    s.create_folder("Archive").unwrap();
+    assert_eq!(s.rename_folder("Drafts", "Notes").unwrap(), "Notes");
+    assert_eq!(
+        s.rename_folder("Notes", "Archive/Notes").unwrap(),
+        "Archive/Notes"
+    );
+    assert_eq!(s.doc(&page.id).unwrap().path, "Archive/Notes/page.md");
+    let trash = s.trash_folder("Archive").unwrap();
+    assert_eq!(active(&s, &page.id), 2);
+    assert_eq!(s.restore_trash(&trash).unwrap().0, "Archive");
+    assert_eq!(s.doc(&page.id).unwrap().path, "Archive/Notes/page.md");
+    assert!(s.data.join("locdoc.sqlite").is_file());
 }
 
 #[test]
