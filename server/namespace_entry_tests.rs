@@ -1036,3 +1036,74 @@ fn a_room_held_through_a_delete_never_accepts_beside_the_restored_one() {
     let saved = fs::read_to_string(s.root.join("page.md")).unwrap();
     assert!(saved.contains("Fresh edit") && !saved.contains("Stale edit"));
 }
+
+#[test]
+fn folder_actions_never_move_a_state_folder_kept_inside_the_documents_folder() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("docs");
+    let s = Store::open(root.clone(), root.join("state"), "http://localhost".into()).unwrap();
+    let page = s.create_document("Notes/page.md").unwrap();
+    share(&s, &page.id);
+    fs::create_dir_all(s.data.join("fonts")).unwrap();
+    s.create_folder("Elsewhere").unwrap();
+    // The sidebar lists the state folder like any other folder, but moving
+    // or deleting it would take the live database and owner key away.
+    assert!(listed(&s).iter().any(|path| path == "state"));
+    let attempts = [
+        ("delete state", s.trash_folder("state").map(|_| ())),
+        (
+            "rename state",
+            s.rename_folder("state", "Archive").map(|_| ()),
+        ),
+        (
+            "move state",
+            s.rename_folder("state", "Elsewhere/state").map(|_| ()),
+        ),
+        (
+            "move a state subfolder",
+            s.rename_folder("state/fonts", "Fonts").map(|_| ()),
+        ),
+        (
+            "delete a state subfolder",
+            s.trash_folder("state/fonts").map(|_| ()),
+        ),
+    ];
+    for (what, result) in attempts {
+        assert_eq!(
+            result.map_err(|error| error.0),
+            Err(StatusCode::BAD_REQUEST),
+            "{what}"
+        );
+    }
+    assert!(s.data.join("locdoc.sqlite").is_file());
+    assert!(s.data.join("owner.key").is_file());
+    assert!(s.data.join("fonts").is_dir());
+    assert!(trash_items(&s).is_empty());
+    assert_eq!(journaled(&s), 0);
+    // A folder that holds the state folder stays where it is too.
+    drop(s);
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("docs");
+    let s = Store::open(
+        root.clone(),
+        root.join("Private/state"),
+        "http://localhost".into(),
+    )
+    .unwrap();
+    s.create_document("Private/note.md").unwrap();
+    for result in [
+        s.trash_folder("Private").map(|_| ()),
+        s.rename_folder("Private", "Public").map(|_| ()),
+    ] {
+        assert_eq!(
+            result.map_err(|error| error.0),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+    assert!(s.data.join("locdoc.sqlite").is_file());
+    // Other folders still move and delete as usual.
+    let kept = s.create_document("Drafts/page.md").unwrap();
+    s.rename_folder("Drafts", "Kept").unwrap();
+    assert_eq!(s.doc(&kept.id).unwrap().path, "Kept/page.md");
+    s.trash_folder("Kept").unwrap();
+}

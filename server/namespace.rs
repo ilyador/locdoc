@@ -2211,6 +2211,7 @@ impl Store {
         }
         let unplaced = self.reconcile(Pass::Discover)?;
         let source = self.existing_folder(&from)?;
+        self.outside_state(&source)?;
         if to == from {
             return Ok(to);
         }
@@ -2341,6 +2342,7 @@ impl Store {
         let path = relative_path(input, false)?;
         let unplaced = self.reconcile(Pass::Discover)?;
         let source = self.existing_folder(&path)?;
+        self.outside_state(&source)?;
         let documents = self.documents_below(&path)?;
         self.settled_below(&path, &documents, &unplaced)?;
         let metadata = fs::symlink_metadata(&source)?;
@@ -3065,6 +3067,19 @@ impl Store {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// A state folder configured inside the documents folder is listed like
+    /// any other, but it holds the database, the owner key and recovery
+    /// archives the running server uses. A folder action never moves it,
+    /// a folder holding it or a folder inside it.
+    fn outside_state(&self, folder: &Path) -> Result<()> {
+        if self.data.starts_with(folder) || folder.starts_with(&self.data) {
+            return Err(bad(
+                "This folder holds Locdoc's own state folder, which Locdoc never moves or deletes.",
+            ));
+        }
+        Ok(())
     }
 
     /// Active documents recorded at `folder` or below it.
