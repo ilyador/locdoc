@@ -142,16 +142,37 @@ export function FileTree({
     };
   }, []);
   const request = files?.request;
+  // A row an action asked to focus before the tree listed it, such as a
+  // restored item, with the element that kept focus while it was missing.
+  const waiting = useRef<{ path: string; holder: Element | null } | null>(
+    null,
+  );
   useLayoutEffect(() => {
     if (!request || request.seq === handled.current) return;
     handled.current = request.seq;
+    waiting.current = null;
     setCursorState(request.path);
     if (!request.dom || !mayTakeFocus()) return;
     const element = request.path
       ? elements.current.get(request.path)
       : undefined;
     (element || (roving ? elements.current.get(roving) : undefined))?.focus();
+    if (!element && request.path)
+      waiting.current = {
+        path: request.path,
+        holder: document.activeElement,
+      };
   }, [request?.seq]);
+  // Once the listing shows that row, it takes focus, unless focus moved on.
+  useLayoutEffect(() => {
+    const pending = waiting.current;
+    const element = pending && elements.current.get(pending.path);
+    if (!pending || !element) return;
+    waiting.current = null;
+    const active = document.activeElement;
+    if (!active || active === document.body || active === pending.holder)
+      focusRow(pending.path);
+  });
 
   const entryAt = (path: string | null) =>
     path === null

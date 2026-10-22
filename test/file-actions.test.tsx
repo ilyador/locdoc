@@ -501,6 +501,50 @@ test("Ctrl+Z restores the latest deletion after its toast closes, until another 
   assert.ok(row("b.txt") === null, "b.txt stays in Recently deleted");
 });
 
+test("Undo focuses the restored row once a slower listing shows it", async () => {
+  await open(workspaceFiles);
+  row("a.md").focus();
+  key(row("a.md"), "Delete");
+  await waitFor(() => assert.ok(row("a.md") === null, "Deleted"));
+  assert.equal(focused(), "b.txt");
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  // In a browser the listing answers after the restore does.
+  const releaseTree = api.hold("GET /api/tree");
+  key(row("b.txt"), "z", { ctrlKey: true });
+  await waitFor(() =>
+    assert.equal(sends("POST").at(-1)!.path, "/api/trash/trash-1/restore"),
+  );
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  assert.ok(row("a.md") === null, "The held listing has not shown it yet");
+  await act(async () => {
+    releaseTree();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  await waitFor(() => assert.ok(row("a.md")));
+  assert.equal(focused(), "a.md", "The restored row takes focus once listed");
+  assert.equal(row("a.md").getAttribute("tabindex"), "0");
+  assert.equal(row("b.txt").getAttribute("tabindex"), "-1");
+
+  // Moving on while the listing is slow keeps focus where it went.
+  key(row("a.md"), "Delete");
+  await waitFor(() => assert.ok(row("a.md") === null, "Deleted again"));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  const releaseAgain = api.hold("GET /api/tree");
+  key(row("b.txt"), "z", { ctrlKey: true });
+  await waitFor(() =>
+    assert.equal(sends("POST").at(-1)!.path, "/api/trash/trash-2/restore"),
+  );
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  key(row("b.txt"), "Home");
+  assert.equal(focused(), "Archive");
+  await act(async () => {
+    releaseAgain();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  await waitFor(() => assert.ok(row("a.md")));
+  assert.equal(focused(), "Archive", "A later move is never undone");
+});
+
 test("deleting a folder reports its documents and failures leave the tree alone", async () => {
   await open(workspaceFiles);
   api.fail("DELETE /api/folders", 503, "Storage is busy.");
