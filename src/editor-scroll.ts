@@ -1,4 +1,5 @@
-import type { EditorView } from "@codemirror/view";
+import { StateEffect } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import * as Y from "yjs";
 
 // This is browser reading state, never document content or collaborative state.
@@ -133,8 +134,8 @@ export function rememberEditorScroll(
     for (const event of inputs)
       window.removeEventListener(event, stopRestoring, true);
   };
-  // Only the document pane may scroll. CodeMirror's scrollIntoView also walks
-  // page ancestors and can invoke native viewport scrolling on iOS.
+  // Only the document pane may scroll. CodeMirror's default scrolling also
+  // walks page ancestors and can invoke native viewport scrolling on iOS.
   if (saved !== null) {
     for (const event of inputs)
       window.addEventListener(event, stopRestoring, {
@@ -166,8 +167,7 @@ export function rememberEditorScroll(
         return Math.min(pos, view.state.doc.length);
       };
       const alignment = {};
-      const restore = () => {
-        if (!active || readerControlled) return;
+      const align = () =>
         view.requestMeasure({
           key: alignment,
           read: () => {
@@ -186,6 +186,50 @@ export function rememberEditorScroll(
               pane.scrollTop += delta;
           },
         });
+      // Text CodeMirror has not drawn has only an estimated place, and WebKit
+      // can move a pane that jumped there back up while CodeMirror draws the
+      // new lines. So CodeMirror's own scroll request draws the text first.
+      // This handler ends each request the restore made, after reader input
+      // too, so CodeMirror never scrolls page ancestors for it. Like
+      // CodeMirror's own scrolling, it moves the pane now, so CodeMirror
+      // draws around the new position in the same pass. Only the line's
+      // block can be read during an update: the alignment within the line
+      // follows in this pass, and once more after the drawn lines settle.
+      let request: unknown = null;
+      let handling = false;
+      const scrolled = (_: EditorView, __: unknown, options: unknown) => {
+        if (options !== request) return false;
+        request = null;
+        if (active && !readerControlled)
+          pane.scrollTop +=
+            view.documentTop +
+            view.lineBlockAt(target()).top +
+            saved.offset -
+            pane.getBoundingClientRect().top;
+        align();
+        realign();
+        return true;
+      };
+      const restore = () => {
+        if (!active || readerControlled) return;
+        const pos = target();
+        if (!canvas && (pos < view.viewport.from || pos > view.viewport.to)) {
+          const scroll = EditorView.scrollIntoView(pos, { y: "start" });
+          request = scroll.value;
+          view.dispatch({
+            effects: handling
+              ? scroll
+              : [
+                  StateEffect.appendConfig.of(
+                    EditorView.scrollHandler.of(scrolled),
+                  ),
+                  scroll,
+                ],
+          });
+          handling = true;
+          return;
+        }
+        align();
       };
       const realign = () => {
         if (!active || readerControlled || frame !== undefined) return;
