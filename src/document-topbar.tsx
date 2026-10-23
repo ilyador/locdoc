@@ -78,16 +78,16 @@ export function DocumentTopbar({
               )}
             </span>
           </div>
-          {changed && (
-            <p className="document-modified">
-              <span className="document-modified-label">Modified </span>
-              <time dateTime={changed.dateTime} dir="auto">
-                {changed.label}
-              </time>
-            </p>
-          )}
         </div>
       </div>
+      {changed && (
+        <p className="document-modified">
+          <span className="document-modified-label">Modified </span>
+          <time dateTime={changed.dateTime} dir="auto">
+            {changed.label}
+          </time>
+        </p>
+      )}
       <div className="top-actions">
         {doc && (
           <>

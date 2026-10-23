@@ -271,7 +271,9 @@ test("the header shows when the open document's file last changed, in full, and 
   // The time the sidebar lists for the document.
   const listed = () =>
     row("Notes/Plan.md").querySelector("time")!.getAttribute("datetime");
-  fireEvent.click(row("Notes"));
+  // Open folders are remembered, so an earlier test may have left it open.
+  if (row("Notes").getAttribute("aria-expanded") !== "true")
+    fireEvent.click(row("Notes"));
   assert.deepEqual(header(), {
     text: `Modified ${full(plan.modified)}`,
     dateTime: listed(),

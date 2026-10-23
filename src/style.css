@@ -666,8 +666,8 @@ button:hover {
   text-overflow: ellipsis;
   font-weight: var(--weight-medium);
 }
-/* The breadcrumb, with when the document last changed in quiet metadata
-   under it, beside Open sidebar. */
+/* The breadcrumb beside Open sidebar. When the document last changed sits
+   centred in the space between the file name and the actions. */
 .topbar-heading {
   display: flex;
   align-items: center;
@@ -680,6 +680,11 @@ button:hover {
   min-width: 0;
 }
 .document-modified {
+  /* Only the space the file name and the actions leave: the name keeps
+     priority, and the time ellipsizes before it does. */
+  flex: 1 1 0;
+  min-width: 0;
+  text-align: center;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3151,6 +3156,38 @@ button:hover {
   }
   .topbar-heading {
     gap: 6px;
+  }
+  /* No room for three things in a row: the time goes under the file name,
+     beside Open sidebar and the actions. */
+  .topbar {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "trigger title actions"
+      "trigger modified actions";
+    align-content: center;
+    gap: 0 6px;
+  }
+  .topbar-heading,
+  .topbar-titles {
+    display: contents;
+  }
+  .topbar-heading > .icon-button {
+    grid-area: trigger;
+  }
+  /* The taller button and actions span both rows; the two lines meet in
+     the middle rather than spreading apart. */
+  .breadcrumbs {
+    grid-area: title;
+    align-self: end;
+  }
+  .document-modified {
+    grid-area: modified;
+    align-self: start;
+    text-align: start;
+  }
+  .top-actions {
+    grid-area: actions;
   }
   .crumb-home {
     display: none;
