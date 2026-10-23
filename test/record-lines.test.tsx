@@ -601,3 +601,232 @@ test("a caret on either side of a record's line reveals the line it shows, and t
     editor.close();
   }
 });
+
+test("the part of a line after a conversation that opens inside it keeps the line's styling", () => {
+  // The app's own stylesheet decides how each part of the line looks.
+  const style = document.createElement("style");
+  style.textContent = readFileSync(
+    new URL("../src/style.css", import.meta.url),
+    "utf8",
+  );
+  document.head.append(style);
+  const properties = [
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-weight",
+    "letter-spacing",
+    "line-height",
+    "color",
+    "text-decoration",
+    "text-transform",
+    "background-color",
+    "border-inline-start",
+    "padding-inline-start",
+    "padding-inline-end",
+    "padding-bottom",
+    "padding-block-end",
+    "min-height",
+  ];
+  // Opens `source` with a conversation about its text up to the end of
+  // `passage`, which ends inside the first line.
+  const open = (path: string, source: string, passage: string) => {
+    const ydoc = new Y.Doc();
+    const text = ydoc.getText("content");
+    text.insert(0, source);
+    const at = (index: number, assoc = 0) =>
+      Y.relativePositionToJSON(
+        Y.createRelativePositionFromTypeIndex(text, index, assoc),
+      );
+    const end = source.indexOf(passage) + passage.length;
+    const thread = {
+      id: "c1",
+      name: "alex",
+      body: "note",
+      canResolve: true,
+      quote: passage,
+      anchor: { start: at(end - passage.length), end: at(end, -1) },
+      created: 0,
+      resolved: false,
+      replies: [],
+    };
+    const awareness = new Awareness(ydoc);
+    const page = render(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        id="split-line"
+        editable={false}
+        path={path}
+        onChange={() => {}}
+        onComment={() => {}}
+        onUpload={() => {}}
+        comments={[thread]}
+        activeComment="c1"
+        conversation={<p>The conversation</p>}
+      />,
+    );
+    return {
+      host: page.container.querySelector(".inline-comment-host")!,
+      line: (text: string) =>
+        [...page.container.querySelectorAll(".cm-line")].find(
+          (line) => line.textContent === text,
+        )!,
+      close() {
+        page.unmount();
+        awareness.destroy();
+        ydoc.destroy();
+      },
+    };
+  };
+  const looks = (element: Element) => {
+    const computed = getComputedStyle(element);
+    return properties.map(
+      (name) => `${name}: ${computed.getPropertyValue(name)}`,
+    );
+  };
+  try {
+    for (const [path, source, passage] of [
+      [
+        "Notes/split.md",
+        "# A heading the conversation splits\nBody",
+        "heading",
+      ],
+      [
+        "Notes/split.md",
+        "## A heading the conversation splits\nBody",
+        "heading",
+      ],
+      ["Notes/split.md", "### A heading the conversation splits", "heading"],
+      ["Notes/split.md", "#### A heading the conversation splits", "heading"],
+      ["Notes/split.md", "##### A heading the conversation splits", "heading"],
+      ["Notes/split.md", "###### A heading the conversation splits", "heading"],
+      [
+        "Notes/split.md",
+        "Body text\n# A heading the conversation splits",
+        "heading",
+      ],
+      [
+        "Notes/split.md",
+        "A paragraph the conversation splits\nNext",
+        "paragraph",
+      ],
+      ["Notes/split.md", "> A quote the conversation splits\n\nNext", "quote"],
+      ["Notes/split.md", "- > A quoted item the conversation splits", "item"],
+      ["Notes/split.md", "```\nsome code the conversation splits\n```", "code"],
+      ["Notes/split.md", "- [ ] A task the conversation splits", "task"],
+      ["Notes/split.md", "- [x] A done task the conversation splits", "done"],
+      [
+        "Script.fountain",
+        "INT. HOUSE THE CONVERSATION SPLITS - DAY\n\nAction.",
+        "HOUSE",
+      ],
+      [
+        "Script.fountain",
+        "# A section the conversation splits\n\nAction.",
+        "section",
+      ],
+      [
+        "Script.fountain",
+        "She waits by the door the conversation splits.\n\nMore.",
+        "waits",
+      ],
+      ["Notes/split.txt", "A plain line the conversation splits\nNext", "line"],
+    ] as const) {
+      const editor = open(path, source, passage);
+      const label = `${path}: ${JSON.stringify(source)}`;
+      try {
+        const before = editor.host.previousElementSibling!;
+        const after = editor.host.nextElementSibling!;
+        assert.ok(
+          editor.host.hasAttribute("data-splits-line") &&
+            before.classList.contains("cm-line") &&
+            after.classList.contains("cm-line") &&
+            /splits/i.test(after.textContent!),
+          `${label}: the conversation opens inside its line`,
+        );
+        assert.deepEqual(looks(after), looks(before), label);
+        // The space above a heading stays above its first part.
+        assert.equal(getComputedStyle(after).paddingTop, "0px", label);
+      } finally {
+        editor.close();
+      }
+    }
+    // A conversation between two lines splits neither: the line after a
+    // heading keeps its own styling.
+    const editor = open("Notes/split.md", "## Heading\nBody", "Heading");
+    try {
+      assert.ok(!editor.host.hasAttribute("data-splits-line"));
+      const heading = getComputedStyle(editor.line("Heading"));
+      const body = getComputedStyle(editor.line("Body"));
+      assert.notEqual(body.fontSize, heading.fontSize);
+      assert.notEqual(body.color, heading.color);
+    } finally {
+      editor.close();
+    }
+  } finally {
+    style.remove();
+  }
+});
+
+test("Backspace after records behind a table's or HTML block's blank line joins what a reader sees and shows no empty line", () => {
+  const own = "[[comment(ana): Own]]";
+  for (const [source, joined, expected, rows] of [
+    [
+      `| A |\n| - |\n| x |\n\n${record}\n## Next`,
+      "## Next",
+      `| A |\n| - |\n| x |## Next\n\n${record}`,
+      // The caret shows the table's source.
+      [": | A |", ": | - |", ": | x |## Next"],
+    ],
+    [
+      `<div>\nhi\n</div>\n\n${record}\nAfter\nMore`,
+      "After",
+      `<div>\nhi\n</div>After\n\n${record}\nMore`,
+      [": <div>", ": hi", ": </div>After", "md-block-end: More"],
+    ],
+    // In the block, the joined line's own records would be literal HTML or
+    // a table cell's text: they go after it too, as their own conversation.
+    [
+      `<div>\nhi\n</div>\n\n${record}\nAfter${own}\nMore`,
+      "After",
+      `<div>\nhi\n</div>After\n\n${record}\n\n${own}\nMore`,
+      [": <div>", ": hi", ": </div>After", "md-block-end: More"],
+    ],
+  ] as const) {
+    const editor = mount("Notes/blocks.md", source, { editable: true });
+    try {
+      const at = source.indexOf(joined);
+      act(() =>
+        editor.view.dispatch({
+          selection: { anchor: at },
+          userEvent: "select",
+        }),
+      );
+      act(() => {
+        editor.view.contentDOM.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Backspace",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      const label = JSON.stringify(source);
+      assert.equal(editor.text.toString(), expected, label);
+      assert.equal(
+        editor.view.state.selection.main.head,
+        expected.indexOf(joined),
+        `${label}: the caret is where the lines join`,
+      );
+      assert.deepEqual(shown(editor.view), rows, `${label}: no empty line`);
+      assert.deepEqual(
+        sourceComments(editor.text.toString(), false).map((t) => t.messages),
+        sourceComments(source, false).map((t) => t.messages),
+        `${label}: every conversation stays whole`,
+      );
+    } finally {
+      editor.close();
+    }
+  }
+});

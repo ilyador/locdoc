@@ -9,7 +9,7 @@ import { fileApi } from "./fixtures/file-api.ts";
 // where the sidebar is a drawer over the document, and on a desktop. jsdom
 // has no Tab order, so these tests check the inert state and where focus
 // lands.
-let render, fireEvent, screen, waitFor, cleanup, within;
+let render, fireEvent, screen, waitFor, cleanup, within, act;
 let WorkspaceView, useWorkspace;
 let workspace;
 
@@ -88,7 +88,7 @@ before(async () => {
     onclose;
   } as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, fireEvent, screen, waitFor, cleanup, within } =
+  ({ render, fireEvent, screen, waitFor, cleanup, within, act } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
   ({ useWorkspace } = await import("../src/workspace.ts"));
@@ -248,6 +248,55 @@ test("Ctrl+K opens the drawer at its search field, and Escape gives focus back",
   assert.ok(
     document.activeElement === fonts,
     "Focus returns to the control that had it",
+  );
+});
+
+test("Ctrl+K in the editor finds a document, and links the text it selects", async () => {
+  const { EditorView } = await import("@codemirror/view");
+  // It edits a document that no later test opens.
+  await open("Doc 3.md", { narrow: false });
+  const input = screen.getByRole("textbox", { name: "Markdown document" });
+  const view = EditorView.findFromDOM(input)!;
+  const search = () => screen.getByRole("textbox", { name: "Find a document" });
+  const picker = () => screen.queryByLabelText("Document title or URL");
+  const ctrlK = () =>
+    fireEvent.keyDown(view.contentDOM, { key: "k", ctrlKey: true });
+  // A caret selects nothing: the key opens the sidebar's search.
+  act(() => {
+    view.focus();
+    view.dispatch({ selection: { anchor: 2 } });
+  });
+  assert.equal(ctrlK(), false, "the workspace takes the key");
+  assert.equal(workspace.sidebar, true);
+  assert.ok(document.activeElement === search(), "The search field has focus");
+  assert.equal(picker(), null, "No link is inserted");
+  // A selection of only a hidden comment record shows no text to link.
+  const record = "[[comment(ana): A note]]";
+  act(() => {
+    view.focus();
+    view.dispatch({ changes: { from: 0, insert: record } });
+    view.dispatch({ selection: { anchor: 0, head: record.length } });
+  });
+  search().blur();
+  ctrlK();
+  assert.ok(document.activeElement === search(), "The search field has focus");
+  assert.equal(picker(), null, "No link is inserted");
+  // Selected text: the key inserts a link on it.
+  act(() => {
+    view.focus();
+    view.dispatch({
+      selection: { anchor: record.length, head: record.length + 3 },
+    });
+  });
+  assert.equal(ctrlK(), false, "the editor takes the key");
+  assert.ok(picker(), "The link picker opens");
+  assert.equal(
+    screen.getByRole("heading", { name: "Insert link" }).id,
+    "panel-title",
+  );
+  assert.ok(
+    document.activeElement !== search(),
+    "The search field does not take focus",
   );
 });
 

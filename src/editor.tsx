@@ -20,6 +20,7 @@ import {
   resolveCommentAnchor,
   setCommentLayout,
   sourceCommentLayer,
+  visibleTextRanges,
 } from "./editor-comments";
 import {
   formatFountainLine,
@@ -54,6 +55,16 @@ import { documentFormat } from "./document-format";
 import { sameLinkTargets } from "./document-links";
 import { perLineDirection } from "./text-direction";
 import type { Comment, Entry } from "./model";
+
+// Whether the main selection holds text a reader sees, not only hidden
+// comment records.
+function selectsText(state: EditorState) {
+  const { from, to } = state.selection.main;
+  return (
+    from < to &&
+    visibleTextRanges(state, from, to).some((range) => range.to > range.from)
+  );
+}
 
 export const MarkdownEditor = forwardRef<
   EditorHandle,
@@ -258,9 +269,16 @@ export const MarkdownEditor = forwardRef<
               },
             },
             {
+              // As in Notion: Ctrl/Cmd K links the selected text. Without a
+              // selection the key reaches the workspace, which opens the
+              // sidebar's search.
               key: "Mod-k",
               run: () => {
-                if (v.state.readOnly || !callbacks.current.onInsertLink)
+                if (
+                  v.state.readOnly ||
+                  !callbacks.current.onInsertLink ||
+                  !selectsText(v.state)
+                )
                   return false;
                 callbacks.current.onInsertLink();
                 return true;

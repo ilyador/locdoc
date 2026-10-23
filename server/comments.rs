@@ -501,8 +501,8 @@ fn text_point(source: &str, threads: &[Thread], at: usize) -> (usize, &'static s
 }
 
 // A top-level Markdown block, and whether a record may start the line after
-// it. After a paragraph, list or quote that line would continue the block;
-// after a table or HTML block it would join it. Those need a blank line.
+// it. After a paragraph, list or quote that line continues the block; after
+// a table or HTML block it would join it, so those need a blank line.
 struct TopBlock {
     range: Range<usize>,
     line: bool,
@@ -577,13 +577,16 @@ fn markdown_blocks(source: &str) -> (Vec<TopBlock>, Vec<TextBlock>) {
 // first, with prefix and suffix. Each is checked before it is used. A
 // passage selected with the line breaks after its text would hold a record
 // that ends that text: places after the passage come first, then a line of
-// its own where the passage ends.
+// its own where the passage ends. When none of those can hold the record, as
+// when the line under fenced code would make a heading of it, the places of
+// the next block follow.
 fn markdown_points(
     source: &str,
     threads: &[Thread],
     at: usize,
 ) -> Vec<(usize, &'static str, &'static str)> {
-    let (after, inside): (Vec<_>, Vec<_>) = text_points(source, threads, at)
+    let (points, next) = text_points(source, threads, at);
+    let (after, inside): (Vec<_>, Vec<_>) = points
         .into_iter()
         .map(|(point, prefix)| (point, prefix, ""))
         .partition(|&(point, _, _)| point >= at || !source[point..at].contains(['\n', '\r']));
@@ -592,17 +595,44 @@ fn markdown_points(
         points.push((at, "", "\n"));
     }
     points.extend(inside);
+    points.extend(next.into_iter().map(|(point, prefix)| (point, prefix, "")));
     points
 }
+// Places for a record, each with its prefix.
+type Places = Vec<(usize, &'static str)>;
 // Ending the text of the paragraph, heading or list item where the passage
 // ending at `at` ends, ending the last such text of its top-level block,
-// then on a line of its own after that block.
-fn text_points(source: &str, threads: &[Thread], at: usize) -> Vec<(usize, &'static str)> {
+// then on a line of its own after that block; and the same places of the
+// next top-level block.
+fn text_points(source: &str, threads: &[Thread], at: usize) -> (Places, Places) {
     let Some(last) = visible_text(source, threads, at) else {
-        return vec![(source.len(), if threads.is_empty() { "" } else { "\n\n" })];
+        let end = (source.len(), if threads.is_empty() { "" } else { "\n\n" });
+        return (vec![end], Vec::new());
     };
     let (tops, texts) = markdown_blocks(source);
-    let top = tops.iter().find(|top| top.range.contains(&last));
+    let top = tops.iter().position(|top| top.range.contains(&last));
+    let points = block_points(source, threads, &tops, &texts, top, last);
+    let mut next = Vec::new();
+    if let Some(index) = top.map(|top| top + 1)
+        && let Some(block) = tops.get(index)
+        && let Some(last) = visible_before(source, threads, block.range.end)
+        && last >= block.range.start
+    {
+        next = block_points(source, threads, &tops, &texts, Some(index), last);
+    }
+    (points, next)
+}
+// The places in and after the top-level block `top` that end the text where
+// `last`, the last character a reader sees of the passage, is.
+fn block_points(
+    source: &str,
+    threads: &[Thread],
+    tops: &[TopBlock],
+    texts: &[TextBlock],
+    top: Option<usize>,
+    last: usize,
+) -> Places {
+    let top = top.map(|top| &tops[top]);
     let mut ends = Vec::new();
     if let Some(text) = texts
         .iter()
@@ -638,11 +668,13 @@ fn text_points(source: &str, threads: &[Thread], at: usize) -> Vec<(usize, &'sta
         |top| source[..top.range.end].trim_end_matches(['\n', '\r']).len(),
     );
     let last = visible_before(source, threads, end).unwrap_or(last);
-    points.push(match conversations_end(source, threads, last, end) {
-        Some(end) => (end, "\n\n"),
-        None if top.is_some_and(|top| top.line) => (end, "\n"),
-        None => (end, "\n\n"),
-    });
+    match conversations_end(source, threads, last, end) {
+        Some(end) => points.push((end, "\n\n")),
+        None if top.is_some_and(|top| top.line) => points.push((end, "\n")),
+        // On the next line a record continues a paragraph, list or quote; a
+        // table or HTML block takes it only after a blank line.
+        None => points.extend([(end, "\n"), (end, "\n\n")]),
+    }
     points
 }
 
@@ -2453,7 +2485,7 @@ mod tests {
                 at,
                 &[MessageText {
                     name: "ana".into(),
-                    body: "A note".into(),
+                    body: case["comment"]["body"].as_str().unwrap_or("A note").into(),
                 }],
                 plain,
             )

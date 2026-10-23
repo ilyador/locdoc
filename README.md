@@ -178,10 +178,13 @@ record in backticks, a fence, an indented line, HTML or a link is a comment too,
 and only an escaped `\[[` stays text. Every line is a paragraph, so a new
 comment goes at the end of the line where its passage ends; another one on that
 line starts after a blank line the editor hides with the records. Adding a
-comment never shows an empty line. A rename can change a document between `.md`,
-`.fountain` and `.txt`; it keeps its links, comments and history. A plain text
-document renamed to Markdown shows its image syntax as images to you, and to
-link visitors only once you approve them.
+comment never shows an empty line. Joining the next line onto a line that
+comments end, with Backspace at its start or Delete at the end of the line,
+moves their records to the end of the joined text, where a new comment would go.
+A rename can change a document between `.md`, `.fountain` and `.txt`; it keeps
+its links, comments and history. A plain text document renamed to Markdown shows
+its image syntax as images to you, and to link visitors only once you approve
+them.
 
 ## ChatGPT and MCP
 
@@ -235,7 +238,7 @@ The passage being discussed[[comment(alex): this is my comment]]
 [[comment(ana): this is a response]]
 ```
 
-Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. In Markdown and Fountain, the web editor writes a new comment at the end of the text of the paragraph, heading or list item where its passage ends, before a heading's closing marks, so it adds no line; another conversation there starts after a blank line that the editor hides with the records, or, on a list item, goes to the end of the list. A passage selected with the line break after it gets its record after the passage. A table, fenced code or HTML block takes the record on the line after it, behind the blank line Markdown needs after a table or HTML block, which the editor hides too: adding a comment never shows an empty line. A record never makes another block of the line it joins, the selected passage stays anchored separately, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
+Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. In Markdown and Fountain, the web editor writes a new comment at the end of the text of the paragraph, heading or list item where its passage ends, before a heading's closing marks, so it adds no line; another conversation there starts after a blank line that the editor hides with the records, or, on a list item, goes to the end of the list. A passage selected with the line break after it gets its record after the passage. A table, fenced code or HTML block takes the record on the line after it, behind the blank line Markdown needs after a table or HTML block, which the editor hides too: adding a comment never shows an empty line. Backspace at the start of the line after such records joins that line onto the table or HTML block, as without them, and the records, with any of that line's own, stay after the block behind its hidden blank line. A record never makes another block of the line it joins or the line under it: one whose own `|` would make a table header of a paragraph's last line goes on the line after it, continuing the paragraph, and one that `---` or `===` under fenced code would underline as a heading goes with the next block instead, so these show no empty line either. The selected passage stays anchored separately, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
 
 Each record occupies one physical line. Escape backslashes as `\\`, literal `]` as `\]`, `)` in names as `\)`, and message line breaks as `\n` or `\r`. Names allow 1–60 characters; messages allow 1–4,000. Comment text belongs to the file; SQLite retains anchors, timestamps and resolved state. File-added comments have no invented timestamp. Cutting and reinserting an unchanged conversation within the same document preserves its timestamps and resolved state when the entire conversation is unique and its original records were removed. Copies, altered conversations and ambiguous duplicates receive independent metadata; recreated raw text never inherits author permissions or posting receipts.
 
@@ -243,7 +246,7 @@ Images up to **5 MB**, videos up to **20 MB**, and total embeds up to **50 MB pe
 
 To reclaim retained storage, the owner can delete unwanted files from `.assets/` locally. Uploads reconcile missing files before rejecting a retained storage limit; an upload still within its ten-minute insertion window remains reserved until that window ends.
 
-Useful shortcuts: Ctrl/Cmd K to find a file or insert a link in the editor, Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
+Useful shortcuts: Ctrl/Cmd K to find a document, or to link the text selected in a Markdown document, Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
 
 ## Files, folders and the trash
 
