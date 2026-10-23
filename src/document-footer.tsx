@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle,
   Clock,
@@ -11,6 +11,22 @@ import { documentFormat } from "./document-format";
 import { FormatReference } from "./format-reference";
 import type { Document } from "./model";
 
+// Counting words parses the whole document, which takes a phone tens of
+// milliseconds for a long one. While the text changes, it is counted once
+// typing pauses for WORDS_QUIET, or after WORDS_LONGEST of typing without a
+// pause, when the browser is next idle. The count shown is always one
+// countDocumentWords gave for the text.
+export const WORDS_QUIET = 500;
+export const WORDS_LONGEST = 2000;
+function whenIdle(run: () => void) {
+  if (typeof requestIdleCallback === "function") {
+    const handle = requestIdleCallback(run, { timeout: 1000 });
+    return () => cancelIdleCallback(handle);
+  }
+  const handle = setTimeout(run, 0);
+  return () => clearTimeout(handle);
+}
+
 export function DocumentWordMetrics({
   text,
   initial,
@@ -20,22 +36,45 @@ export function DocumentWordMetrics({
   initial: string;
   path: string;
 }) {
+  // The text last counted: the same text is never counted twice, as when the
+  // collaborative text arrives holding the document's initial content.
+  const counted = useRef<{ source: string; path: string; count: number }>(null);
+  const countOf = (source: string, path: string) => {
+    const last = counted.current;
+    if (last?.source === source && last.path === path) return last.count;
+    const count = countDocumentWords(source, path);
+    counted.current = { source, path, count };
+    return count;
+  };
   const [count, setCount] = useState(() =>
-    countDocumentWords(text?.toString() ?? initial, path),
+    countOf(text?.toString() ?? initial, path),
   );
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let quiet: ReturnType<typeof setTimeout> | undefined;
+    let longest: ReturnType<typeof setTimeout> | undefined;
+    let idle: (() => void) | undefined;
+    const settle = () => {
+      clearTimeout(quiet);
+      clearTimeout(longest);
+      idle?.();
+      quiet = longest = idle = undefined;
+    };
     const snapshot = () => {
-      timer = undefined;
-      setCount(countDocumentWords(text?.toString() ?? initial, path));
+      settle();
+      setCount(countOf(text?.toString() ?? initial, path));
+    };
+    const due = () => {
+      idle ??= whenIdle(snapshot);
     };
     const changed = () => {
-      timer ??= setTimeout(snapshot, 100);
+      clearTimeout(quiet);
+      quiet = setTimeout(due, WORDS_QUIET);
+      longest ??= setTimeout(due, WORDS_LONGEST);
     };
     snapshot();
     text?.observe(changed);
     return () => {
-      clearTimeout(timer);
+      settle();
       text?.unobserve(changed);
     };
   }, [text, initial, path]);

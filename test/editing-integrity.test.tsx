@@ -602,16 +602,32 @@ test("moving the cursor within one line reuses preview decoration sets", () => {
   }
 });
 
-test("counter updates are coalesced in their own component during sustained editing", async () => {
-  const { DocumentWordMetrics } = await import("../src/document-footer");
+// Each word count parses the whole document; count the parses.
+function countParses() {
+  const parse = commentParser.parse;
+  const counted = { parses: 0 };
+  commentParser.parse = function (...input: Parameters<typeof parse>) {
+    counted.parses++;
+    return parse.apply(this, input);
+  };
+  return { counted, restore: () => (commentParser.parse = parse) };
+}
+
+test("the word count waits for a pause in typing and then counts the text once", async (t) => {
+  const { DocumentWordMetrics, WORDS_QUIET } =
+    await import("../src/document-footer");
+  const { countDocumentWords } = await import("../src/word-count");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const doc = new Y.Doc();
   const text = doc.getText("content");
   text.insert(0, "one");
+  const { counted, restore } = countParses();
   const page = render(
-    <DocumentWordMetrics text={text} initial="stale fallback" path="Note.md" />,
+    <DocumentWordMetrics text={text} initial="one" path="Note.md" />,
   );
   try {
     assert.ok(page.container.textContent!.includes("1 word"));
+    assert.equal(counted.parses, 1, "the initial text is counted once");
     act(() => {
       for (let n = 0; n < 30; n++) text.insert(text.length, " word");
     });
@@ -619,12 +635,78 @@ test("counter updates are coalesced in their own component during sustained edit
       page.container.textContent!.includes("1 word"),
       "Burst must not rerender counters synchronously",
     );
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 130));
-    });
+    act(() => t.mock.timers.tick(WORDS_QUIET - 1));
+    assert.ok(page.container.textContent!.includes("1 word"));
+    assert.equal(counted.parses, 1, "nothing is counted while typing goes on");
+    act(() => t.mock.timers.tick(1));
+    act(() => t.mock.timers.tick(0));
     assert.ok(page.container.textContent!.includes("31 words"));
+    assert.equal(counted.parses, 2, "the burst is counted once");
+    assert.equal(
+      countDocumentWords(text.toString(), "Note.md"),
+      31,
+      "the count shown is the document's",
+    );
   } finally {
     page.unmount();
+    restore();
+    doc.destroy();
+  }
+});
+
+test("sustained typing counts words every few seconds, not on every keystroke", async (t) => {
+  const { DocumentWordMetrics, WORDS_QUIET, WORDS_LONGEST } =
+    await import("../src/document-footer");
+  const { countDocumentWords } = await import("../src/word-count");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const doc = new Y.Doc();
+  const text = doc.getText("content");
+  // A long document with headings, emphasis, links and a comment.
+  const section = (n: number) =>
+    `## Part ${n}\n\nA **paragraph** with [a link](part-${n}.md) and ordinary prose.[[comment(ana): check ${n}]]\n\n`;
+  text.insert(0, Array.from({ length: 60 }, (_, n) => section(n)).join(""));
+  const { counted, restore } = countParses();
+  const page = render(
+    <DocumentWordMetrics text={text} initial="" path="Long.md" />,
+  );
+  const shown = () =>
+    Number(page.container.textContent!.split(" ")[0].replace(/\D/g, ""));
+  try {
+    const before = counted.parses;
+    let previous = shown();
+    let updates = 0;
+    // Sixteen seconds of typing, a character every 100 ms.
+    const typed = "the quick brown fox jumps over the lazy dog ";
+    for (let n = 0; n < 160; n++) {
+      act(() => {
+        text.insert(text.length - 2, typed[n % typed.length]);
+        t.mock.timers.tick(100);
+      });
+      act(() => t.mock.timers.tick(0));
+      if (shown() !== previous) {
+        updates++;
+        previous = shown();
+      }
+    }
+    // A count parses this text twice, for its comment and for its words.
+    // Counting every 100 ms took 320 parses; now a count is due only every
+    // WORDS_LONGEST of typing without a pause.
+    const parses = counted.parses - before;
+    assert.ok(
+      parses <= 2 * (16_000 / WORDS_LONGEST + 1),
+      `${parses} parses while typing`,
+    );
+    assert.ok(updates >= 16_000 / WORDS_LONGEST - 2, `${updates} updates`);
+    act(() => t.mock.timers.tick(WORDS_QUIET));
+    act(() => t.mock.timers.tick(0));
+    assert.equal(
+      shown(),
+      countDocumentWords(text.toString(), "Long.md"),
+      "once typing stops, the count is the document's",
+    );
+  } finally {
+    page.unmount();
+    restore();
     doc.destroy();
   }
 });
