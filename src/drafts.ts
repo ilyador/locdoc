@@ -90,15 +90,33 @@ export type DraftRecovery = {
 // storage permission must not turn a preserved-in-memory draft into "saved".
 const recoveryMemory = new Map<string, { record: Draft; durable: boolean }>();
 const recoveryId = (record: Draft) => `${record.writer}/${record.token}`;
+// How long IndexedDB may take to open before drafts are kept in memory only.
+// Only time in which the page could have taken the answer counts: a page busy
+// for longer, as while it starts, would otherwise give up on an answer that
+// is already waiting behind its work.
+const OPEN_WAIT = 1500;
+const OPEN_STEP = 100;
 let database: Promise<IDBDatabase> | undefined;
 function db() {
   if (!database) {
     database = new Promise<IDBDatabase>((resolve, reject) => {
       let finished = false;
-      const timeout = setTimeout(() => {
+      let waited = 0;
+      let last = performance.now();
+      let timeout: ReturnType<typeof setTimeout>;
+      const wait = () => {
+        const now = performance.now();
+        // A step that ran late waited for the page's other work.
+        waited += Math.min(Math.max(0, now - last), OPEN_STEP);
+        last = now;
+        if (waited < OPEN_WAIT) {
+          timeout = setTimeout(wait, OPEN_STEP);
+          return;
+        }
         finished = true;
         reject(new Error("Browser draft storage did not respond"));
-      }, 1500);
+      };
+      timeout = setTimeout(wait, OPEN_STEP);
       const fail = (error: unknown) => {
         clearTimeout(timeout);
         finished = true;
