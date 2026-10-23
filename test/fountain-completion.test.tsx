@@ -87,13 +87,13 @@ test("speaker suggestions do not interrupt action continuations, dialogue, scene
   );
 });
 
-test("automatic speaker suggestions require two leading capital letters", () => {
-  for (const prefix of ["", "S", "Sa", "sa", "sA", "word SA", "@", "@S"])
+test("automatic speaker suggestions require two leading capital letters, or a name after @", () => {
+  for (const prefix of ["", "S", "Sa", "sa", "sA", "word SA", "@", "@ ", "@-"])
     assert.ok(
       complete(cues + prefix) === null,
       `No automatic menu for ${JSON.stringify(prefix)}`,
     );
-  for (const prefix of ["SA", "  SA", "@SA", "SAra"])
+  for (const prefix of ["SA", "  SA", "@SA", "SAra", "@S", "@Mc", "@m", "@李"])
     assert.ok(
       complete(cues + prefix) !== null,
       `Automatic menu for ${JSON.stringify(prefix)}`,
@@ -105,6 +105,27 @@ test("automatic speaker suggestions require two leading capital letters", () => 
   assert.ok(
     complete(cues + "Sa", true) !== null,
     "Explicit speaker selection stays available",
+  );
+});
+
+// A Hebrew script: no capitals, so its cues start with @.
+const hebrew = "@מאיה\nאיפה היית?\n\n@דוד\nבבית.\n\n@מיכל\nגם אני.\n\n";
+
+test("a name typed after @ gets automatic suggestions in any script, while Hebrew action does not", () => {
+  const labels = (source: string) =>
+    complete(source)?.options.map((option) => option.label);
+  assert.deepEqual(labels(hebrew + "@מ"), ["מאיה", "דוד", "מיכל"]);
+  assert.equal(complete(hebrew + "@מ")!.from, hebrew.length + 1);
+  assert.deepEqual(labels(hebrew + "  @מאי"), ["מאיה", "דוד", "מיכל"]);
+  // Hebrew without @ is action, however a line starts.
+  for (const prefix of ["מ", "מאיה", "דוד הולך", "  מ", "@"])
+    assert.ok(
+      complete(hebrew + prefix) === null,
+      `No automatic menu for ${JSON.stringify(prefix)}`,
+    );
+  assert.ok(
+    complete(hebrew + "מ", true) !== null,
+    "Ctrl+Space still lists the speakers",
   );
 });
 
@@ -302,6 +323,43 @@ test("automatic speaker suggestions close when the two-capital prefix is removed
     userEvent: "input.type",
   });
   await suggestions(view, []);
+});
+
+test("typing a Hebrew name after @ suggests the script's speakers, and Tab accepts one", async () => {
+  const { view } = open(hebrew);
+  const type = (text: string) => {
+    const at = view.state.selection.main.head;
+    view.dispatch({
+      changes: { from: at, insert: text },
+      selection: { anchor: at + text.length },
+      userEvent: "input.type",
+    });
+  };
+  // No list opens for an @ alone, nor for Hebrew action.
+  const none = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.equal(currentCompletions(view.state).length, 0);
+  };
+  type("@");
+  await none();
+  type("מ");
+  await suggestions(view, ["מאיה", "מיכל"]);
+  type("א");
+  await suggestions(view, ["מאיה"]);
+  // Deleting the name back to its @ closes the list.
+  view.dispatch({
+    changes: { from: hebrew.length + 1, to: view.state.doc.length },
+    selection: { anchor: hebrew.length + 1 },
+    userEvent: "delete.backward",
+  });
+  await suggestions(view, []);
+  type("ד");
+  await suggestions(view, ["דוד"]);
+  key(view, "Tab");
+  assert.equal(view.state.doc.toString(), hebrew + "@דוד");
+  type("\nשלום.\n\n");
+  type("מ");
+  await none();
 });
 
 test("arrow and Enter accept deliberately; Escape and a revoked edit permission never insert", async () => {

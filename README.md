@@ -169,7 +169,7 @@ Comments, shared folders, simultaneous editing,
 desktop file sync and raw-file downloads use the same system as Markdown.
 
 
-Speaker names already used in a script appear as suggestions when typing a new character cue. **Tab** accepts a suggestion; **↑/↓** followed by **Enter** selects one, and **Esc** dismisses the list. Enter by itself still inserts a line break. Names in comments and omitted passages are excluded.
+Speaker names already used in a script appear as suggestions when typing a new character cue: a name in capitals, or a name in any script after `@`, such as a Hebrew one. **Tab** accepts a suggestion; **↑/↓** followed by **Enter** selects one, and **Esc** dismisses the list. Enter by itself still inserts a line break. Names in comments and omitted passages are excluded.
 
 Paragraph spacing is available under **aA → Layout** for both Markdown and Fountain. Each format remembers its own value. Spacing follows explicit source lines; wrapped text, blank lines, speaker cues and parentheticals keep their existing layout.
 
