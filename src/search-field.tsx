@@ -65,6 +65,11 @@ export function SearchField({
     >
       {start}
       <input
+        // A query is not prose: as in the find widget, no spelling marks
+        // under it, and the keyboard neither corrects nor capitalizes it.
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="off"
         {...input}
         ref={field}
         className={inputClassName}

@@ -566,3 +566,11 @@ test("on a touch screen every search's text is at least 16px, so iOS does not zo
     }),
   );
 });
+
+test("no search checks the spelling of its query, or corrects or capitalizes it", async () => {
+  await eachSearchField((field, name) => {
+    assert.equal(field.getAttribute("spellcheck"), "false", name);
+    assert.equal(field.getAttribute("autocorrect"), "off", name);
+    assert.equal(field.getAttribute("autocapitalize"), "off", name);
+  });
+});
