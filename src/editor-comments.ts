@@ -160,9 +160,12 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
   });
 
 // Deleting the line break after records that end a line's text joins the
-// next line onto that text, as a reader sees it. The records then end the
-// joined line's text, where a new comment there would be written, instead
-// of sitting inside it, where a desktop editor would show them.
+// next line onto that text, as a reader sees it. The records move to where a
+// new comment there would be written: in plain text, to the end of the
+// joined line's text, rather than inside it, where a desktop editor would
+// show them; in Markdown, records behind the blank line that a table or HTML
+// block needs go after the block the line joins, where that blank line stays
+// hidden instead of showing.
 function joinAfterRecords(tr: Transaction) {
   if (
     !tr.docChanged ||
@@ -211,10 +214,11 @@ type Join = { remove: Range[]; at: number; insert: string };
 // Where the records that the line break at `at` follows go, when they end
 // the text of its line and the next line joins that text: after the joined
 // line's text and the conversations that end it, as plain-text placement
-// (server/comments.rs) writes them.
+// (server/comments.rs) writes them, or after the table or HTML block that
+// the line joins.
 function recordsAfterJoin(state: EditorState, at: number): Join | null {
   const doc = state.doc;
-  if (at + 1 >= doc.length || !state.facet(plainCommentRecords)) return null;
+  if (at + 1 >= doc.length) return null;
   const hidden = sourceCommentRanges(state);
   let index = hidden.length - 1;
   while (index >= 0 && hidden[index].to > at) index--;
@@ -235,6 +239,30 @@ function recordsAfterJoin(state: EditorState, at: number): Join | null {
     doc.sliceString(range.from, range.to).trim(),
   );
   if (!shown.length) return null;
+  if (!state.facet(plainCommentRecords)) {
+    // In Markdown, records behind the blank line that a table or HTML block
+    // needs. The line joins the block, where records would be a table
+    // cell's text or literal HTML: its own records go after it as well, each
+    // behind a blank line, unless the line under them would underline them.
+    if (doc.sliceString(records.from, records.from + 1) !== "\n") return null;
+    const below = doc.lineAt(end).number + 1;
+    if (
+      below <= doc.lines &&
+      /^ {0,3}(?:=+|-+)[ \t]*$/.test(doc.line(below).text)
+    )
+      return null;
+    const moved = [
+      records,
+      ...hidden.filter((range) => range.from >= next.from && range.to <= end),
+    ];
+    return {
+      remove: moved,
+      at: end,
+      insert: moved
+        .map((range) => "\n\n" + doc.sliceString(range.from, range.to).trim())
+        .join(""),
+    };
+  }
   const last = shown[shown.length - 1];
   const lastShown =
     last.from + doc.sliceString(last.from, last.to).trimEnd().length;

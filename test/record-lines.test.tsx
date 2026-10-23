@@ -768,3 +768,65 @@ test("the part of a line after a conversation that opens inside it keeps the lin
     style.remove();
   }
 });
+
+test("Backspace after records behind a table's or HTML block's blank line joins what a reader sees and shows no empty line", () => {
+  const own = "[[comment(ana): Own]]";
+  for (const [source, joined, expected, rows] of [
+    [
+      `| A |\n| - |\n| x |\n\n${record}\n## Next`,
+      "## Next",
+      `| A |\n| - |\n| x |## Next\n\n${record}`,
+      // The caret shows the table's source.
+      [": | A |", ": | - |", ": | x |## Next"],
+    ],
+    [
+      `<div>\nhi\n</div>\n\n${record}\nAfter\nMore`,
+      "After",
+      `<div>\nhi\n</div>After\n\n${record}\nMore`,
+      [": <div>", ": hi", ": </div>After", "md-block-end: More"],
+    ],
+    // In the block, the joined line's own records would be literal HTML or
+    // a table cell's text: they go after it too, as their own conversation.
+    [
+      `<div>\nhi\n</div>\n\n${record}\nAfter${own}\nMore`,
+      "After",
+      `<div>\nhi\n</div>After\n\n${record}\n\n${own}\nMore`,
+      [": <div>", ": hi", ": </div>After", "md-block-end: More"],
+    ],
+  ] as const) {
+    const editor = mount("Notes/blocks.md", source, { editable: true });
+    try {
+      const at = source.indexOf(joined);
+      act(() =>
+        editor.view.dispatch({
+          selection: { anchor: at },
+          userEvent: "select",
+        }),
+      );
+      act(() => {
+        editor.view.contentDOM.dispatchEvent(
+          new window.KeyboardEvent("keydown", {
+            key: "Backspace",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+      const label = JSON.stringify(source);
+      assert.equal(editor.text.toString(), expected, label);
+      assert.equal(
+        editor.view.state.selection.main.head,
+        expected.indexOf(joined),
+        `${label}: the caret is where the lines join`,
+      );
+      assert.deepEqual(shown(editor.view), rows, `${label}: no empty line`);
+      assert.deepEqual(
+        sourceComments(editor.text.toString(), false).map((t) => t.messages),
+        sourceComments(source, false).map((t) => t.messages),
+        `${label}: every conversation stays whole`,
+      );
+    } finally {
+      editor.close();
+    }
+  }
+});
