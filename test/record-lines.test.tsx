@@ -1,11 +1,13 @@
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import React from "react";
 import * as Y from "yjs";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
 import { sourceComments } from "../src/comment-syntax";
+import { documentFormat } from "../src/document-format";
 import { sourceCommentRanges } from "../src/editor-comments";
 
 let dom: JSDOM;
@@ -164,6 +166,31 @@ function displayed(view: EditorView) {
 }
 
 const record = "[[comment(alex): note]]";
+
+test("comments the server adds show no new line in any format, as in the shared fixtures", () => {
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("./fixtures/file-comments.json", import.meta.url),
+      "utf8",
+    ),
+  ).filter((c: any) => c.comment);
+  const formats = new Set(cases.map((c: any) => documentFormat(c.path)));
+  assert.deepEqual([...formats].sort(), ["fountain", "markdown", "text"]);
+  const lines = (path: string, source: string) => {
+    const editor = mount(`Notes/${path}`, source);
+    try {
+      return displayed(editor.view);
+    } finally {
+      editor.close();
+    }
+  };
+  for (const c of cases)
+    assert.deepEqual(
+      lines(c.path, c.comment.expected),
+      lines(c.path, c.source),
+      c.name,
+    );
+});
 
 test("typing at the end of a line before hidden records writes on that line", () => {
   for (const [path, source] of [

@@ -429,13 +429,308 @@
     }
   },
   {
-    "name": "Markdown: a new comment still follows its whole block",
+    "name": "Markdown: a new comment ends the last line of its paragraph",
     "path": "notes.md",
     "source": "Buy milk\nBuy eggs",
     "threads": [],
     "comment": {
       "after": "milk",
-      "expected": "Buy milk\nBuy eggs\n\n[[comment(ana): A note]]"
+      "expected": "Buy milk\nBuy eggs[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a paragraph that a heading follows gains no line",
+    "path": "notes.md",
+    "source": "# ADHD\nMost of it is wrong.\nSo first, we need to talk about choice.\n## 1\nMore.",
+    "threads": [],
+    "comment": {
+      "after": "choice.",
+      "expected": "# ADHD\nMost of it is wrong.\nSo first, we need to talk about choice.[[comment(ana): A note]]\n## 1\nMore."
+    }
+  },
+  {
+    "name": "Markdown: a passage on an earlier line of a paragraph still ends the paragraph",
+    "path": "notes.md",
+    "source": "# ADHD\nMost of it is wrong.\nSo first, we need to talk about choice.\n## 1\nMore.",
+    "threads": [],
+    "comment": {
+      "after": "wrong.",
+      "expected": "# ADHD\nMost of it is wrong.\nSo first, we need to talk about choice.[[comment(ana): A note]]\n## 1\nMore."
+    }
+  },
+  {
+    "name": "Markdown: a heading ends its text",
+    "path": "notes.md",
+    "source": "# Title\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title",
+      "expected": "# Title[[comment(ana): A note]]\nText"
+    }
+  },
+  {
+    "name": "Markdown: a heading's closing marks stay closing marks",
+    "path": "notes.md",
+    "source": "## Title ##\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title",
+      "expected": "## Title[[comment(ana): A note]] ##\nText"
+    }
+  },
+  {
+    "name": "Markdown: an underlined heading ends its text, above the underline",
+    "path": "notes.md",
+    "source": "Title\n=====\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title",
+      "expected": "Title[[comment(ana): A note]]\n=====\nText"
+    }
+  },
+  {
+    "name": "Markdown: another conversation on a paragraph starts after a blank line",
+    "path": "notes.md",
+    "source": "Text[[comment(alex): First]]\n## Next",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "First"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "Text",
+      "expected": "Text[[comment(alex): First]]\n\n[[comment(ana): A note]]\n## Next"
+    }
+  },
+  {
+    "name": "Markdown: another conversation on a heading starts after a blank line",
+    "path": "notes.md",
+    "source": "## Title[[comment(alex): First]]\nText",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "First"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "Title",
+      "expected": "## Title[[comment(alex): First]]\n\n[[comment(ana): A note]]\nText"
+    }
+  },
+  {
+    "name": "Markdown: an old conversation of its own is followed by the new one",
+    "path": "notes.md",
+    "source": "Para.\n\n[[comment(alex): First]]\n\nNext.",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "First"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "Para.",
+      "expected": "Para.\n\n[[comment(alex): First]]\n\n[[comment(ana): A note]]\n\nNext."
+    }
+  },
+  {
+    "name": "Markdown: a conversation ending an earlier line of a paragraph leaves its end free",
+    "path": "notes.md",
+    "source": "Buy milk[[comment(alex): First]]\nBuy eggs",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "First"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "milk",
+      "expected": "Buy milk[[comment(alex): First]]\nBuy eggs[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a list item ends its text",
+    "path": "notes.md",
+    "source": "- one\n- two",
+    "threads": [],
+    "comment": {
+      "after": "one",
+      "expected": "- one[[comment(ana): A note]]\n- two"
+    }
+  },
+  {
+    "name": "Markdown: a nested list item ends its own text",
+    "path": "notes.md",
+    "source": "- a\n  - b\n- c",
+    "threads": [],
+    "comment": {
+      "after": "b",
+      "expected": "- a\n  - b[[comment(ana): A note]]\n- c"
+    }
+  },
+  {
+    "name": "Markdown: another conversation on a list item ends the list",
+    "path": "notes.md",
+    "source": "- one[[comment(alex): First]]\n- two",
+    "threads": [
+      [
+        {
+          "name": "alex",
+          "body": "First"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "one",
+      "expected": "- one[[comment(alex): First]]\n- two[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a quoted paragraph ends its text",
+    "path": "notes.md",
+    "source": "> quoted\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "quoted",
+      "expected": "> quoted[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: a line ending in a backslash cannot escape the record",
+    "path": "notes.md",
+    "source": "Save to C:\\Users\\",
+    "threads": [],
+    "comment": {
+      "after": "Users\\",
+      "expected": "Save to C:\\Users[[comment(ana): A note]]\\"
+    }
+  },
+  {
+    "name": "Markdown: an image on a line of its own ends its line",
+    "path": "notes.md",
+    "source": "![A photo](photo.png)\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "photo",
+      "expected": "![A photo](photo.png)[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: a table at the end keeps a blank line before the record",
+    "path": "notes.md",
+    "source": "| A | B |\n| - | - |\n| x | y |",
+    "threads": [],
+    "comment": {
+      "after": "x",
+      "expected": "| A | B |\n| - | - |\n| x | y |\n\n[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a table that a heading follows keeps a blank line before the record",
+    "path": "notes.md",
+    "source": "| A |\n| - |\n| x |\n## Next",
+    "threads": [],
+    "comment": {
+      "after": "x",
+      "expected": "| A |\n| - |\n| x |\n\n[[comment(ana): A note]]\n## Next"
+    }
+  },
+  {
+    "name": "Markdown: a table's own blank line stays after the record",
+    "path": "notes.md",
+    "source": "| A |\n| - |\n| x |\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "x",
+      "expected": "| A |\n| - |\n| x |\n\n[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: fenced code takes the record on the line after its fence",
+    "path": "notes.md",
+    "source": "```\ncode\n```\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "```\ncode\n```\n[[comment(ana): A note]]\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: fenced code at the end takes the record on the line after its fence",
+    "path": "notes.md",
+    "source": "Intro\n```\ncode\n```",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "Intro\n```\ncode\n```\n[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: an HTML block keeps a blank line before the record",
+    "path": "notes.md",
+    "source": "<div>\nhi\n</div>\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "hi",
+      "expected": "<div>\nhi\n</div>\n\n[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: a rule takes the record on the next line",
+    "path": "notes.md",
+    "source": "Text\n\n---\n\nMore",
+    "threads": [],
+    "comment": {
+      "after": "---",
+      "expected": "Text\n\n---\n[[comment(ana): A note]]\n\nMore"
+    }
+  },
+  {
+    "name": "Markdown: a heading selected with its line break keeps the record after the passage",
+    "path": "notes.md",
+    "source": "# Title\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title\n",
+      "expected": "# Title\n[[comment(ana): A note]]\nText"
+    }
+  },
+  {
+    "name": "Markdown: a list item selected with its line break leaves the record to the list's end",
+    "path": "notes.md",
+    "source": "- one\n- two",
+    "threads": [],
+    "comment": {
+      "after": "- one\n",
+      "expected": "- one\n- two[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a paragraph selected with its blank line keeps the record after the passage",
+    "path": "notes.md",
+    "source": "one\n\ntwo",
+    "threads": [],
+    "comment": {
+      "after": "one\n\n",
+      "expected": "one\n\n[[comment(ana): A note]]\ntwo"
+    }
+  },
+  {
+    "name": "Fountain: a new comment ends the last line of its element",
+    "path": "script.fountain",
+    "source": "INT. HOUSE - DAY\n\nALEX\nHello there.\n\nBEN\nHi.",
+    "threads": [],
+    "comment": {
+      "after": "Hello there.",
+      "expected": "INT. HOUSE - DAY\n\nALEX\nHello there.[[comment(ana): A note]]\n\nBEN\nHi."
     }
   }
 ]
