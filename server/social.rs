@@ -74,7 +74,7 @@ impl Preview {
             .map_or(source.len(), |(i, _)| i);
         let format = documents::format(path);
         let reading = if format == Some(documents::Format::Fountain) {
-            fountain_excerpt(&source[..end], path)
+            fountain_excerpt(&source, end, path)
         } else {
             source[..end].to_owned()
         };
@@ -238,12 +238,54 @@ impl Preview {
     }
 }
 
+// The source up to `end` without its notes and boneyards, which the editor
+// reads the same way: a note ends at its ]] or, since Fountain never looks
+// past a blank line for one, at the blank line that ends its paragraph,
+// unless that line holds two spaces. A boneyard ends at its */, however far
+// on, and an /* without one is text. A backslash keeps the next character.
+fn without_notes(source: &str, end: usize) -> String {
+    static BLANK: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\n[ \t]?\r?(?:\n|$)").unwrap());
+    let mut text = String::with_capacity(end);
+    let (mut kept, mut at, mut closed) = (0, 0, true);
+    while let Some(offset) = source[at..end].find(['\\', '[', '/']) {
+        let from = at + offset;
+        let rest = &source[from..];
+        let length = if let Some(escaped) = rest.strip_prefix('\\') {
+            let next = escaped.chars().next().filter(|c| !matches!(c, '\n' | '\r'));
+            at = end.min(from + 1 + next.map_or(0, char::len_utf8));
+            continue;
+        } else if source[from..end].starts_with("[[") {
+            let note = &source[from..end];
+            let paragraph = BLANK.find(note).map_or(note.len(), |m| m.start());
+            note[2..paragraph]
+                .find("]]")
+                .map_or(paragraph, |close| close + 4)
+        } else if let Some(close) = rest
+            .strip_prefix("/*")
+            .filter(|_| closed)
+            .and_then(|boneyard| boneyard.find("*/"))
+        {
+            close + 4
+        } else {
+            // An /* without a */ is text, and so is every later one.
+            closed &= !rest.starts_with("/*");
+            at = from + 1;
+            continue;
+        };
+        text.push_str(&source[kept..from]);
+        text.push(' ');
+        kept = end.min(from + length);
+        at = kept;
+    }
+    text.push_str(&source[kept..end]);
+    text
+}
+
 // Social cards use a short reading excerpt, not a second screenplay layout
 // engine. Keep title-page contact fields and non-printing notes out of metadata.
-fn fountain_excerpt(source: &str, path: &str) -> String {
-    static NOTES: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"(?s)/\*.*?(?:\*/|$)|\[\[.*?(?:\]\]|$)").unwrap());
-    let source = NOTES.replace_all(source, " ");
+fn fountain_excerpt(source: &str, end: usize, path: &str) -> String {
+    let source = without_notes(source, end);
     let mut title = String::new();
     let mut body = String::new();
     let mut header = source
@@ -657,6 +699,36 @@ mod tests {
             Preview::new("INT. ROOM - DAY\n\nA room.", "Script.fountain").title,
             "Script"
         );
+    }
+    #[test]
+    fn fountain_cards_end_a_note_at_its_paragraph_and_show_an_unclosed_boneyard() {
+        let value = Preview::new(
+            "Title: Signal\n\nA lamp.[[Unfinished note\nstill the note\n\nThe signal starts.[[Two\n  \nspaces]]\n\n/* Not closed\n\nThe end. \\[[Kept]]",
+            "Signal.fountain",
+        );
+        for hidden in ["Unfinished", "still the note", "Two", "spaces"] {
+            assert!(!value.description.contains(hidden), "{hidden}");
+        }
+        for shown in [
+            "A lamp.",
+            "The signal starts.",
+            "/* Not closed",
+            "The end.",
+            "[[Kept]]",
+        ] {
+            assert!(value.description.contains(shown), "{shown}");
+        }
+        // A boneyard that closes past the excerpt hides the rest of it.
+        let long = format!("Shown.\n\n/* Hidden {}\n*/\n\nAfter.", "word ".repeat(8000));
+        let value = Preview::new(&long, "Long.fountain");
+        assert!(value.description.contains("Shown."));
+        assert!(!value.description.contains("Hidden"));
+        // An excerpt can end inside an opener.
+        for cut in ["[", "/", "\\"] {
+            let source = format!("{}{cut}", "a".repeat(31_999));
+            Preview::new(&source, "Cut.fountain");
+            Preview::new(&format!("{source}[x]]"), "Cut.fountain");
+        }
     }
     #[test]
     fn plain_text_cards_show_the_text_itself_under_the_filename() {

@@ -524,14 +524,30 @@ const fountainChecks: Record<string, (source: string) => void> = {
     element("## Scene group", 0, "section", "Scene group");
   },
   "= Synopsis": (source) => element(source, 0, "synopsis", "Synopsis"),
-  "[[Note]]": (source) =>
+  "[[Note]]": (source) => {
     rendered(source, "fountain", (view) =>
       assert.equal(view.one(".fountain-note-ink")?.textContent, source),
-    ),
-  "/* Cut scene */": (source) =>
+    );
+    rendered("[[Note\n\nINT. HOUSE - DAY", "fountain", (view) => {
+      assert.equal(view.one(".fountain-note-ink")?.textContent, "[[Note");
+      assert.ok(wrapperOf(view, 2, "fountain-scene"), "a blank line ends it");
+    });
+    rendered("[[Note\n  \nINT. HOUSE - DAY]]", "fountain", (view) =>
+      assert.equal(view.all(".fountain-scene").length, 0, "two spaces do not"),
+    );
+  },
+  "/* Cut scene */": (source) => {
     rendered(source, "fountain", (view) =>
       assert.equal(view.one(".fountain-omitted-ink")?.textContent, source),
-    ),
+    );
+    rendered("/* Cut\n\nINT. HOUSE - DAY\n\n*/", "fountain", (view) =>
+      assert.equal(view.all(".fountain-scene").length, 0, "over any lines"),
+    );
+    rendered("/* Cut\n\nINT. HOUSE - DAY", "fountain", (view) => {
+      assert.equal(view.all(".fountain-omitted-ink").length, 0, "needs */");
+      assert.ok(wrapperOf(view, 2, "fountain-scene"));
+    });
+  },
   ...commentChecks("fountain"),
 };
 

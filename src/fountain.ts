@@ -64,13 +64,32 @@ export function parseFountain(
   visible += source.slice(start);
   const notes: FountainRange[] = [],
     omissions: FountainRange[] = [];
+  // Fountain never looks past a blank line for a closing ]]: a note ends
+  // there, unless the line holds two spaces. A boneyard spans any number of
+  // lines to its */, and an /* without one is text.
   const special = /\\[^\r\n]|\/\*|\[\[/g;
+  const blank = /\n[ \t]?\r?(?=\n|$)/g;
+  let closed = true;
   for (let match; (match = special.exec(visible));) {
     if (match[0].startsWith("\\")) continue;
-    const close = match[0] === "/*" ? "*/" : "]]";
-    const end = visible.indexOf(close, match.index + 2);
-    const to = end < 0 ? visible.length : end + 2;
-    (close === "*/" ? omissions : notes).push({ from: match.index, to });
+    const from = match.index;
+    let to: number;
+    if (match[0] === "/*") {
+      const end = closed ? visible.indexOf("*/", from + 2) : -1;
+      // No later /* finds a */ either.
+      if (end < 0) {
+        closed = false;
+        continue;
+      }
+      to = end + 2;
+      omissions.push({ from, to });
+    } else {
+      blank.lastIndex = from;
+      const paragraph = blank.exec(visible)?.index ?? visible.length;
+      const end = visible.slice(from + 2, paragraph).indexOf("]]");
+      to = end < 0 ? paragraph : from + end + 4;
+      notes.push({ from, to });
+    }
     special.lastIndex = to;
   }
   const chunks: string[] = [];

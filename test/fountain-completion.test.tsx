@@ -52,13 +52,21 @@ test("speaker suggestions do not interrupt action continuations, dialogue, scene
     "INT. SA",
     "!SA",
     "[[SA",
-    "/*\n\nSA",
     "# SA",
   ])
     assert.ok(
       complete(cues + tail) === null,
       `No cue menu for ${JSON.stringify(tail)}`,
     );
+  const omitted = cues + "/*\n\nSA";
+  assert.ok(
+    complete(omitted + "\n*/", false, omitted.length) === null,
+    "No cue menu inside a boneyard",
+  );
+  assert.ok(
+    complete(omitted) !== null,
+    "An /* without a */ is text, so the script after it keeps its cues",
+  );
   assert.ok(
     complete(cues) === null,
     "Empty lines do not open menus by themselves",

@@ -274,10 +274,13 @@ const fountain: SyntaxReference = {
             meaning: "Section; add # for smaller ones",
           },
           { source: ["= ", "Synopsis"], meaning: "Synopsis" },
-          { source: ["[[", "Note", "]]"], meaning: "Note" },
+          {
+            source: ["[[", "Note", "]]"],
+            meaning: "Note; a blank line ends it, unless it holds two spaces",
+          },
           {
             source: ["/* ", "Cut scene", " */"],
-            meaning: "Boneyard: text left out of the script",
+            meaning: "Boneyard: text left out of the script, over any lines",
           },
         ],
       },

@@ -80,6 +80,67 @@ test("notes and boneyards cannot create dialogue or alter relative offsets", () 
   assert.equal(script.lines.at(-1)!.kind, "action");
 });
 
+test("a note ends at a blank line, and a boneyard needs its */", () => {
+  const kinds = (source: string) =>
+    parseFountain(source).lines.map((line) => line.kind);
+  const spans = (source: string, key: "notes" | "omissions") =>
+    parseFountain(source)[key].map((range) =>
+      source.slice(range.from, range.to),
+    );
+  // A note being typed covers the rest of its paragraph, never the script.
+  const typing =
+    "She waits.[[Check this\nand this\n\nMAYA\nHello.\n\nEXT. ROOF - NIGHT";
+  assert.deepEqual(spans(typing, "notes"), ["[[Check this\nand this"]);
+  assert.deepEqual(kinds(typing), [
+    "action",
+    "note",
+    "blank",
+    "character",
+    "dialogue",
+    "blank",
+    "scene",
+  ]);
+  // A line of two spaces keeps the note going; a ]] past a blank line
+  // closes nothing.
+  assert.deepEqual(spans("[[One\n  \nTwo]]\n\nMAYA\nHi.", "notes"), [
+    "[[One\n  \nTwo]]",
+  ]);
+  for (const gap of ["\n\n", "\n \n", "\n\t\n"])
+    assert.deepEqual(
+      spans(`[[One${gap}MAYA\nHi.]]`, "notes"),
+      ["[[One"],
+      JSON.stringify(gap),
+    );
+  assert.equal(kinds("[[One\n\nMAYA\nHi.]]")[2], "character");
+  assert.deepEqual(spans("A [[short]] note.\n\n[[Own line]]", "notes"), [
+    "[[short]]",
+    "[[Own line]]",
+  ]);
+  // A /* without a */ is text, and the script after it keeps its elements.
+  const opened = "/* Cut from here\n\nINT. HOUSE - DAY\n\nMAYA\nHello.";
+  assert.deepEqual(spans(opened, "omissions"), []);
+  assert.deepEqual(kinds(opened), [
+    "action",
+    "blank",
+    "scene",
+    "blank",
+    "character",
+    "dialogue",
+  ]);
+  // A closed boneyard spans paragraphs; a later unclosed one is text.
+  const closed =
+    "/*\nINT. HIDDEN - DAY\n\nHIDDEN\nWords.\n*/\n\n/* Again\n\nMAYA\nHi.";
+  assert.deepEqual(spans(closed, "omissions"), [
+    "/*\nINT. HIDDEN - DAY\n\nHIDDEN\nWords.\n*/",
+  ]);
+  assert.deepEqual(kinds(closed).slice(-4), [
+    "action",
+    "blank",
+    "character",
+    "dialogue",
+  ]);
+});
+
 test("dual dialogue preserves its source marker and both speakers", () => {
   const script = parseFountain(
     "MORGAN\nHello.\n\nLEE ^\n(softly)\nHello too.\n\nANA ^\nAnother line.",
