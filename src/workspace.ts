@@ -49,6 +49,101 @@ function sameEntry(a: Entry, b: Entry) {
   );
 }
 
+// The folders open in Folders, as this browser left them. The owner's
+// workspace and each folder link keep their own, since a link's paths start
+// at its folder. A link's key holds a hash of its token, as its drafts do,
+// never the token.
+export const openFoldersKey = (token?: string) =>
+  token
+    ? `locdoc.openFolders.link.${linkHash(token)}`
+    : "locdoc.openFolders.owner";
+const OPEN_FOLDERS = openFoldersKey(sharedToken);
+// cyrb53: 53 bits keep apart the links one browser opens.
+function linkHash(token: string) {
+  let a = 0xdeadbeef;
+  let b = 0x41c6ce57;
+  for (let index = 0; index < token.length; index++) {
+    const code = token.charCodeAt(index);
+    a = Math.imul(a ^ code, 2654435761);
+    b = Math.imul(b ^ code, 1597334677);
+  }
+  a = Math.imul(a ^ (a >>> 16), 2246822507);
+  a ^= Math.imul(b ^ (b >>> 13), 3266489909);
+  b = Math.imul(b ^ (b >>> 16), 2246822507);
+  b ^= Math.imul(a ^ (a >>> 13), 3266489909);
+  return (4294967296 * (2097151 & b) + (a >>> 0)).toString(36);
+}
+// What is stored, or null while storage refuses to be read.
+function storedFolders(): Set<string> | null {
+  let saved: string | null;
+  try {
+    saved = localStorage.getItem(OPEN_FOLDERS);
+  } catch {
+    return null;
+  }
+  try {
+    const paths: unknown = JSON.parse(saved || "[]");
+    if (Array.isArray(paths))
+      return new Set(
+        paths.filter(
+          (path): path is string => typeof path === "string" && path !== "",
+        ),
+      );
+  } catch {
+    // A damaged value opens nothing, and the next change replaces it.
+  }
+  return new Set();
+}
+// Another tab may have opened or closed folders since this one loaded. A
+// change stores only the folders it opened and closed, over what is stored
+// at that moment, so tabs keep each other's folders and, for one folder, the
+// last change wins. A tab shows the others' changes when it loads again.
+function storeFolders(before: Set<string>, after: Set<string>) {
+  const opened = [...after].filter((path) => !before.has(path));
+  const closed = [...before].filter((path) => !after.has(path));
+  if (!opened.length && !closed.length) return;
+  const stored = storedFolders();
+  if (!stored) return;
+  for (const path of closed) stored.delete(path);
+  for (const path of opened) stored.add(path);
+  try {
+    if (stored.size)
+      localStorage.setItem(OPEN_FOLDERS, JSON.stringify([...stored].sort()));
+    else localStorage.removeItem(OPEN_FOLDERS);
+  } catch {
+    // Folders still open and close; this browser cannot remember them.
+  }
+}
+// The open folders are read before the first render, so the tree never
+// opens visibly after it loads.
+function useOpenFolders() {
+  const [open, setOpen] = useState(() => storedFolders() ?? new Set<string>());
+  // The folders as last stored. A listing judges only those open when it
+  // was asked for.
+  const stored = useRef(open);
+  useEffect(() => {
+    storeFolders(stored.current, open);
+    stored.current = open;
+  }, [open]);
+  return [open, setOpen, stored] as const;
+}
+// A listing closes the open folders it no longer lists, among those open
+// when it was asked for: a folder opened since may be newer than the
+// listing. This forgets folders another app removed or renamed, so what is
+// stored never outgrows the tree.
+function closeGone(open: Set<string>, asked: Set<string>, entries: Entry[]) {
+  let listed: Set<string> | undefined;
+  let next: Set<string> | undefined;
+  for (const path of asked) {
+    if (!open.has(path)) continue;
+    listed ??= new Set(
+      entries.flatMap((entry) => (entry.kind === "folder" ? [entry.path] : [])),
+    );
+    if (!listed.has(path)) (next ??= new Set(open)).delete(path);
+  }
+  return next ?? open;
+}
+
 // Workspace state survives document navigation. No document content, sharing
 // state, comments or asynchronous document mutations live at this level.
 export function useWorkspace() {
@@ -150,7 +245,7 @@ export function useWorkspace() {
     }
   }, [sidebarWidth]);
   const [query, setQuery] = useState("");
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded, openFolders] = useOpenFolders();
   const [sidebarView, setSidebarView] = useState<SidebarView>(() => {
     try {
       const saved = localStorage.getItem("locdoc.sidebarView");
@@ -208,6 +303,7 @@ export function useWorkspace() {
   const loadTree = useCallback(async () => {
     const request = ++treeRequest.current;
     const changed = treeChanged.current;
+    const asked = openFolders.current;
     try {
       const kept = await revalidate<{ entries: Entry[] }>(
         sharedToken && folderView.current
@@ -221,6 +317,7 @@ export function useWorkspace() {
         return;
       treeApplied.current = request;
       setEntries((shown) => keepUnchanged(shown, entries));
+      setExpanded((open) => closeGone(open, asked, entries));
       setError("");
       if (!current.current)
         setId(entries.find((e) => e.kind === "file")?.id || null);
@@ -271,6 +368,7 @@ export function useWorkspace() {
     }
     const open = async () => {
       if (sharedToken) {
+        const asked = openFolders.current;
         const response = ownerSession()
           ? null
           : await (window.__locdocOpen ||
@@ -289,6 +387,7 @@ export function useWorkspace() {
         setConfig(data);
         if (data.folder) {
           setEntries(data.entries);
+          setExpanded((shown) => closeGone(shown, asked, data.entries));
         }
         if (data.owner) setName(data.ownerName || "Owner");
         else

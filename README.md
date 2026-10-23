@@ -233,7 +233,7 @@ Choose **Share** in a document, or switch to the **Folders** tab and use the sha
 
 ## Writing and comments
 
-Drag the sidebar's right edge to resize it on desktop; its width is remembered locally. Double-click the edge to restore the default width, or focus it and use the arrow keys. Folders start collapsed and open temporarily to reveal search matches.
+Drag the sidebar's right edge to resize it on desktop; its width is remembered locally. Double-click the edge to restore the default width, or focus it and use the arrow keys. Each browser remembers which folders you left open, separately for your workspace and for each folder link; a folder renamed or moved in Locdoc stays open, and a deleted one is forgotten. Search opens folders to reveal its matches without changing which ones stay open.
 
 One live-preview editor styles Markdown and reveals syntax near the cursor. Markdown preview updates reuse unchanged parser blocks and mapped decorations, including offscreen media and tables. Structural changes refresh the affected blocks; partial background parsing retains offscreen layout until those blocks are parsed again. The footer's word count and reading time catch up half a second after typing pauses, and every two seconds during longer typing, so counting a long document never runs on each keystroke. Use the toolbar for checkboxes, tables, links, media and comments. Font, size, line height, page width and light/dark appearance are browser preferences. Open aA for live controls in a bottom sheet on mobile or a column to the left of the document on desktop. The document stays visible and editable while you adjust Font, Layout and Theme. Google Fonts can be searched and installed locally by the owner.
 

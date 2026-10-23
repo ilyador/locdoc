@@ -23,6 +23,7 @@ import {
   parentPath,
   relocateEntries,
   relocatePaths,
+  removePaths,
   siblingNames,
   within,
 } from "./file-names";
@@ -530,6 +531,9 @@ export function useFileActions({
       patchEntries((items) =>
         items.filter((other) => !within(other.path, entry.path)),
       );
+      // A deleted folder, and every folder in it, is no longer open; one
+      // restored comes back closed.
+      setExpanded((paths) => removePaths(paths, entry.path));
       refresh();
       setTrashed({ seq, item });
       lastDeletion.current = item.id ? item : null;
