@@ -96,10 +96,12 @@ function Sidebar({
   entries,
   view,
   id = "doc-3",
+  query = "",
 }: {
   entries: any[];
   view: "date" | "folders";
   id?: string;
+  query?: string;
 }) {
   const files = useFileActions({
     owner: true,
@@ -120,7 +122,7 @@ function Sidebar({
       <DocumentSidebar
         entries={entries}
         id={id}
-        query=""
+        query={query}
         view={view}
         setView={() => {}}
         expanded={
@@ -489,6 +491,76 @@ test("the tree keeps every row in the page, in chunks that hold their rows' coun
       chunk.style.getPropertyValue("--files"),
       String(held.length - paths),
     );
+  }
+});
+
+// A browser leaves rows in skipped chunks out of its accessibility tree
+// until they come near the screen, so no row can count on its neighbours
+// for its place: each tells its level, its place among its siblings and
+// how many they are.
+test("every row in every chunk tells its place and its set's size, wherever the chunk is", () => {
+  const entries = workspace(300);
+  // A row's set: the rows of its level, and in Folders of its folder too.
+  const setOf = (row: HTMLElement) => {
+    const level = row.getAttribute("aria-level");
+    const path = row.dataset.path!;
+    return level === "1"
+      ? "1"
+      : `${level} ${path.slice(0, path.lastIndexOf("/"))}`;
+  };
+  const sets = (rows: HTMLElement[]) => {
+    const counted = new Map<string, HTMLElement[]>();
+    for (const row of rows) {
+      assert.ok(
+        row.getAttribute("aria-level"),
+        `${row.dataset.path} has a level`,
+      );
+      const set = setOf(row);
+      if (!counted.has(set)) counted.set(set, []);
+      counted.get(set)!.push(row);
+    }
+    for (const [set, members] of counted) {
+      assert.deepEqual(
+        members.map((row) => Number(row.getAttribute("aria-posinset"))),
+        members.map((_, index) => index + 1),
+        `${set}: places count from 1, in order`,
+      );
+      assert.ok(
+        members.every(
+          (row) => Number(row.getAttribute("aria-setsize")) === members.length,
+        ),
+        `${set}: every row knows its set's size`,
+      );
+    }
+    return counted;
+  };
+  for (const [view, query, size] of [
+    ["date", "", 300],
+    ["date", "draft", 86],
+    ["folders", "", 0],
+    ["folders", "plan", 0],
+  ] as const) {
+    const page = render(
+      <Sidebar entries={entries} view={view} query={query} />,
+    );
+    const tree = page.container.querySelector('[role="tree"]')!;
+    const chunks = [...tree.children] as HTMLElement[];
+    assert.ok(chunks.length > 3, `${view} ${query}: the rows are in chunks`);
+    // Every row of every chunk, as a browser that skipped all but one
+    // chunk would still expose the rows it does.
+    const rows = chunks.flatMap(
+      (chunk) =>
+        [...chunk.querySelectorAll('[role="treeitem"]')] as HTMLElement[],
+    );
+    const counted = sets(rows);
+    if (size)
+      assert.deepEqual(
+        [...counted.values()].map((members) => members.length),
+        [size],
+        `${view} ${query}: one set of every listed document`,
+      );
+    else assert.ok(counted.size > 1, `${view} ${query}: a set per folder`);
+    cleanup();
   }
 });
 
