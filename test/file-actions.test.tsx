@@ -143,28 +143,29 @@ const workspaceFiles = [
 test("the folder tree is an ARIA tree with roving focus, arrow keys, Enter and typeahead", async () => {
   await open(workspaceFiles);
   assert.equal(tree().getAttribute("aria-label"), "Folders");
-  assert.deepEqual(rows(), ["Archive", "Notes", "a.md", "b.txt"]);
+  // Notes holds the newest change of the two folders; Archive is empty.
+  assert.deepEqual(rows(), ["Notes", "Archive", "b.txt", "a.md"]);
   const tabbable = Array.from(
     document.querySelectorAll('[role="treeitem"][tabindex="0"]'),
   );
   assert.equal(tabbable.length, 1, "Exactly one row takes Tab focus");
-  assert.equal(row("Notes").getAttribute("aria-level"), "1");
-  assert.equal(row("Notes").getAttribute("aria-setsize"), "4");
-  assert.equal(row("Notes").getAttribute("aria-posinset"), "2");
+  assert.equal(row("Archive").getAttribute("aria-level"), "1");
+  assert.equal(row("Archive").getAttribute("aria-setsize"), "4");
+  assert.equal(row("Archive").getAttribute("aria-posinset"), "2");
   assert.equal(row("Notes").getAttribute("aria-expanded"), "false");
   row("Archive").focus();
-  key(row("Archive"), "ArrowDown");
+  key(row("Archive"), "ArrowUp");
   assert.equal(focused(), "Notes");
   key(row("Notes"), "ArrowRight");
   assert.equal(row("Notes").getAttribute("aria-expanded"), "true");
   assert.equal(focused(), "Notes", "Right first opens a closed folder");
   assert.deepEqual(rows(), [
-    "Archive",
     "Notes",
     "Notes/Sub",
     "Notes/Plan.md",
-    "a.md",
+    "Archive",
     "b.txt",
+    "a.md",
   ]);
   key(row("Notes"), "ArrowRight");
   assert.equal(focused(), "Notes/Sub", "Right then enters an open folder");
@@ -176,8 +177,10 @@ test("the folder tree is an ARIA tree with roving focus, arrow keys, Enter and t
   key(row("Notes"), "ArrowLeft");
   assert.equal(row("Notes").getAttribute("aria-expanded"), "false");
   key(row("Notes"), "End");
-  assert.equal(focused(), "b.txt");
-  key(row("b.txt"), "Home");
+  assert.equal(focused(), "a.md");
+  key(row("a.md"), "Home");
+  assert.equal(focused(), "Notes");
+  key(row("Notes"), "ArrowDown");
   assert.equal(focused(), "Archive");
   key(row("Archive"), "a");
   assert.equal(focused(), "a.md", "Typing a letter moves to the next match");
@@ -186,7 +189,8 @@ test("the folder tree is an ARIA tree with roving focus, arrow keys, Enter and t
   assert.equal(row("a.md").getAttribute("aria-current"), "page");
   assert.equal(row("a.md").getAttribute("aria-selected"), "true");
   key(row("a.md"), "ArrowUp");
-  assert.equal(focused(), "Notes");
+  assert.equal(focused(), "b.txt");
+  key(row("b.txt"), "Home");
   key(row("Notes"), "Enter");
   assert.equal(row("Notes").getAttribute("aria-expanded"), "true");
 });
@@ -429,7 +433,7 @@ test("Delete moves to Recently deleted with Undo; a late undo keeps a newer dele
   key(row("a.md"), "Delete");
   await waitFor(() => assert.ok(row("a.md") === null, "The row is gone"));
   assert.equal(sends("DELETE")[0].path, "/api/docs/a-md");
-  assert.equal(focused(), "b.txt", "Focus moves to the next row");
+  assert.equal(focused(), "b.txt", "Focus moves to the row beside it");
   assert.match(toast(), /a\.md moved to Recently deleted\./);
   fireEvent.click(screen.getByRole("button", { name: "Undo" }));
   await waitFor(() => assert.ok(row("a.md")));
@@ -536,13 +540,13 @@ test("Undo focuses the restored row once a slower listing shows it", async () =>
   );
   await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
   key(row("b.txt"), "Home");
-  assert.equal(focused(), "Archive");
+  assert.equal(focused(), "Notes");
   await act(async () => {
     releaseAgain();
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   await waitFor(() => assert.ok(row("a.md")));
-  assert.equal(focused(), "Archive", "A later move is never undone");
+  assert.equal(focused(), "Notes", "A later move is never undone");
 });
 
 test("name fields line their glyph up with the tree's row icons", async () => {

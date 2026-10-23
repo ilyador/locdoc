@@ -1,9 +1,11 @@
 import {
+  Component,
   useId,
   useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
 import type { Entry } from "./model";
 import type { SidebarScroll, SidebarView } from "./workspace";
@@ -12,8 +14,9 @@ import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
 import { parentPath } from "./file-names";
 import {
-  compareNames,
-  comparePaths,
+  folderSortKey,
+  latestChangeFirst,
+  latestChanges,
   recentDocuments,
 } from "./recent-documents";
 
@@ -62,7 +65,7 @@ function listingOf(entries: Entry[], needle: string): Listing {
   listings.set(entries, listing);
   return listing;
 }
-// The visible entries of each folder, folders first, then by title.
+// The visible entries of each folder, in the order latestChangeFirst gives.
 function folders(listing: Listing) {
   if (listing.children) return listing.children;
   const children = new Map<string, Entry[]>();
@@ -73,23 +76,54 @@ function folders(listing: Listing) {
     siblings.push(entry);
     children.set(parent, siblings);
   }
+  // A folder's latest change counts every document in it, matching a search
+  // or not, so a search hides rows without reordering the rest.
+  const latest = latestChanges(listing.entries);
   for (const siblings of children.values()) {
-    // Each title is worked out once.
     const sorted = siblings
-      .map((entry) => ({
-        entry,
-        folder: entry.kind === "folder",
-        title: documentTitle(entry),
-      }))
-      .sort(
-        (a, b) =>
-          Number(b.folder) - Number(a.folder) ||
-          compareNames(a.title, b.title) ||
-          comparePaths(a.entry.path, b.entry.path),
-      );
+      .map((entry) => folderSortKey(entry, latest))
+      .sort(latestChangeFirst);
     sorted.forEach((item, index) => (siblings[index] = item.entry));
   }
   return (listing.children = children);
+}
+
+// The path of the row an element is in.
+const rowOf = (element: Element | null) =>
+  element?.closest('[role="treeitem"]')?.getAttribute("data-path") ?? undefined;
+
+type Offset = { top: number; focused: Element; row?: string };
+// A listing with a newer time moves rows; React moves a row by putting its
+// element back in the page. Chromium blurs a focused row or name field as it
+// moves or leaves and lays the list out right then, between the chunks that
+// go and those that come, and an offset past the end of that shorter list is
+// pulled back. React gives the focus back but keeps that offset. The list
+// takes back the offset read before React's changes while the same row or
+// field has the focus: focus that moved on brought its own row into view.
+class KeepOffset extends Component<
+  { list: RefObject<HTMLDivElement | null>; children: ReactNode },
+  object,
+  Offset | null
+> {
+  getSnapshotBeforeUpdate() {
+    const list = this.props.list.current;
+    const focused = document.activeElement;
+    if (!list || !focused || !list.contains(focused)) return null;
+    return { top: list.scrollTop, focused, row: rowOf(focused) };
+  }
+  componentDidUpdate(_props: unknown, _state: unknown, kept: Offset | null) {
+    const list = this.props.list.current;
+    if (!kept || !list || list.scrollTop === kept.top) return;
+    const focused = document.activeElement;
+    if (
+      focused === kept.focused ||
+      (kept.row !== undefined && rowOf(focused) === kept.row)
+    )
+      list.scrollTop = kept.top;
+  }
+  render() {
+    return this.props.children;
+  }
 }
 
 export function DocumentSidebar({
@@ -275,28 +309,30 @@ export function DocumentSidebar({
         <nav
           aria-label={view === "date" ? "Recent documents" : "Document folders"}
         >
-          <FileTree
-            view={view}
-            rows={rows}
-            entries={entries}
-            id={id}
-            label={view === "date" ? "Documents by date" : "Folders"}
-            files={fileActions}
-            isOpen={isOpen}
-            toggle={toggle}
-            choose={choose}
-            shareFolder={shareFolder}
-            prepare={prepare}
-            empty={
-              empty && (
-                <div className="tree-empty">
-                  {needle
-                    ? "No matching documents."
-                    : "Create a document, or add a .md, .fountain or .txt file to your docs folder."}
-                </div>
-              )
-            }
-          />
+          <KeepOffset list={panel}>
+            <FileTree
+              view={view}
+              rows={rows}
+              entries={entries}
+              id={id}
+              label={view === "date" ? "Documents by date" : "Folders"}
+              files={fileActions}
+              isOpen={isOpen}
+              toggle={toggle}
+              choose={choose}
+              shareFolder={shareFolder}
+              prepare={prepare}
+              empty={
+                empty && (
+                  <div className="tree-empty">
+                    {needle
+                      ? "No matching documents."
+                      : "Create a document, or add a .md, .fountain or .txt file to your docs folder."}
+                  </div>
+                )
+              }
+            />
+          </KeepOffset>
         </nav>
       </div>
     </>

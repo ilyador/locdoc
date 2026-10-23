@@ -465,7 +465,10 @@ export function FileTree({
 
   const folderChoices = (entry: Entry): MenuEntry[] => {
     const current = parentPath(entry.path);
-    // Segment by segment, so every folder lists right after its parent.
+    // A destination is looked up by its name, so the list goes by name,
+    // whatever order the tree shows, and stays put while documents are
+    // edited. Segment by segment, so every folder lists right after its
+    // parent.
     const folders = entries
       .filter(
         (item) =>
