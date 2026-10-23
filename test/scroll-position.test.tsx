@@ -2,6 +2,8 @@ import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import * as Y from "yjs";
+import { EditorState, StateEffect } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { rememberEditorScroll } from "../src/editor-scroll";
 
 const LINE = 20;
@@ -70,12 +72,18 @@ function reading(text: Y.Text, key = "position") {
 
 // The pane's top is at screen y=0, below the canvas padding. CodeMirror's
 // height estimate is LINE for every line; `heights` is the drawn layout.
+// With `drawn`, CodeMirror draws only the lines within MARGIN of the visible
+// pane, or of a scroll request's target, and has no coordinates for others.
+// With `webkit`, a pane that jumps into lines drawn only after the jump is
+// moved back to where it was, as WebKit does while CodeMirror draws them.
+const MARGIN = 1000;
 function open(
   key: string,
   text = lines(),
   height = 5000,
   wrap = 0,
   glyphInset = 0,
+  model: { drawn?: boolean; webkit?: boolean } = {},
 ) {
   const pane = document.createElement("div");
   pane.className = "writing-pane";
@@ -120,7 +128,29 @@ function open(
       .forEach((line, index) => {
         heights[index] = Math.max(1, Math.ceil(line.length / wrap)) * LINE;
       });
+  // The text of the lines between two heights below the document's top.
+  const spanOf = (top: number, bottom: number) => {
+    const all = starts();
+    let y = 0;
+    let first = -1;
+    let last = 0;
+    for (let line = 0; line < all.length; line++) {
+      const next = y + (heights[line] ?? LINE);
+      if (next > top && y < bottom) {
+        if (first < 0) first = line;
+        last = line;
+      }
+      y = next;
+    }
+    const end = all[last + 1] === undefined ? text.length : all[last + 1] - 1;
+    return { from: all[Math.max(first, 0)], to: end };
+  };
+  const around = (top: number) => spanOf(top - MARGIN, top + 500 + MARGIN);
+  let span = model.drawn ? around(pane.scrollTop - PADDING) : null;
+  let settled = pane.scrollTop;
   let queue: any[] = [];
+  const handlers: ((...args: any[]) => boolean)[] = [];
+  const targets: any[] = [];
   const view = {
     dom: editor,
     contentDOM: editor,
@@ -129,6 +159,9 @@ function open(
     },
     get state() {
       return { doc: { length: text.length } };
+    },
+    get viewport() {
+      return span ?? { from: 0, to: text.length };
     },
     posAtCoords({ y }: { y: number }) {
       const all = starts();
@@ -139,23 +172,39 @@ function open(
       return Math.min(all[line] + row * wrap, end);
     },
     coordsAtPos(pos: number) {
+      if (span && (pos < span.from || pos > span.to)) return null;
       const top = wrapped(pos) + glyphInset;
       return { top, bottom: top + LINE, left: 0, right: 0 };
     },
+    // Drawn lines have their measured place, others an estimate.
     lineBlockAt(pos: number) {
-      return { top: lineOf(text, pos) * LINE };
+      const line = lineOf(text, pos);
+      if (!span || pos < span.from || pos > span.to)
+        return { top: line * LINE };
+      return { top: drawn(line) - PADDING + pane.scrollTop };
     },
-    // Model CodeMirror's public scroll effect: draw its target, then align it
-    // in the containing pane during the next measurement.
+    // Model CodeMirror's public scroll effect: it draws its target at once
+    // and scrolls in its next measurement, through scroll handlers first.
     dispatch({ effects }: { effects: any }) {
-      scrollEffects++;
-      const target = effects.value;
-      queue.push({
-        read: () => wrapped(target.range.head) + glyphInset - target.yMargin,
-        write: (delta: number) => {
-          pane.scrollTop += delta;
-        },
-      });
+      for (const effect of [effects].flat()) {
+        if (effect.is(StateEffect.appendConfig)) {
+          handlers.push(
+            ...EditorState.create({ extensions: effect.value }).facet(
+              EditorView.scrollHandler,
+            ),
+          );
+          continue;
+        }
+        const target = effect.value;
+        if (span) {
+          let top = 0;
+          const line = lineOf(text, target.range.head);
+          for (let index = 0; index < line; index++)
+            top += heights[index] ?? LINE;
+          span = around(top);
+        }
+        targets.push(target);
+      }
     },
     requestMeasure(request: any) {
       queue = queue.filter(
@@ -190,19 +239,39 @@ function open(
       animationFrames.clear();
       callbacks.forEach((callback) => callback(0));
       let measured = 0;
-      for (let pass = 0; queue.length && pass < 6; pass++) {
+      for (let pass = 0; (queue.length || targets.length) && pass < 6; pass++) {
         const requests = queue;
         queue = [];
         measured += requests.length;
         const values = requests.map((request) => request.read());
         requests.forEach((request, index) => request.write?.(values[index]));
+        for (const target of targets.splice(0)) {
+          if (handlers.some((handler) => handler(view, target.range, target)))
+            continue;
+          // CodeMirror's own scrolling also moves every scrollable ancestor.
+          scrollEffects++;
+          pane.scrollTop +=
+            wrapped(target.range.head) + glyphInset - target.yMargin;
+        }
       }
       maxMeasures = Math.max(maxMeasures, measured);
+      // CodeMirror then draws what the pane shows.
+      if (span) {
+        const shown = spanOf(
+          pane.scrollTop - PADDING,
+          pane.scrollTop - PADDING + 500,
+        );
+        if (model.webkit && (shown.from < span.from || shown.to > span.to))
+          pane.scrollTop = settled;
+        span = around(pane.scrollTop - PADDING);
+        settled = pane.scrollTop;
+      }
     },
     settle() {
       for (
         let frames = 0;
-        (queue.length || animationFrames.size) && frames < 500;
+        (queue.length || animationFrames.size || targets.length) &&
+        frames < 500;
         frames++
       )
         this.frame();
@@ -281,6 +350,46 @@ test("restoration adjusts only the document pane and then waits for layout chang
   );
   page.stop();
   assert.equal(resizes.size, 0);
+});
+
+test("a far reading position is drawn before the pane moves, so WebKit cannot move it back", () => {
+  const note = lines(2000);
+  const pos = note.toString().indexOf("line 1500\n");
+  localStorage.setItem("position", JSON.stringify({ pos, offset: 7 }));
+  const page = open("position", note, 2000 * LINE + 500, 0, 0, {
+    drawn: true,
+    webkit: true,
+  });
+  page.settle();
+  assert.equal(page.drawn(1500), -7, "the saved line is at the pane's top");
+  assert.equal(
+    page.scrollEffects,
+    0,
+    "Never invoke ancestor/viewport scrolling",
+  );
+  // Lines above it measured taller keep it there.
+  for (let line = 1400; line < 1500; line++) page.heights[line] = 30;
+  for (const resize of resizes) resize();
+  page.settle();
+  assert.equal(page.drawn(1500), -7);
+});
+
+test("reader input before a far position is drawn ends its scroll request without scrolling", () => {
+  const note = lines(2000);
+  const pos = note.toString().indexOf("line 1500\n");
+  localStorage.setItem("position", JSON.stringify({ pos, offset: 0 }));
+  const page = open("position", note, 2000 * LINE + 500, 0, 0, {
+    drawn: true,
+    webkit: true,
+  });
+  page.pane.dispatchEvent(new window.Event("touchstart"));
+  page.settle();
+  assert.equal(page.pane.scrollTop, 0, "the reader keeps the pane");
+  assert.equal(
+    page.scrollEffects,
+    0,
+    "CodeMirror's own scrolling never takes over the request",
+  );
 });
 
 test("repeated Markdown layout notifications do not scroll an already aligned pane", () => {
