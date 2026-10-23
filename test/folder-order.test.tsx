@@ -314,32 +314,49 @@ test("an edited document moves to the top of its folder, and its folders up thro
   assert.equal(focused(), "Home/list.md");
 });
 
-// Chromium blurs a focused element that moves in the page, firing blur and
-// focusout before it moves; jsdom only drops the focus. These moves happen as
-// they do in Chromium. React gives the focus and the selection back once its
-// changes are in, and runs no handler for the blurs they cause, so a move
-// never commits a name field.
+// Chromium blurs a focused element that moves in the page or leaves it,
+// firing blur and focusout first, and lays the page out as it does, with the
+// rows it holds at that moment: a list scrolled past their end is pulled
+// back. jsdom only drops the focus. These moves and removals happen as they
+// do in Chromium, with 42px rows in a 420px list as sidebar-scroll models
+// them. React gives the focus and the selection back once its changes are
+// in, and runs no handler for the blurs they cause, so a move never commits
+// a name field.
 function blurOnMove() {
   const node = window.Node.prototype;
-  const { insertBefore, appendChild } = node;
+  const { insertBefore, appendChild, removeChild } = node;
   let blurs = 0;
-  const blurMoved = (moved: Node) => {
+  let pulled = 0;
+  const blurLeaving = (leaving: Node) => {
     const active = document.activeElement as HTMLElement | null;
-    if (!moved.isConnected || !active || !moved.contains(active)) return;
+    if (!leaving.isConnected || !active || !leaving.contains(active)) return;
     blurs++;
     active.blur();
+    const list = document.querySelector<HTMLElement>(".file-tree");
+    const rows = list?.querySelectorAll('[role="treeitem"]').length ?? 0;
+    const end = Math.max(0, rows * 42 - 420);
+    if (list && list.scrollTop > end) {
+      pulled++;
+      list.scrollTop = end;
+    }
   };
   node.insertBefore = function (moved, child) {
-    blurMoved(moved);
+    blurLeaving(moved);
     return insertBefore.call(this, moved, child);
   };
   node.appendChild = function (moved) {
-    blurMoved(moved);
+    blurLeaving(moved);
     return appendChild.call(this, moved);
+  };
+  node.removeChild = function (removed) {
+    blurLeaving(removed);
+    return removeChild.call(this, removed);
   };
   return {
     blurs: () => blurs,
-    restore: () => Object.assign(node, { insertBefore, appendChild }),
+    pulled: () => pulled,
+    restore: () =>
+      Object.assign(node, { insertBefore, appendChild, removeChild }),
   };
 }
 
@@ -401,3 +418,57 @@ test("Move to lists folders by name, whatever the order of the tree", async () =
     ["BackMove top.md to", "DocumentsCurrent", "Home", "Work", "New", "Old"],
   );
 });
+
+for (const holder of ["row", "rename"] as const)
+  test(`the list keeps its offset as an edit moves the ${holder === "row" ? "focused row" : "rename field"} and the chunks after it`, async () => {
+    // Two folders of thirty documents, laid out in more than one chunk.
+    api = fileApi([
+      "Older/",
+      ...Array.from(
+        { length: 30 },
+        (_, n) => `Older/Note ${String(n).padStart(2, "0")}.md`,
+      ),
+      "Newer/",
+      ...Array.from(
+        { length: 30 },
+        (_, n) => `Newer/Page ${String(n).padStart(2, "0")}.md`,
+      ),
+    ]);
+    globalThis.fetch = api.fetch as typeof fetch;
+    localStorage.setItem("locdoc.sidebarView", "folders");
+    localStorage.setItem("locdoc.document", "newer-page-00-md");
+    render(<Sidebar />);
+    await waitFor(() => assert.ok(workspace.entries.length));
+    act(() => workspace.setExpanded(new Set(["Older", "Newer"])));
+    assert.equal(rows()[0], "Newer");
+    row("Older/Note 27.md").focus();
+    if (holder === "rename")
+      fireEvent.keyDown(row("Older/Note 27.md"), { key: "F2" });
+    const focused = document.activeElement;
+    const list = document.querySelector<HTMLElement>(".file-tree")!;
+    list.scrollTop = 2000;
+    const moves = blurOnMove();
+    try {
+      // Older moves above Newer, and a document under the focused one moves
+      // above it: the tree moves the focused row, or the chunk it is in, as
+      // it changes the chunks around it.
+      await edit("Older/Note 20.md");
+    } finally {
+      moves.restore();
+    }
+    assert.deepEqual(rows().slice(0, 3), [
+      "Older",
+      "Older/Note 20.md",
+      "Older/Note 29.md",
+    ]);
+    assert.ok(moves.pulled() > 0, "the move pulled the list back");
+    // A focused row may come back as another element, in another chunk.
+    const active = document.activeElement as HTMLElement;
+    assert.equal(
+      active.closest('[role="treeitem"]')?.getAttribute("data-path"),
+      "Older/Note 27.md",
+      "the focus stays on its row",
+    );
+    if (holder === "rename") assert.ok(active === focused, "in its field");
+    assert.equal(list.scrollTop, 2000, "the list keeps its offset");
+  });
