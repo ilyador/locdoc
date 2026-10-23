@@ -2067,6 +2067,11 @@ button:hover {
 .inline-comment-host {
   padding: 2px 0;
 }
+/* A conversation that opens inside a line splits it. The line's dir stays on
+   the part before the conversation; the part after it reads the same way. */
+.cm-line[dir="rtl"] + .inline-comment-host[data-splits-line] + .cm-line {
+  direction: rtl;
+}
 .inline-conversation {
   width: 100%;
   padding: 6px 0;

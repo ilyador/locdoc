@@ -283,6 +283,153 @@ test("Fountain and plain text lines follow the text they show", () => {
   }
 });
 
+test("a line keeps its direction after a conversation that opens inside it", () => {
+  // The app's own stylesheet decides how the part after the conversation reads.
+  const style = document.createElement("style");
+  style.textContent = readFileSync(
+    new URL("../src/style.css", import.meta.url),
+    "utf8",
+  );
+  document.head.append(style);
+  const hebrew =
+    " פרח גדול, אפשר לראות בו כל עלה כותרת, אפשר לחוש כל עלה, אפשר לעקוב אחר הרעש של הבקיעה.";
+  const english =
+    "A long English paragraph, which the conversation splits, goes on after it.";
+  // Opens `source` with a conversation about its text from the second
+  // character to `end`, posted or still being written.
+  const open = (
+    path: string,
+    source: string,
+    end: number,
+    editable: boolean,
+    draft: boolean,
+  ) => {
+    const ydoc = new Y.Doc();
+    const content = ydoc.getText("content");
+    content.insert(0, source);
+    const at = (index: number, assoc = 0) =>
+      Y.relativePositionToJSON(
+        Y.createRelativePositionFromTypeIndex(content, index, assoc),
+      );
+    const anchor = { start: at(1), end: at(end, -1) };
+    const thread = {
+      id: "c1",
+      body: "A note",
+      name: "alex",
+      canResolve: true,
+      quote: source.slice(1, end),
+      anchor,
+      created: 0,
+      resolved: false,
+      replies: [],
+    };
+    const awareness = new Awareness(ydoc);
+    const page = render(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        id="rtl-split"
+        editable={editable}
+        path={path}
+        comments={draft ? [] : [thread]}
+        activeComment={draft ? null : "c1"}
+        commentDraft={draft ? { quote: thread.quote, anchor } : null}
+        conversation={<p>The conversation</p>}
+        onChange={() => {}}
+        onComment={() => {}}
+        onUpload={() => {}}
+      />,
+    );
+    const host = page.container.querySelector(".inline-comment-host")!;
+    const line = (text: string) =>
+      [...page.container.querySelectorAll(".cm-line")].find(
+        (line) => line.textContent === text,
+      )!;
+    return {
+      host,
+      line,
+      close() {
+        page.unmount();
+        awareness.destroy();
+        ydoc.destroy();
+      },
+    };
+  };
+  try {
+    for (const [path, editable, draft] of [
+      ["Notes/art.md", true, true],
+      ["Notes/art.md", true, false],
+      // A visitor on a view link.
+      ["Notes/art.md", false, false],
+      ["Script.fountain", true, true],
+      ["Script.fountain", false, false],
+      ["Notes/art.txt", true, true],
+      ["Notes/art.txt", false, false],
+    ] as const)
+      for (const [text, direction] of [
+        [hebrew, "rtl"],
+        [english, "ltr"],
+      ] as const) {
+        const label = `${path}, ${editable ? "editor" : "visitor"}, ${draft ? "new comment" : "posted"}, ${direction}`;
+        // The next line reads its own way, whatever the split line does.
+        const editor = open(
+          path,
+          `${text}\nAn English line after it`,
+          text.indexOf(",") + 1,
+          editable,
+          draft,
+        );
+        try {
+          const before = editor.host.previousElementSibling!;
+          const after = editor.host.nextElementSibling!;
+          assert.ok(
+            before.classList.contains("cm-line") &&
+              after.classList.contains("cm-line") &&
+              after.textContent!.endsWith("."),
+            `${label}: the conversation opens inside its line`,
+          );
+          assert.deepEqual(
+            [
+              getComputedStyle(before).direction,
+              getComputedStyle(after).direction,
+            ],
+            [direction, direction],
+            label,
+          );
+          assert.equal(
+            getComputedStyle(editor.line("An English line after it")).direction,
+            "ltr",
+            label,
+          );
+        } finally {
+          editor.close();
+        }
+      }
+    // A conversation between two lines splits neither: the English line
+    // after it keeps its own direction.
+    const editor = open(
+      "Notes/art.md",
+      `${hebrew}\nAn English line`,
+      hebrew.length,
+      true,
+      true,
+    );
+    try {
+      assert.ok(
+        editor.host.nextElementSibling === editor.line("An English line"),
+      );
+      assert.equal(
+        getComputedStyle(editor.line("An English line")).direction,
+        "ltr",
+      );
+    } finally {
+      editor.close();
+    }
+  } finally {
+    style.remove();
+  }
+});
+
 test("tables, figures and their comment markers take the direction of their text", () => {
   const table =
     "| שם | תפקיד | הערה |\n| --- | :--- | :---: |\n| דנה | מפתחת | English note |";

@@ -15,6 +15,7 @@ import {
 import { tags } from "@lezer/highlight";
 import { commentMarkdown } from "./comment-syntax";
 import {
+  hiddenAfter,
   sameSourceComments,
   shownLines,
   sourceCommentRanges,
@@ -123,15 +124,19 @@ export function livePreview(
             if (
               from === line.from &&
               to <= line.to &&
-              !state.sliceDoc(to, line.to).trim()
+              !visibleTextRanges(state, to, line.to).some((range) =>
+                state.sliceDoc(range.from, range.to).trim(),
+              )
             ) {
-              if (!inactive(line.from, line.to)) return;
+              // The figure also covers records hidden right after it.
+              const end = hiddenAfter(state, line.to);
+              if (!inactive(line.from, end)) return;
               blockStarts.add(line.from);
               decorations.push(
                 Decoration.replace({
                   widget: new MediaWidget(src, image.alt, image.title),
                   block: true,
-                }).range(line.from, line.to),
+                }).range(line.from, end),
               );
               return false;
             }
@@ -144,9 +149,11 @@ export function livePreview(
             );
             return false;
           }
-          if (name === "Table" && inactive(from, to)) {
+          if (name === "Table") {
+            // The widget also covers records hidden right after the table.
+            const end = hiddenAfter(state, to);
             const source = state.sliceDoc(from, to);
-            if (parseMarkdownTable(source, from)) {
+            if (inactive(from, end) && parseMarkdownTable(source, from)) {
               for (
                 let line = state.doc.lineAt(from).number;
                 line <= state.doc.lineAt(to).number;
@@ -158,7 +165,7 @@ export function livePreview(
                 Decoration.replace({
                   widget: new TableWidget(source, !state.readOnly),
                   block: true,
-                }).range(from, to),
+                }).range(from, end),
               );
               return false;
             }

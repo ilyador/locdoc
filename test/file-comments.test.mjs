@@ -271,7 +271,7 @@ test("view-link comments and concurrent replies round-trip to the exact file syn
   );
   assert.equal(
     await readFile(join(dir, "docs/web.md"), "utf8"),
-    source + "\n\n[[comment(alex): this is my comment]]",
+    source + "[[comment(alex): this is my comment]]",
   );
   assertSelectedPassage(
     await request(`/api/docs/${d.id}`),
@@ -346,7 +346,7 @@ test("posting a comment on newly typed text tolerates HTTP overtaking the CRDT u
   assert.equal(result.body, "A causal comment");
   assert.equal(
     await readFile(join(dir, "docs/causal.md"), "utf8"),
-    "Original. Newly typed passage\n\n[[comment(alex): A causal comment]]",
+    "Original. Newly typed passage[[comment(alex): A causal comment]]",
   );
   assertSelectedPassage(
     await request(`/api/docs/${d.id}`),
@@ -445,6 +445,49 @@ test("comments on literal code, links, tables and media are inserted outside the
   }
 });
 
+test("a comment on a paragraph that a heading follows adds no line, and another starts after a blank line", async () => {
+  const source =
+    "# ADHD\nMost of it is wrong.\nSo first, we need to talk about brain, personality, and choice.\n## 1\nMore.";
+  const path = join(dir, "docs/gaps.md");
+  const d = await create("gaps.md", source);
+  const comment = async (body) => {
+    const snapshot = await request(`/api/docs/${d.id}`),
+      from = snapshot.content.indexOf("choice.");
+    return request(`/api/docs/${d.id}/comments`, "POST", {
+      name: "alex",
+      body,
+      quote: "choice.",
+      anchor: anchor(snapshot, from, from + "choice.".length),
+    });
+  };
+  const first = await comment("A note on choice");
+  assert.equal(
+    await readFile(path, "utf8"),
+    source.replace("choice.", "choice.[[comment(alex): A note on choice]]"),
+    "the record ends the paragraph's last line",
+  );
+  await comment("Another note");
+  await request(`/api/docs/${d.id}/comments/${first.id}`, "PATCH", {
+    name: "ana",
+    body: "A reply",
+  });
+  assert.equal(
+    await readFile(path, "utf8"),
+    source.replace(
+      "choice.",
+      "choice.[[comment(alex): A note on choice]]\n[[comment(ana): A reply]]\n\n[[comment(alex): Another note]]",
+    ),
+  );
+  const { comments } = await request(`/api/docs/${d.id}/comments`);
+  assert.deepEqual(
+    comments.map((c) => [c.quote, c.body, c.replies.map((r) => r.body)]),
+    [
+      ["choice.", "A note on choice", ["A reply"]],
+      ["choice.", "Another note", []],
+    ],
+  );
+});
+
 test("plain text comments end their line, ignore Markdown syntax and keep replies and separate conversations", async () => {
   const path = join(dir, "docs/list.txt");
   const d = await create("list.txt", "Buy milk\nBuy eggs\n```\nunclosed fence");
@@ -530,7 +573,7 @@ test("existing conversations export once, preserve identity and resolution, and 
   const file = await readFile(join(dir, "docs/legacy.md"), "utf8");
   assert.equal(
     file,
-    "Original passage.\n\n[[comment(alex): Existing comment]]\n[[comment(ana): Existing response]]",
+    "Original passage.[[comment(alex): Existing comment]]\n[[comment(ana): Existing response]]",
   );
   assertSelectedPassage(
     await request("/api/docs/legacy-doc"),

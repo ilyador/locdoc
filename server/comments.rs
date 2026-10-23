@@ -431,33 +431,40 @@ fn visible_text(source: &str, threads: &[Thread], at: usize) -> Option<usize> {
     None
 }
 
-// Plain text has no blocks, and each line is a paragraph: records go at the
-// end of the line where the passage ends, so adding one adds no line. Beside
-// another conversation a new one starts after a blank line, which the editor
-// hides together with the records around it. Returns where and the prefix.
-fn text_point(source: &str, threads: &[Thread], at: usize) -> (usize, &'static str) {
-    let Some(last) = visible_text(source, threads, at) else {
-        // No text at all: the end, apart from any conversation already there.
-        return (source.len(), if threads.is_empty() { "" } else { "\n\n" });
-    };
-    let mut point = source[last..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |n| last + n);
-    let mut after = false;
+// The nearest character before `at` that a reader sees.
+fn visible_before(source: &str, threads: &[Thread], at: usize) -> Option<usize> {
+    visible_text(source, threads, at).filter(|&index| index < at)
+}
+
+// Where the conversations end that end the text at `point`, or follow it
+// with nothing else between: a record right after the text would join them
+// as a reply. `last` is the last character a reader sees there.
+fn conversations_end(
+    source: &str,
+    threads: &[Thread],
+    last: usize,
+    mut point: usize,
+) -> Option<usize> {
+    let mut end = None;
     for thread in threads.iter().filter(|t| t.to > last) {
-        // A conversation that ends the line, or follows it with nothing else
-        // between, would take the new record as a reply.
-        let ends_line = thread.from < point
+        let ends = thread.from < point
             && (thread.to >= point || source[thread.to..point].trim().is_empty());
-        if ends_line || (thread.from >= point && source[point..thread.from].trim().is_empty()) {
+        if ends || (thread.from >= point && source[point..thread.from].trim().is_empty()) {
             point = thread.to;
-            after = true;
+            end = Some(point);
         } else if thread.from >= point {
             break;
         }
     }
-    if after {
-        return (point, "\n\n");
+    end
+}
+
+// Where a record goes to end the text that ends at `point`, and its prefix.
+// Beside another conversation it starts after a blank line, which the editor
+// hides together with the records around it.
+fn text_end(source: &str, threads: &[Thread], last: usize, point: usize) -> (usize, &'static str) {
+    if let Some(end) = conversations_end(source, threads, last, point) {
+        return (end, "\n\n");
     }
     // A record right after an odd run of backslashes would be escaped. Before
     // the last one it is not, unless only space separates it from another
@@ -477,6 +484,166 @@ fn text_point(source: &str, threads: &[Thread], at: usize) -> (usize, &'static s
         return if joins { (point, "\n") } else { (before, "") };
     }
     (point, "")
+}
+
+// Plain text has no blocks, and each line is a paragraph: records go at the
+// end of the line where the passage ends, so adding one adds no line.
+// Returns where and the prefix.
+fn text_point(source: &str, threads: &[Thread], at: usize) -> (usize, &'static str) {
+    let Some(last) = visible_text(source, threads, at) else {
+        // No text at all: the end, apart from any conversation already there.
+        return (source.len(), if threads.is_empty() { "" } else { "\n\n" });
+    };
+    let end = source[last..]
+        .find(['\n', '\r'])
+        .map_or(source.len(), |n| last + n);
+    text_end(source, threads, last, end)
+}
+
+// A top-level Markdown block, and whether a record may start the line after
+// it. After a paragraph, list or quote that line would continue the block;
+// after a table or HTML block it would join it. Those need a blank line.
+struct TopBlock {
+    range: Range<usize>,
+    line: bool,
+}
+// The source of a paragraph, heading or list item, and where its text ends:
+// a record there joins its last line, before any closing syntax.
+struct TextBlock {
+    range: Range<usize>,
+    end: usize,
+}
+fn markdown_blocks(source: &str) -> (Vec<TopBlock>, Vec<TextBlock>) {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut tops = Vec::new();
+    let mut texts = Vec::new();
+    // Open blocks: their source, whether they hold text, and where it ends.
+    let mut open: Vec<(Range<usize>, bool, Option<usize>)> = Vec::new();
+    fn text(open: &mut [(Range<usize>, bool, Option<usize>)], end: usize) {
+        if let Some((_, _, last)) = open.last_mut() {
+            *last = Some(last.map_or(end, |last| last.max(end)));
+        }
+    }
+    for (event, range) in parser(source).into_offset_iter() {
+        match event {
+            Event::Start(
+                Tag::Emphasis
+                | Tag::Strong
+                | Tag::Strikethrough
+                | Tag::Superscript
+                | Tag::Subscript
+                | Tag::Link { .. }
+                | Tag::Image { .. },
+            ) => text(&mut open, range.end),
+            Event::End(
+                TagEnd::Emphasis
+                | TagEnd::Strong
+                | TagEnd::Strikethrough
+                | TagEnd::Superscript
+                | TagEnd::Subscript
+                | TagEnd::Link
+                | TagEnd::Image,
+            ) => {}
+            Event::Start(tag) => {
+                if open.is_empty() {
+                    tops.push(TopBlock {
+                        range: range.clone(),
+                        line: matches!(
+                            tag,
+                            Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::MetadataBlock(_)
+                        ),
+                    });
+                }
+                let holds_text = matches!(tag, Tag::Paragraph | Tag::Heading { .. } | Tag::Item);
+                open.push((range, holds_text, None));
+            }
+            Event::End(_) => {
+                if let Some((range, true, Some(end))) = open.pop() {
+                    texts.push(TextBlock { range, end });
+                }
+            }
+            Event::Rule => {
+                if open.is_empty() {
+                    tops.push(TopBlock { range, line: true });
+                }
+            }
+            _ => text(&mut open, range.end),
+        }
+    }
+    (tops, texts)
+}
+
+// The Markdown places for a record about the passage ending at `at`, best
+// first, with prefix and suffix. Each is checked before it is used. A
+// passage selected with the line breaks after its text would hold a record
+// that ends that text: places after the passage come first, then a line of
+// its own where the passage ends.
+fn markdown_points(
+    source: &str,
+    threads: &[Thread],
+    at: usize,
+) -> Vec<(usize, &'static str, &'static str)> {
+    let (after, inside): (Vec<_>, Vec<_>) = text_points(source, threads, at)
+        .into_iter()
+        .map(|(point, prefix)| (point, prefix, ""))
+        .partition(|&(point, _, _)| point >= at || !source[point..at].contains(['\n', '\r']));
+    let mut points = after;
+    if !inside.is_empty() && source[..at].ends_with(['\n', '\r']) {
+        points.push((at, "", "\n"));
+    }
+    points.extend(inside);
+    points
+}
+// Ending the text of the paragraph, heading or list item where the passage
+// ending at `at` ends, ending the last such text of its top-level block,
+// then on a line of its own after that block.
+fn text_points(source: &str, threads: &[Thread], at: usize) -> Vec<(usize, &'static str)> {
+    let Some(last) = visible_text(source, threads, at) else {
+        return vec![(source.len(), if threads.is_empty() { "" } else { "\n\n" })];
+    };
+    let (tops, texts) = markdown_blocks(source);
+    let top = tops.iter().find(|top| top.range.contains(&last));
+    let mut ends = Vec::new();
+    if let Some(text) = texts
+        .iter()
+        .filter(|text| text.range.contains(&last))
+        .min_by_key(|text| text.range.len())
+    {
+        ends.push(text.end);
+    }
+    if let Some(top) = top
+        && let Some(end) = texts
+            .iter()
+            .filter(|text| top.range.start <= text.range.start && text.range.end <= top.range.end)
+            .map(|text| text.end)
+            .max()
+        && !ends.contains(&end)
+    {
+        ends.push(end);
+    }
+    let mut points = Vec::new();
+    for end in ends {
+        if let Some(last) = visible_before(source, threads, end) {
+            points.push(text_end(source, threads, last, end));
+        }
+    }
+    // A line of its own after the block, or after the line of a passage that
+    // is in no block, such as a link reference definition.
+    let end = top.map_or_else(
+        || {
+            source[last..]
+                .find(['\n', '\r'])
+                .map_or(source.len(), |n| last + n)
+        },
+        |top| source[..top.range.end].trim_end_matches(['\n', '\r']).len(),
+    );
+    let last = visible_before(source, threads, end).unwrap_or(last);
+    points.push(match conversations_end(source, threads, last, end) {
+        Some(end) => (end, "\n\n"),
+        None if top.is_some_and(|top| top.line) => (end, "\n"),
+        None => (end, "\n\n"),
+    });
+    points
 }
 
 // Compare rendered Markdown, not byte offsets: block separators may gain blank
@@ -499,8 +666,99 @@ fn same_visible_structure(before: &str, after: &str) -> bool {
     visible_structure(&before).eq(visible_structure(&after))
 }
 
+// Markdown as a reader sees it with its records in place. The records and
+// the line breaks between replies go, text runs join, line breaks at the
+// edges of a block go, and a paragraph that held only records disappears.
+// A record that joins a line must leave this unchanged: its own text could
+// make another block of that line, such as a table row or a heading.
+fn reader_structure<'a>(
+    source: &'a str,
+    threads: &[Thread],
+) -> Option<Vec<pulldown_cmark::Event<'a>>> {
+    use pulldown_cmark::{Event, Tag, TagEnd};
+    let mut events: Vec<Event<'a>> = Vec::new();
+    for (event, range) in parser(source).into_offset_iter() {
+        // Threads are sorted and never overlap.
+        let first = threads.partition_point(|thread| thread.to <= range.start);
+        let shared = &threads[first..];
+        let shared = &shared[..shared.partition_point(|thread| thread.from < range.end)];
+        if shared
+            .first()
+            .is_some_and(|thread| thread.from <= range.start && range.end <= thread.to)
+        {
+            continue;
+        }
+        let event = match event {
+            Event::Text(text) if !shared.is_empty() => {
+                // Escapes and entities would not map onto the source.
+                if *text != source[range.clone()] {
+                    return None;
+                }
+                let mut kept = String::new();
+                let mut from = range.start;
+                for thread in shared {
+                    kept.push_str(&source[from..thread.from.max(from)]);
+                    from = thread.to;
+                }
+                if from < range.end {
+                    kept.push_str(&source[from..range.end]);
+                }
+                Event::Text(kept.into())
+            }
+            Event::Html(value) => {
+                let mut value = value.into_string();
+                value.truncate(value.trim_end_matches(['\r', '\n']).len());
+                Event::Html(value.into())
+            }
+            event => event,
+        };
+        match event {
+            Event::Text(text) if text.is_empty() => {}
+            Event::Html(value) if value.is_empty() => {}
+            Event::Text(text) => match events.last_mut() {
+                Some(Event::Text(previous)) => *previous = format!("{previous}{text}").into(),
+                _ => events.push(Event::Text(text)),
+            },
+            Event::SoftBreak => {
+                if !matches!(
+                    events.last(),
+                    None | Some(Event::Start(_) | Event::SoftBreak)
+                ) {
+                    events.push(Event::SoftBreak);
+                }
+            }
+            Event::End(end) => {
+                while matches!(events.last(), Some(Event::SoftBreak)) {
+                    events.pop();
+                }
+                if end == TagEnd::Paragraph
+                    && matches!(events.last(), Some(Event::Start(Tag::Paragraph)))
+                {
+                    events.pop();
+                } else {
+                    events.push(Event::End(end));
+                }
+            }
+            event => events.push(event),
+        }
+    }
+    Some(events)
+}
+fn same_reader_structure(
+    before: &str,
+    before_threads: &[Thread],
+    after: &str,
+    after_threads: &[Thread],
+) -> bool {
+    matches!(
+        (reader_structure(before, before_threads), reader_structure(after, after_threads)),
+        (Some(before), Some(after)) if before == after
+    )
+}
+
 fn valid_candidate(
     source: &str,
+    threads: &[Thread],
     candidate: &str,
     expected: &[(usize, &[MessageText])],
     plain: bool,
@@ -512,7 +770,9 @@ fn valid_candidate(
                 .binary_search_by_key(from, |thread| thread.from)
                 .is_ok_and(|index| parsed[index].messages == *messages)
         })
-        && (plain || same_visible_structure(source, candidate))
+        && (plain
+            || same_visible_structure(source, candidate)
+                && same_reader_structure(source, threads, candidate, &parsed))
 }
 
 struct Insertion {
@@ -527,10 +787,12 @@ fn root_record(
     messages: &[MessageText],
     plain: bool,
 ) -> Result<Insertion> {
-    let (at, prefix, suffix) = if plain {
+    let places = if plain {
         let (at, prefix) = text_point(source, threads, at);
-        (at, prefix, "")
+        vec![(at, prefix, "")]
     } else {
+        let mut places = markdown_points(source, threads, at);
+        // Last, a block of its own after the containing top-level block.
         let at = insertion_point(source, at);
         let prefix = if at == 0 || source[..at].ends_with("\n\n") {
             ""
@@ -546,31 +808,35 @@ fn root_record(
         } else {
             "\n\n"
         };
-        (at, prefix, suffix)
+        places.push((at, prefix, suffix));
+        places
     };
     let body = messages
         .iter()
         .map(|message| record(&message.name, &message.body))
         .collect::<Vec<_>>()
         .join("\n");
-    let encoded = format!("{prefix}{body}{suffix}");
-    let candidate = format!("{}{}{}", &source[..at], encoded, &source[at..]);
-    let marker = at + prefix.len();
-    let mut expected = threads
-        .iter()
-        .map(|thread| {
-            let shifted = thread.from + if thread.from >= at { encoded.len() } else { 0 };
-            (shifted, thread.messages.as_slice())
-        })
-        .collect::<Vec<_>>();
-    expected.push((marker, messages));
-    if valid_candidate(source, &candidate, &expected, plain) {
-        Ok(Insertion {
-            at,
-            encoded,
-            marker,
-        })
-    } else if plain {
+    for (at, prefix, suffix) in places {
+        let encoded = format!("{prefix}{body}{suffix}");
+        let candidate = format!("{}{}{}", &source[..at], encoded, &source[at..]);
+        let marker = at + prefix.len();
+        let mut expected = threads
+            .iter()
+            .map(|thread| {
+                let shifted = thread.from + if thread.from >= at { encoded.len() } else { 0 };
+                (shifted, thread.messages.as_slice())
+            })
+            .collect::<Vec<_>>();
+        expected.push((marker, messages));
+        if valid_candidate(source, threads, &candidate, &expected, plain) {
+            return Ok(Insertion {
+                at,
+                encoded,
+                marker,
+            });
+        }
+    }
+    if plain {
         Err(bad(
             "This comment could not be placed. Reload the document and try again.",
         ))
@@ -1373,7 +1639,7 @@ pub(super) fn edit_payload(
             })
             .collect::<Vec<_>>();
         let plain = plain(&d.path);
-        if !valid_candidate(&source, &candidate, &expected, plain) {
+        if !valid_candidate(&source, &threads, &candidate, &expected, plain) {
             return Err(bad(if plain {
                 "This conversation changed. Reload the document before replying."
             } else {
@@ -2200,6 +2466,37 @@ mod tests {
                 threads.len() + 1,
                 "{}",
                 case["name"]
+            );
+        }
+    }
+
+    // A record that joins a line is text to every Markdown reader, so its own
+    // words can make another block of that line. Such places are refused.
+    #[test]
+    fn a_markdown_record_never_turns_the_lines_around_it_into_another_block() {
+        for (source, body) in [
+            // A pipe in the comment would make the paragraph a table header.
+            ("a\n- | -", "one | two"),
+            // A record line under fenced code would underline a heading.
+            ("```\ncode\n```\n---", "A note"),
+            ("Text\n\n```\ncode\n```\n===\nMore", "A note"),
+        ] {
+            let message = [MessageText {
+                name: "ana".into(),
+                body: body.into(),
+            }];
+            let threads = parse(source, false);
+            let at = source.find(['a', 'c']).unwrap() + 1;
+            let plan = root_record(source, &threads, at, &message, false)
+                .unwrap_or_else(|error| panic!("{source:?}: {}", error.1));
+            let mut result = source.to_string();
+            result.insert_str(plan.at, &plan.encoded);
+            let parsed = parse(&result, false);
+            assert_eq!(parsed.len(), 1, "{result:?}");
+            assert_eq!(parsed[0].messages, message, "{result:?}");
+            assert!(
+                same_reader_structure(source, &threads, &result, &parsed),
+                "{result:?} reads as another structure than {source:?}"
             );
         }
     }
