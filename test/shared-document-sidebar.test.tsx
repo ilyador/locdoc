@@ -7,7 +7,7 @@ import * as Y from "yjs";
 
 // A link to one shared document. Its sidebar lists no tree; the document's
 // own workspace says what the link lets its visitor do.
-let render, screen, waitFor, cleanup;
+let render, screen, waitFor, cleanup, act;
 let WorkspaceView, useWorkspace;
 
 before(async () => {
@@ -79,7 +79,7 @@ before(async () => {
     onclose;
   } as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, screen, waitFor, cleanup } =
+  ({ render, screen, waitFor, cleanup, act } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
   ({ useWorkspace } = await import("../src/workspace.ts"));
@@ -154,4 +154,65 @@ test("a shared document's sidebar says what its link lets the visitor do", async
   ].map((element) => element.className.split(" ")[0]);
   assert.deepEqual(order, ["brand-row", "shared-sidebar", "sidebar-bottom"]);
   assert.equal(document.querySelectorAll(".file-tree").length, 0, "no tree");
+  // Nothing lists the document's time here to keep it current.
+  assert.equal(document.querySelector(".document-modified"), null);
+});
+
+test("a folder link's visitor sees when the open document last changed, as the folder's listing gives it", async () => {
+  cleanup();
+  localStorage.setItem("locdoc.guestName", "Dana");
+  let modified = 1_700_000_000;
+  const listing = () => [
+    {
+      kind: "file",
+      path: "Plan.md",
+      id: "plan",
+      shared: true,
+      modified,
+      title: "Plan",
+      format: "markdown",
+    },
+  ];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.startsWith("/api/open/plan-token"))
+      return response({
+        owner: false,
+        root: "",
+        guest: "guest",
+        publicUrl: location.origin,
+        folder: { name: "Notes", permission: "view" },
+        entries: listing(),
+        document: sharedDocument(false),
+      });
+    if (url.startsWith("/api/tree?token=plan-token"))
+      return response({ entries: listing() });
+    if (url.includes("/comments")) return response({ comments: [] });
+    return response({});
+  }) as typeof fetch;
+  let workspace!: ReturnType<typeof useWorkspace>;
+  function Visitor() {
+    workspace = useWorkspace();
+    return <WorkspaceView workspace={workspace} />;
+  }
+  render(<Visitor />);
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("textbox", { name: "Markdown document" })),
+  );
+  const header = () =>
+    document.querySelector(".topbar .document-modified")?.textContent;
+  const full = (seconds: number) =>
+    new Date(seconds * 1000).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  assert.equal(header(), `Modified ${full(modified)}`);
+  assert.match(
+    document.querySelector(".topbar .access-badge")!.textContent!,
+    /View & comment/,
+    "beside what the link lets the visitor do",
+  );
+  modified += 3 * 3600;
+  await act(() => workspace.loadTree());
+  assert.equal(header(), `Modified ${full(modified)}`);
 });

@@ -75,6 +75,23 @@ export function PathText({
     </>
   );
 }
+// A short label that screen readers read in full: "5m" shows, and "5 minutes
+// ago" is read. A label that needs no reading aloud stays plain text.
+export function Abbreviated({
+  label,
+  phrase,
+}: {
+  label: string;
+  phrase?: string;
+}) {
+  if (!phrase || phrase === label) return <>{label}</>;
+  return (
+    <>
+      <span aria-hidden="true">{label}</span>
+      <span className="visually-hidden">{phrase}</span>
+    </>
+  );
+}
 export function timeAgo(t: number) {
   const m = Math.floor((Date.now() / 1000 - t) / 60);
   return m < 1

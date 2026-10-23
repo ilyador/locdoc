@@ -361,6 +361,7 @@ export function DocumentWorkspace({
           doc={doc}
           path={path}
           filename={filename}
+          modified={entry?.modified}
           people={people}
           sidebar={sidebar}
           openSidebar={() => setSidebar(true)}

@@ -214,20 +214,25 @@ test("a long workspace lists its rows without building a collator or date format
       const entry = files.find((e) => e.path === row.dataset.path)!;
       const date = new Date(entry.modified * 1000);
       const time = row.querySelector("time")!;
-      const age = now - entry.modified;
-      const label =
-        age < 3600
-          ? null
-          : age >= 30 * 86400
-            ? date.toLocaleDateString(undefined, {
-                month: "short",
-                day: "numeric",
-                ...(date.getFullYear() !== new Date().getFullYear()
-                  ? { year: "numeric" }
-                  : {}),
-              })
-            : null;
-      if (label) assert.equal(time.textContent, label, entry.path);
+      // A compact age, which screen readers hear in words.
+      const label = time.querySelector('[aria-hidden="true"]')!.textContent!;
+      const phrase = time.querySelector(".visually-hidden")!.textContent;
+      const [, count, unit] = /^(\d+)(m|h|d|w|mo|y)$/.exec(label) || [];
+      const units: Record<string, string> = {
+        m: "minute",
+        h: "hour",
+        d: "day",
+        w: "week",
+        mo: "month",
+        y: "year",
+      };
+      assert.equal(
+        phrase,
+        label === "now"
+          ? "just now"
+          : `${count} ${units[unit]}${count === "1" ? "" : "s"} ago`,
+        `${entry.path}: ${label}`,
+      );
       assert.equal(
         time.getAttribute("title"),
         date.toLocaleString(),
@@ -323,17 +328,52 @@ test("a document's time moves on as time passes, without another change", (t) =>
       modified: second - 3570,
       title: "Older",
     },
+    {
+      kind: "file",
+      path: "Fortnight.md",
+      id: "fortnight",
+      shared: false,
+      modified: second - 14 * 86400 + 20,
+      title: "Fortnight",
+    },
+    {
+      kind: "file",
+      path: "Season.md",
+      id: "season",
+      shared: false,
+      modified: second - 63 * 86400 + 20,
+      title: "Season",
+    },
   ];
   render(<Sidebar entries={entries} view="date" id="fresh" />);
-  const time = (path: string) =>
-    document.querySelector(`[data-path="${path}"] time`)!.textContent;
-  assert.equal(time("Fresh.md"), "now");
-  assert.equal(time("Older.md"), "59m ago");
+  // The age shown, and the one screen readers hear.
+  const time = (path: string) => {
+    const element = document.querySelector(`[data-path="${path}"] time`)!;
+    return [
+      element.querySelector('[aria-hidden="true"]')!.textContent,
+      element.querySelector(".visually-hidden")!.textContent,
+    ].join(" | ");
+  };
+  assert.equal(time("Fresh.md"), "now | just now");
+  assert.equal(time("Older.md"), "59m | 59 minutes ago");
+  assert.equal(time("Fortnight.md"), "13d | 13 days ago");
+  assert.equal(time("Season.md"), "8w | 8 weeks ago");
   act(() => t.mock.timers.tick(31_000));
-  assert.equal(time("Fresh.md"), "1m ago", "the minute is shown as it passes");
+  assert.equal(
+    time("Fresh.md"),
+    "1m | 1 minute ago",
+    "the minute is shown as it passes",
+  );
+  assert.equal(
+    time("Older.md"),
+    "1h | 1 hour ago",
+    "minutes give way to hours",
+  );
+  assert.equal(time("Fortnight.md"), "2w | 2 weeks ago", "days to weeks");
+  assert.equal(time("Season.md"), "2mo | 2 months ago", "weeks to months");
   act(() => t.mock.timers.tick(60_000));
-  assert.equal(time("Fresh.md"), "2m ago");
-  assert.equal(time("Older.md"), "1h ago");
+  assert.equal(time("Fresh.md"), "2m | 2 minutes ago");
+  assert.equal(time("Older.md"), "1h | 1 hour ago");
 });
 
 // The tree lays its rows out in chunks; a chunk away from the screen skips

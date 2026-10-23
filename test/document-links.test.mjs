@@ -64,30 +64,46 @@ test("recent documents sort by modification without date groups", () => {
     ["new", "old"],
   );
 });
-test("sidebar timestamps use relative time, then a compact calendar date", () => {
-  const now = new Date(2026, 9, 16, 12);
-  const stamp = (seconds) =>
-    sidebarTimestamp((+now - seconds * 1000) / 1000, now)?.label;
-  assert.equal(stamp(5), "now");
-  assert.equal(stamp(120), "2m ago");
-  assert.equal(stamp(7200), "2h ago");
-  assert.equal(stamp(86400 * 6), "6d ago");
-  const old = new Date(2026, 7, 1, 12),
-    previous = new Date(2025, 7, 1, 12);
-  assert.equal(
-    sidebarTimestamp(+old / 1000, now).label,
-    old.toLocaleDateString(undefined, { month: "short", day: "numeric" }),
-  );
-  assert.equal(
-    sidebarTimestamp(+previous / 1000, now).label,
-    previous.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    }),
-  );
+test("sidebar timestamps are compact ages in whole units at every age, with the exact time on hover", () => {
+  const now = new Date(2026, 9, 23, 12);
+  const MINUTE = 60_000,
+    HOUR = 60 * MINUTE,
+    DAY = 24 * HOUR;
+  // A time this long before now, or at this local date and time.
+  const age = (before) => sidebarTimestamp((+now - before) / 1000, now);
+  const at = (...date) => sidebarTimestamp(+new Date(...date) / 1000, now);
+  const shown = (stamp) => [stamp.label, stamp.phrase];
+  // Each unit, from the first moment it counts to the last.
+  assert.deepEqual(shown(age(0)), ["now", "just now"]);
+  assert.deepEqual(shown(age(MINUTE - 1)), ["now", "just now"]);
+  assert.deepEqual(shown(age(MINUTE)), ["1m", "1 minute ago"]);
+  assert.deepEqual(shown(age(HOUR - 1)), ["59m", "59 minutes ago"]);
+  assert.deepEqual(shown(age(HOUR)), ["1h", "1 hour ago"]);
+  assert.deepEqual(shown(age(DAY - 1)), ["23h", "23 hours ago"]);
+  assert.deepEqual(shown(age(DAY)), ["1d", "1 day ago"]);
+  assert.deepEqual(shown(age(14 * DAY - 1)), ["13d", "13 days ago"]);
+  assert.deepEqual(shown(age(14 * DAY)), ["2w", "2 weeks ago"]);
+  assert.deepEqual(shown(age(63 * DAY - 1)), ["8w", "8 weeks ago"]);
+  // Nine weeks always hold two calendar months.
+  assert.deepEqual(shown(age(63 * DAY)), ["2mo", "2 months ago"]);
+  assert.deepEqual(shown(at(2026, 7, 1, 12)), ["2mo", "2 months ago"]);
+  assert.deepEqual(shown(at(2026, 6, 23, 12)), ["3mo", "3 months ago"]);
+  assert.deepEqual(shown(at(2026, 6, 23, 12, 0, 1)), ["2mo", "2 months ago"]);
+  assert.deepEqual(shown(at(2025, 9, 23, 12)), ["12mo", "12 months ago"]);
+  assert.deepEqual(shown(at(2024, 9, 23, 12, 0, 1)), ["23mo", "23 months ago"]);
+  assert.deepEqual(shown(at(2024, 9, 23, 12)), ["2y", "2 years ago"]);
+  assert.deepEqual(shown(at(2023, 9, 24)), ["2y", "2 years ago"]);
+  assert.deepEqual(shown(at(2016, 9, 23, 12)), ["10y", "10 years ago"]);
+  // A file stamped ahead of this clock is new, not in the future.
+  assert.deepEqual(shown(age(-5 * MINUTE)), ["now", "just now"]);
+  // Hovering shows the exact local date and time.
+  const exact = new Date(2026, 6, 23, 9, 5, 7);
+  const stamp = sidebarTimestamp(+exact / 1000, now);
+  assert.equal(stamp.title, exact.toLocaleString());
+  assert.equal(stamp.dateTime, exact.toISOString());
   assert.equal(sidebarTimestamp(undefined, now), null);
   assert.equal(sidebarTimestamp(NaN, now), null);
+  assert.equal(sidebarTimestamp(-1, now), null);
 });
 test("listings resolve document links alike while their files keep their paths and addresses", () => {
   const listing = [

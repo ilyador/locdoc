@@ -47,7 +47,7 @@ import {
 } from "./recent-documents";
 import { mac, shortcuts } from "./shortcuts";
 import { isolateName } from "./bidi";
-import { PathText } from "./ui";
+import { Abbreviated, PathText } from "./ui";
 import { keyedChunks, treeChunks } from "./tree-chunks";
 import type { SidebarView } from "./workspace";
 
@@ -106,6 +106,7 @@ const TreeEntry = memo(function TreeEntry({
   focusable,
   labelId,
   time,
+  timePhrase,
   dateTime,
   timeTitle,
   drop,
@@ -130,7 +131,9 @@ const TreeEntry = memo(function TreeEntry({
   busy: boolean;
   focusable: boolean;
   labelId: string;
+  // The document's age, as "5m", and the same age in words.
   time?: string;
+  timePhrase?: string;
   dateTime?: string;
   timeTitle?: string;
   drop: "" | "drop-target" | "in-drop-target";
@@ -256,7 +259,7 @@ const TreeEntry = memo(function TreeEntry({
                   dateTime={dateTime}
                   title={timeTitle}
                 >
-                  {time}
+                  <Abbreviated label={time} phrase={timePhrase} />
                 </time>
               )}
             </span>
@@ -877,6 +880,7 @@ export function FileTree({
         focusable={!editing && e.path === roving}
         labelId={labelOf(e.path)}
         time={stamp?.label}
+        timePhrase={stamp?.phrase}
         dateTime={stamp?.dateTime}
         timeTitle={stamp?.title}
         drop={

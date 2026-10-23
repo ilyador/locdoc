@@ -781,10 +781,25 @@ test("Recently deleted lists the trash newest first, restores, and keeps a confl
       body: JSON.stringify({ path: "a.md", kind: "file" }),
     });
   });
+  // The items were deleted a moment and five minutes ago.
+  const second = Math.floor(Date.now() / 1000);
+  api.trash.find((item) => item.path === "b.txt")!.deleted = second;
+  api.trash.find((item) => item.path === "a.md")!.deleted = second - 300;
   fireEvent.click(screen.getByText("Recently deleted"));
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "Restore b.txt" })));
   const names = Array.from(document.querySelectorAll(".trash-name strong"), (n) => n.textContent);
   assert.deepEqual(names, ["b.txt", "a.md"]);
+  assert.deepEqual(
+    Array.from(document.querySelectorAll(".trash-name time"), (time) => [
+      time.querySelector('[aria-hidden="true"]')?.textContent ?? time.textContent,
+      time.querySelector(".visually-hidden")?.textContent ?? time.textContent,
+    ]),
+    [
+      ["deleted just now", "deleted just now"],
+      ["deleted 5m ago", "deleted 5 minutes ago"],
+    ],
+    "each reads as the sidebar's age, and in words to screen readers",
+  );
   fireEvent.click(screen.getByRole("button", { name: "Restore a.md" }));
   await waitFor(() =>
     assert.match(screen.getByRole("alert").textContent!, /a\.md is taken/),
