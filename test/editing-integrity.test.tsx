@@ -628,3 +628,27 @@ test("counter updates are coalesced in their own component during sustained edit
     doc.destroy();
   }
 });
+
+test("a document's words are counted once as it opens, and again once its text changes", async (t) => {
+  const { DocumentWordMetrics } = await import("../src/document-footer");
+  const segment = t.mock.method(Intl.Segmenter.prototype, "segment");
+  const doc = new Y.Doc();
+  const text = doc.getText("content");
+  text.insert(0, "INT. HOUSE - DAY\n\nMAYA\nWhere were you?");
+  const page = render(
+    <DocumentWordMetrics text={text} initial="" path="Plot.fountain" />,
+  );
+  try {
+    assert.ok(page.container.textContent!.includes("7 words"));
+    assert.equal(segment.mock.callCount(), 1, "one count as it opens");
+    act(() => text.insert(text.length, " Here."));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 130));
+    });
+    assert.ok(page.container.textContent!.includes("8 words"));
+    assert.equal(segment.mock.callCount(), 2);
+  } finally {
+    page.unmount();
+    doc.destroy();
+  }
+});

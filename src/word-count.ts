@@ -32,7 +32,9 @@ export function countDocumentWords(source: string, path: string) {
     )
     .map((line) => line.text)
     .join(" ");
-  return [...words.segment(text)].filter((word) => word.isWordLike).length;
+  let count = 0;
+  for (const word of words.segment(text)) if (word.isWordLike) count++;
+  return count;
 }
 
 // Plain text is read as written: only hidden comment records are excluded.

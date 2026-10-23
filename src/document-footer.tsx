@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CheckCircle,
   Clock,
@@ -20,14 +20,23 @@ export function DocumentWordMetrics({
   initial: string;
   path: string;
 }) {
-  const [count, setCount] = useState(() =>
-    countDocumentWords(text?.toString() ?? initial, path),
-  );
+  // The text and path the count is for: a document is counted once as it
+  // opens, and again only once its text or name changes.
+  const counted = useRef({ source: "", path: "" });
+  const [count, setCount] = useState(() => {
+    const source = text?.toString() ?? initial;
+    counted.current = { source, path };
+    return countDocumentWords(source, path);
+  });
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const snapshot = () => {
       timer = undefined;
-      setCount(countDocumentWords(text?.toString() ?? initial, path));
+      const source = text?.toString() ?? initial;
+      if (source === counted.current.source && path === counted.current.path)
+        return;
+      counted.current = { source, path };
+      setCount(countDocumentWords(source, path));
     };
     const changed = () => {
       timer ??= setTimeout(snapshot, 100);
