@@ -44,6 +44,17 @@ export function hasSpeakerPrefix(text: string) {
   return /^\p{Lu}{2}/u.test(text);
 }
 
+// Whether a line, without a dual dialogue ^ or an extension such as (V.O.),
+// reads as a name in capitals.
+function speakerName(text: string) {
+  const name = text.replace(/\s*\^$/, "").replace(/\s*\([^)]*\)\s*$/, "");
+  return (
+    hasSpeakerPrefix(name) &&
+    name === name.toUpperCase() &&
+    !/[.!?:;]$/.test(name)
+  );
+}
+
 // A scene heading after a blank line starts with one of Fountain's prefixes,
 // or Hebrew's פנים. (interior) or חוץ. (exterior), alone or combined as
 // פנים/חוץ. Hebrew has no capitals: its character cues are forced with @.
@@ -128,7 +139,7 @@ export function parseFountain(
     return index < ranges.length && ranges[index].from < line.to;
   };
   for (let i = 0; i < raw.length; i++) {
-    const value = raw[i].replace(/\r$/, "");
+    const value = raw[i].endsWith("\r") ? raw[i].slice(0, -1) : raw[i];
     const text = value.trim();
     const line: FountainLine = {
       from: offset,
@@ -169,7 +180,11 @@ export function parseFountain(
       }
       continue;
     }
-    const field = /^([A-Za-z][A-Za-z ]*):[ \t]*/.exec(value);
+    // Only the top of a script can hold its title page.
+    const field =
+      titlePossible || titlePage
+        ? /^([A-Za-z][A-Za-z ]*):[ \t]*/.exec(value)
+        : null;
     if (
       titlePossible &&
       field &&
@@ -208,8 +223,8 @@ export function parseFountain(
     } else if (
       /^>/.test(text) ||
       (boundary &&
+        text.endsWith("TO:") &&
         text === text.toUpperCase() &&
-        /TO:$/.test(text) &&
         !raw[i + 1]?.trim())
     ) {
       line.kind = "transition";
@@ -233,13 +248,11 @@ export function parseFountain(
       line.kind = "lyric";
       line.prefix = marker(lead, lead + 1);
     } else {
-      const name = text.replace(/\s*\^$/, "").replace(/\s*\([^)]*\)\s*$/, "");
       const cue =
         text.startsWith("@") ||
         (boundary &&
-          hasSpeakerPrefix(name) &&
-          name === name.toUpperCase() &&
-          !/[.!?:;]$/.test(name) &&
+          hasSpeakerPrefix(text) &&
+          speakerName(text) &&
           (raw[i + 1]?.trim() ||
             i >= raw.length - 2 ||
             editingLine === i ||

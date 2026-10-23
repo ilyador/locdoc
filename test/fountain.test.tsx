@@ -291,6 +291,51 @@ test("Fountain cue drafting follows focus and permissions without reparsing with
   assert.equal(state.doc.toString(), source);
 });
 
+test("a new configuration, or a selection the preview does not reveal, keeps the parsed script and its layout", () => {
+  const source = "INT. HOUSE - DAY\n\nMAYA\nWhere were *you*?\n\n> THE END <";
+  const preview = new Compartment();
+  const access = new Compartment();
+  let state = EditorState.create({
+    doc: source,
+    extensions: [
+      preview.of(fountainPreview()),
+      access.of(EditorState.readOnly.of(false)),
+    ],
+  });
+  const script = state.facet(fountainScript);
+  const layout = () => [
+    ...state.facet(EditorView.decorations),
+    ...state.facet(EditorView.blockWrappers),
+  ];
+  const opened = layout();
+  const kept = (label: string) => {
+    assert.ok(state.facet(fountainScript) === script, `${label}: script`);
+    const now = layout();
+    assert.equal(now.length, opened.length, `${label}: layers`);
+    assert.ok(
+      now.every((set, i) => set === opened[i]),
+      `${label}: the layout is the same`,
+    );
+  };
+  // An editor applies its preview and permissions again as it mounts.
+  state = state.update({
+    effects: preview.reconfigure(fountainPreview()),
+  }).state;
+  kept("the same preview again");
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(false)),
+  }).state;
+  kept("the same permission again");
+  state = state.update({ selection: { anchor: source.indexOf("you") } }).state;
+  kept("a selection in an editor without focus");
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(true)),
+  }).state;
+  kept("read-only without focus");
+  state = state.update({ changes: { from: 0, insert: "!" } }).state;
+  assert.ok(state.facet(fountainScript) !== script, "an edit parses again");
+});
+
 test("file labels, names, document links and counts understand Fountain", () => {
   assert.equal(documentFormat("Story.FOUNTAIN"), "fountain");
   assert.equal(documentName("Drafts/Story.FOUNTAIN"), "Story");
