@@ -1159,6 +1159,8 @@ button:hover {
     0.75rem/1.6 "JetBrains Mono",
     ui-monospace,
     monospace;
+  /* An example shows each character to type: === is three signs. */
+  font-variant-ligatures: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

@@ -44,6 +44,23 @@ export function hasSpeakerPrefix(text: string) {
   return /^\p{Lu}{2}/u.test(text);
 }
 
+// Whether a line, without a dual dialogue ^ or an extension such as (V.O.),
+// reads as a name in capitals.
+function speakerName(text: string) {
+  const name = text.replace(/\s*\^$/, "").replace(/\s*\([^)]*\)\s*$/, "");
+  return (
+    hasSpeakerPrefix(name) &&
+    name === name.toUpperCase() &&
+    !/[.!?:;]$/.test(name)
+  );
+}
+
+// A scene heading after a blank line starts with one of Fountain's prefixes,
+// or Hebrew's פנים. (interior) or חוץ. (exterior), alone or combined as
+// פנים/חוץ. Hebrew has no capitals: its character cues are forced with @.
+const scenePrefix = /^(?:INT\.?\/EXT|INT\/EXT|I\/E|INT|EXT|EST)[. ]/i;
+const hebrewScenePrefix = /^(?:פנים|חוץ)(?:\.?\/(?:פנים|חוץ))?\./;
+
 // Layout never rewrites the source. Ranges are UTF-16 offsets, like CodeMirror
 // and Y.Text. Comments/notes are masked in place so their contents cannot become
 // character cues or move collaborative anchors.
@@ -64,13 +81,32 @@ export function parseFountain(
   visible += source.slice(start);
   const notes: FountainRange[] = [],
     omissions: FountainRange[] = [];
+  // Fountain never looks past a blank line for a closing ]]: a note ends
+  // there, unless the line holds two spaces. A boneyard spans any number of
+  // lines to its */, and an /* without one is text.
   const special = /\\[^\r\n]|\/\*|\[\[/g;
+  const blank = /\n[ \t]?\r?(?=\n|$)/g;
+  let closed = true;
   for (let match; (match = special.exec(visible));) {
     if (match[0].startsWith("\\")) continue;
-    const close = match[0] === "/*" ? "*/" : "]]";
-    const end = visible.indexOf(close, match.index + 2);
-    const to = end < 0 ? visible.length : end + 2;
-    (close === "*/" ? omissions : notes).push({ from: match.index, to });
+    const from = match.index;
+    let to: number;
+    if (match[0] === "/*") {
+      const end = closed ? visible.indexOf("*/", from + 2) : -1;
+      // No later /* finds a */ either.
+      if (end < 0) {
+        closed = false;
+        continue;
+      }
+      to = end + 2;
+      omissions.push({ from, to });
+    } else {
+      blank.lastIndex = from;
+      const paragraph = blank.exec(visible)?.index ?? visible.length;
+      const end = visible.slice(from + 2, paragraph).indexOf("]]");
+      to = end < 0 ? paragraph : from + end + 4;
+      notes.push({ from, to });
+    }
     special.lastIndex = to;
   }
   const chunks: string[] = [];
@@ -103,7 +139,7 @@ export function parseFountain(
     return index < ranges.length && ranges[index].from < line.to;
   };
   for (let i = 0; i < raw.length; i++) {
-    const value = raw[i].replace(/\r$/, "");
+    const value = raw[i].endsWith("\r") ? raw[i].slice(0, -1) : raw[i];
     const text = value.trim();
     const line: FountainLine = {
       from: offset,
@@ -144,7 +180,11 @@ export function parseFountain(
       }
       continue;
     }
-    const field = /^([A-Za-z][A-Za-z ]*):[ \t]*/.exec(value);
+    // Only the top of a script can hold its title page.
+    const field =
+      titlePossible || titlePage
+        ? /^([A-Za-z][A-Za-z ]*):[ \t]*/.exec(value)
+        : null;
     if (
       titlePossible &&
       field &&
@@ -183,8 +223,8 @@ export function parseFountain(
     } else if (
       /^>/.test(text) ||
       (boundary &&
+        text.endsWith("TO:") &&
         text === text.toUpperCase() &&
-        /TO:$/.test(text) &&
         !raw[i + 1]?.trim())
     ) {
       line.kind = "transition";
@@ -192,7 +232,7 @@ export function parseFountain(
         line.prefix = marker(lead, lead + text.match(/^>\s*/)![0].length);
     } else if (
       /^\.[\p{L}\p{N}]/u.test(text) ||
-      (boundary && /^(?:INT\.?\/EXT|INT\/EXT|I\/E|INT|EXT|EST)[. ]/i.test(text))
+      (boundary && (scenePrefix.test(text) || hebrewScenePrefix.test(text)))
     ) {
       line.kind = "scene";
       if (text.startsWith(".")) line.prefix = marker(lead, lead + 1);
@@ -208,13 +248,11 @@ export function parseFountain(
       line.kind = "lyric";
       line.prefix = marker(lead, lead + 1);
     } else {
-      const name = text.replace(/\s*\^$/, "").replace(/\s*\([^)]*\)\s*$/, "");
       const cue =
         text.startsWith("@") ||
         (boundary &&
-          hasSpeakerPrefix(name) &&
-          name === name.toUpperCase() &&
-          !/[.!?:;]$/.test(name) &&
+          hasSpeakerPrefix(text) &&
+          speakerName(text) &&
           (raw[i + 1]?.trim() ||
             i >= raw.length - 2 ||
             editingLine === i ||

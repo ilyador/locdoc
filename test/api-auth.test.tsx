@@ -126,3 +126,15 @@ test("a kept response is offered only for its own path, and only a 304 keeps it"
     dom.window.close();
   }
 });
+
+test("a document's collaboration state decodes byte for byte", async () => {
+  const { decodeState } = await import("../src/api");
+  const bytes = new Uint8Array(70_000).map((_, i) => (i * 7919 + 13) % 256);
+  const decoded = decodeState(Buffer.from(bytes).toString("base64"));
+  assert.equal(decoded.length, bytes.length);
+  assert.ok(
+    decoded.every((byte, i) => byte === bytes[i]),
+    "every byte value survives",
+  );
+  assert.equal(decodeState("").length, 0);
+});

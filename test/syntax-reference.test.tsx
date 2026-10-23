@@ -239,6 +239,21 @@ const markdownChecks: Record<string, (source: string) => void> = {
         assert.ok(has(six.line(0), "md-h6"), "up to six #"),
       );
     }),
+  "Heading\n===": (source) => {
+    for (const [underlined, level] of [
+      [source, "md-h1"],
+      ["Heading\n---", "md-h2"],
+    ] as const)
+      rendered(`${underlined}\n\nText`, "markdown", (view) => {
+        assert.ok(has(view.line(0), level), `${underlined}: ${level}`);
+        assert.deepEqual(
+          view.texts(),
+          ["Heading", "", "Text"],
+          `${underlined}: the underline is hidden`,
+        );
+        assert.equal(view.all(".md-rule").length, 0, "--- is not a rule");
+      });
+  },
   "**bold**": (source) =>
     rendered(source, "markdown", (view) => {
       assert.equal(view.one(".md-strong")?.textContent, "bold");
@@ -397,6 +412,11 @@ const markdownChecks: Record<string, (source: string) => void> = {
     rendered(source, "markdown", (view) =>
       assert.ok(has(view.line(0), "md-rule")),
     );
+    // Any thematic break is a rule, wherever the parser finds one.
+    rendered("Text\n\n* * *\n\n> Quote\n>\n> ___", "markdown", (view) => {
+      assert.ok(has(view.line(2), "md-rule"), "* * *");
+      assert.ok(has(view.line(6), "md-rule"), "a rule in a quote");
+    });
   },
   ...commentChecks("markdown"),
 };
@@ -428,6 +448,13 @@ const fountainChecks: Record<string, (source: string) => void> = {
       assert.ok(!wrapperOf(view, 1, "fountain-scene"), "needs a blank line"),
     );
   },
+  "פנים. בית - יום": (source) => {
+    for (const scene of [source, "חוץ. רחוב - לילה", "פנים/חוץ. מכונית - יום"])
+      element(scene, 0, "scene", scene);
+    rendered(`היא מחכה.\n${source}`, "fountain", (view) =>
+      assert.ok(!wrapperOf(view, 1, "fountain-scene"), "needs a blank line"),
+    );
+  },
   ".FLASHBACK": (source) => element(source, 0, "scene", "FLASHBACK"),
   "She waits by the door.": (source) => element(source, 0, "action"),
   "!THE LIGHTS GO OUT.": (source) =>
@@ -439,6 +466,11 @@ const fountainChecks: Record<string, (source: string) => void> = {
   "@McKenna": (source) => {
     element(source, 0, "character", "McKenna");
     element("McKenna\nHi.", 0, "action");
+  },
+  "@מאיה\nאיפה היית?": (source) => {
+    element(source, 0, "character", "מאיה");
+    element(source, 1, "dialogue", "איפה היית?");
+    element("מאיה\nאיפה היית?", 0, "action");
   },
   "(quietly)": (source) =>
     element(source, 1, "parenthetical", "(quietly)", (line) => {
@@ -504,14 +536,30 @@ const fountainChecks: Record<string, (source: string) => void> = {
     element("## Scene group", 0, "section", "Scene group");
   },
   "= Synopsis": (source) => element(source, 0, "synopsis", "Synopsis"),
-  "[[Note]]": (source) =>
+  "[[Note]]": (source) => {
     rendered(source, "fountain", (view) =>
       assert.equal(view.one(".fountain-note-ink")?.textContent, source),
-    ),
-  "/* Cut scene */": (source) =>
+    );
+    rendered("[[Note\n\nINT. HOUSE - DAY", "fountain", (view) => {
+      assert.equal(view.one(".fountain-note-ink")?.textContent, "[[Note");
+      assert.ok(wrapperOf(view, 2, "fountain-scene"), "a blank line ends it");
+    });
+    rendered("[[Note\n  \nINT. HOUSE - DAY]]", "fountain", (view) =>
+      assert.equal(view.all(".fountain-scene").length, 0, "two spaces do not"),
+    );
+  },
+  "/* Cut scene */": (source) => {
     rendered(source, "fountain", (view) =>
       assert.equal(view.one(".fountain-omitted-ink")?.textContent, source),
-    ),
+    );
+    rendered("/* Cut\n\nINT. HOUSE - DAY\n\n*/", "fountain", (view) =>
+      assert.equal(view.all(".fountain-scene").length, 0, "over any lines"),
+    );
+    rendered("/* Cut\n\nINT. HOUSE - DAY", "fountain", (view) => {
+      assert.equal(view.all(".fountain-omitted-ink").length, 0, "needs */");
+      assert.ok(wrapperOf(view, 2, "fountain-scene"));
+    });
+  },
   ...commentChecks("fountain"),
 };
 
@@ -620,10 +668,13 @@ test("the format label names its syntax reference and shows the document's forma
       ),
       `${format} lists ${group}`,
     );
-    const shown = Array.from(panel.querySelectorAll("dt code")).map(
-      (code) => code.textContent,
-    );
+    const codes = Array.from(panel.querySelectorAll("dt code"));
+    const shown = codes.map((code) => code.textContent);
     assert.deepEqual(shown, examples(format).map(exampleSource));
+    assert.ok(
+      codes.every((code) => code.getAttribute("dir") === "auto"),
+      "a Hebrew example reads right to left",
+    );
     // Examples are text, never markup or media.
     assert.equal(
       panel.querySelectorAll("a, img, video, strong, em, input").length,
@@ -910,5 +961,19 @@ test("on phones and touch screens the format label stays in the footer", () => {
       .display,
     "none",
     "attachment usage still makes room",
+  );
+});
+
+test("an example shows every character to type, never a ligature", () => {
+  style.textContent = stylesheet;
+  const view = footer(paths.markdown);
+  act(() => view.trigger.click());
+  const code = Array.from(view.panel()!.querySelectorAll("dt code")).find(
+    (example) => example.textContent === "Heading\n===",
+  )!;
+  assert.equal(
+    getComputedStyle(code).getPropertyValue("font-variant-ligatures"),
+    "none",
+    "=== is three signs",
   );
 });

@@ -128,6 +128,15 @@ export const MarkdownEditor = forwardRef<
   const preview = useRef(new Compartment());
   const access = useRef(new Compartment());
   const integrity = useRef(new Compartment());
+  // What the view's preview and access compartments hold, and whether it
+  // shows comments. A view is created with the current configuration and
+  // no comments: applying the same again as it mounts would only lay out
+  // the whole document once more, as for a long script on every open.
+  const applied = useRef<{
+    preview: unknown[];
+    editable: boolean;
+    comments: boolean;
+  } | null>(null);
   const invalidText = useRef(false);
   const callbacks = useRef({
     onChange,
@@ -219,6 +228,16 @@ export const MarkdownEditor = forwardRef<
       },
     };
   }, [ydoc, editable, path]);
+  // The tree is listed again as documents are saved; a listing whose links
+  // resolve as before keeps the preview as it is.
+  const linked = documentFormat(path) === "markdown" ? entries : undefined;
+  const [previewEntries, setPreviewEntries] = useState(linked);
+  if (
+    previewEntries !== linked &&
+    !(previewEntries && linked && sameLinkTargets(previewEntries, linked))
+  )
+    setPreviewEntries(linked);
+  const previewInputs = [id, token, path, previewEntries, owner];
   useLayoutEffect(() => {
     const text = ydoc.getText("content");
     const source = text.toString();
@@ -256,7 +275,7 @@ export const MarkdownEditor = forwardRef<
           // user has engaged with this editor.
           userEngagement,
           preview.current.of([
-            documentPreview(id, token, path, entries),
+            documentPreview(id, token, path, previewEntries),
             explainMedia.of(!!owner),
           ]),
           yCollab(text, provider.awareness, { undoManager: undo }),
@@ -299,6 +318,7 @@ export const MarkdownEditor = forwardRef<
       }),
     });
     view.current = v;
+    applied.current = { preview: previewInputs, editable, comments: false };
     let alive = true;
     const inspect = (event: Y.YTextEvent) => {
       if (
@@ -338,7 +358,18 @@ export const MarkdownEditor = forwardRef<
   }, [ydoc, provider, id, scrollKey]);
   useLayoutEffect(() => {
     const v = view.current;
-    if (!v) return;
+    const current = applied.current;
+    if (!v || !current) return;
+    // A view starts without comments: a document that has none, or none
+    // loaded yet, changes nothing by applying none.
+    if (
+      !comments?.length &&
+      !activeComment &&
+      !commentDraft &&
+      !current.comments
+    )
+      return;
+    current.comments = !!(comments?.length || activeComment || commentDraft);
     v.dispatch({
       effects: setCommentLayout.of({
         items: (comments || []).map((comment) => ({
@@ -365,17 +396,16 @@ export const MarkdownEditor = forwardRef<
     observer.observe(commentHost);
     return () => observer.disconnect();
   }, [commentHost]);
-  // The tree is listed again as documents are saved; a listing whose links
-  // resolve as before keeps the preview as it is.
-  const linked = documentFormat(path) === "markdown" ? entries : undefined;
-  const [previewEntries, setPreviewEntries] = useState(linked);
-  if (
-    previewEntries !== linked &&
-    !(previewEntries && linked && sameLinkTargets(previewEntries, linked))
-  )
-    setPreviewEntries(linked);
   useEffect(() => {
-    view.current?.dispatch({
+    const current = applied.current;
+    if (
+      !view.current ||
+      !current ||
+      previewInputs.every((input, i) => input === current.preview[i])
+    )
+      return;
+    current.preview = previewInputs;
+    view.current.dispatch({
       effects: preview.current.reconfigure([
         documentPreview(id, token, path, previewEntries),
         explainMedia.of(!!owner),
@@ -385,7 +415,10 @@ export const MarkdownEditor = forwardRef<
   // A permission change applies in the commit that shows it, before the
   // browser paints or takes another keystroke.
   useLayoutEffect(() => {
-    view.current?.dispatch({
+    const current = applied.current;
+    if (!view.current || !current || current.editable === editable) return;
+    current.editable = editable;
+    view.current.dispatch({
       effects: access.current.reconfigure(editorAccess(editable)),
     });
   }, [editable]);

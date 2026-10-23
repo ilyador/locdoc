@@ -8,7 +8,7 @@ import {
   writeVarString,
   toUint8Array,
 } from "lib0/encoding";
-import { api, ApiError, ownerSession } from "./api";
+import { api, ApiError, decodeState, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
 import { documentSession, type DocumentSession } from "./document-session";
 import { normalizePresence } from "./presence";
@@ -90,10 +90,7 @@ export function useDocument(
           );
         const ydoc = new Y.Doc();
         ydoc.getText("content");
-        Y.applyUpdate(
-          ydoc,
-          Uint8Array.from(atob(d.state), (c) => c.charCodeAt(0)),
-        );
+        Y.applyUpdate(ydoc, decodeState(d.state));
         const provider = new WebsocketProvider(
           `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
           id,

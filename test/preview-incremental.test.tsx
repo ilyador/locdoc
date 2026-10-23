@@ -473,6 +473,44 @@ test("selection changes reveal exactly the affected Markdown lines and blocks", 
   );
 });
 
+test("a setext heading styles each line of its text and hides its underline until a selection touches it", () => {
+  const source =
+    "Intro.\n\nTwo lines\nof title\n=====\nBody.\n\n> Quoted\n> -----\n\nTail.";
+  let state = create(source, { anchor: source.indexOf("Tail") });
+  const at = (text: string) => source.indexOf(text);
+  // The source that replace decorations hide, and the lines heading styles.
+  const hidden = (state: EditorState) =>
+    decorationRows(state)
+      .map((row) => JSON.parse(row) as { from: number; to: number } & object)
+      .filter((row) => Object.keys(row).length === 3)
+      .map((row) => state.sliceDoc(row.from, row.to));
+  const headings = (state: EditorState) =>
+    decorationRows(state)
+      .map((row) => JSON.parse(row) as { from: number; class?: string })
+      .filter((row) => /^md-h\d$/.test(row.class ?? ""))
+      .sort((a, b) => a.from - b.from)
+      .map((row) => `${row.class}@${row.from}`);
+  assert.deepEqual(headings(state), [
+    `md-h1@${at("Two lines")}`,
+    `md-h1@${at("of title")}`,
+    `md-h2@${at("> Quoted")}`,
+  ]);
+  assert.ok(hidden(state).includes("\n====="), "the underline hides");
+  assert.ok(hidden(state).includes("\n> -----"), "a quoted one too");
+  state = update(state, { selection: { anchor: at("of title") } }, "text");
+  assert.ok(!hidden(state).includes("\n====="), "its text reveals it");
+  assert.ok(hidden(state).includes("\n> -----"));
+  state = update(state, { selection: { anchor: at("=====") } }, "underline");
+  assert.ok(!hidden(state).includes("\n====="), "so does its own line");
+  state = update(state, { selection: { anchor: at("Body.") } }, "after");
+  assert.ok(hidden(state).includes("\n====="), "the next line is away");
+  state = update(state, { selection: { anchor: at("-----") } }, "quoted");
+  assert.ok(!hidden(state).includes("\n> -----"));
+  state = replace(state, "=====", "", "remove the underline");
+  assert.deepEqual(headings(state), [`md-h2@${at("> Quoted") - 5}`]);
+  replace(state, "of title\n", "of title\n---", "underline it again");
+});
+
 // The transaction a view dispatches when its focus changes.
 function focusChange(state: EditorState, focused: boolean): TransactionSpec {
   return {

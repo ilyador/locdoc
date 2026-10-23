@@ -8,6 +8,17 @@ export class ApiError extends Error {
     this.body = body;
   }
 }
+
+// A collaboration state as the API sends it, in base64. A loop over the
+// decoded string is many times faster than Uint8Array.from with a mapping
+// function, which made opening a long document wait.
+export function decodeState(state: string) {
+  const binary = atob(state);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 const SESSION_KEY = "locdoc.ownerSession";
 let volatileSession = "";
 

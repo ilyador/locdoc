@@ -80,6 +80,102 @@ test("notes and boneyards cannot create dialogue or alter relative offsets", () 
   assert.equal(script.lines.at(-1)!.kind, "action");
 });
 
+test("a note ends at a blank line, and a boneyard needs its */", () => {
+  const kinds = (source: string) =>
+    parseFountain(source).lines.map((line) => line.kind);
+  const spans = (source: string, key: "notes" | "omissions") =>
+    parseFountain(source)[key].map((range) =>
+      source.slice(range.from, range.to),
+    );
+  // A note being typed covers the rest of its paragraph, never the script.
+  const typing =
+    "She waits.[[Check this\nand this\n\nMAYA\nHello.\n\nEXT. ROOF - NIGHT";
+  assert.deepEqual(spans(typing, "notes"), ["[[Check this\nand this"]);
+  assert.deepEqual(kinds(typing), [
+    "action",
+    "note",
+    "blank",
+    "character",
+    "dialogue",
+    "blank",
+    "scene",
+  ]);
+  // A line of two spaces keeps the note going; a ]] past a blank line
+  // closes nothing.
+  assert.deepEqual(spans("[[One\n  \nTwo]]\n\nMAYA\nHi.", "notes"), [
+    "[[One\n  \nTwo]]",
+  ]);
+  for (const gap of ["\n\n", "\n \n", "\n\t\n"])
+    assert.deepEqual(
+      spans(`[[One${gap}MAYA\nHi.]]`, "notes"),
+      ["[[One"],
+      JSON.stringify(gap),
+    );
+  assert.equal(kinds("[[One\n\nMAYA\nHi.]]")[2], "character");
+  assert.deepEqual(spans("A [[short]] note.\n\n[[Own line]]", "notes"), [
+    "[[short]]",
+    "[[Own line]]",
+  ]);
+  // A /* without a */ is text, and the script after it keeps its elements.
+  const opened = "/* Cut from here\n\nINT. HOUSE - DAY\n\nMAYA\nHello.";
+  assert.deepEqual(spans(opened, "omissions"), []);
+  assert.deepEqual(kinds(opened), [
+    "action",
+    "blank",
+    "scene",
+    "blank",
+    "character",
+    "dialogue",
+  ]);
+  // A closed boneyard spans paragraphs; a later unclosed one is text.
+  const closed =
+    "/*\nINT. HIDDEN - DAY\n\nHIDDEN\nWords.\n*/\n\n/* Again\n\nMAYA\nHi.";
+  assert.deepEqual(spans(closed, "omissions"), [
+    "/*\nINT. HIDDEN - DAY\n\nHIDDEN\nWords.\n*/",
+  ]);
+  assert.deepEqual(kinds(closed).slice(-4), [
+    "action",
+    "blank",
+    "character",
+    "dialogue",
+  ]);
+});
+
+test("Hebrew scene headings start with פנים. or חוץ., and a Hebrew cue needs @", () => {
+  for (const heading of [
+    "פנים. בית - יום",
+    "חוץ. רחוב - לילה",
+    "פנים/חוץ. מכונית - יום",
+    "חוץ/פנים. מרפסת - ערב",
+    "פנים./חוץ. רכב - לילה",
+  ])
+    assert.equal(
+      parseFountain(`היא מחכה.\n\n${heading}\n\nהדלת נפתחת.`).lines[2].kind,
+      "scene",
+      heading,
+    );
+  // Without the period these are ordinary words, and a heading needs the
+  // blank line before it.
+  for (const action of [
+    "פנים רבות בקהל.",
+    "חוץ מזה, הכול שקט.",
+    "פנימה.",
+    "חוצה את הכביש.",
+  ])
+    assert.equal(parseFountain(action).lines[0].kind, "action", action);
+  assert.equal(
+    parseFountain("היא מחכה.\nפנים. בית - יום").lines[1].kind,
+    "action",
+  );
+  // Hebrew has no capitals: only @ makes a cue, and a name alone is action.
+  const script = parseFountain("@מאיה\nאיפה היית?\n\nמאיה\nאיפה היית?");
+  assert.deepEqual(
+    script.lines.map((line) => line.kind),
+    ["character", "dialogue", "blank", "action", "action"],
+  );
+  assert.equal(script.lines[0].text, "מאיה");
+});
+
 test("dual dialogue preserves its source marker and both speakers", () => {
   const script = parseFountain(
     "MORGAN\nHello.\n\nLEE ^\n(softly)\nHello too.\n\nANA ^\nAnother line.",
@@ -193,6 +289,51 @@ test("Fountain cue drafting follows focus and permissions without reparsing with
   }).state;
   assert.equal(script().lines[2].kind, "action");
   assert.equal(state.doc.toString(), source);
+});
+
+test("a new configuration, or a selection the preview does not reveal, keeps the parsed script and its layout", () => {
+  const source = "INT. HOUSE - DAY\n\nMAYA\nWhere were *you*?\n\n> THE END <";
+  const preview = new Compartment();
+  const access = new Compartment();
+  let state = EditorState.create({
+    doc: source,
+    extensions: [
+      preview.of(fountainPreview()),
+      access.of(EditorState.readOnly.of(false)),
+    ],
+  });
+  const script = state.facet(fountainScript);
+  const layout = () => [
+    ...state.facet(EditorView.decorations),
+    ...state.facet(EditorView.blockWrappers),
+  ];
+  const opened = layout();
+  const kept = (label: string) => {
+    assert.ok(state.facet(fountainScript) === script, `${label}: script`);
+    const now = layout();
+    assert.equal(now.length, opened.length, `${label}: layers`);
+    assert.ok(
+      now.every((set, i) => set === opened[i]),
+      `${label}: the layout is the same`,
+    );
+  };
+  // An editor applies its preview and permissions again as it mounts.
+  state = state.update({
+    effects: preview.reconfigure(fountainPreview()),
+  }).state;
+  kept("the same preview again");
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(false)),
+  }).state;
+  kept("the same permission again");
+  state = state.update({ selection: { anchor: source.indexOf("you") } }).state;
+  kept("a selection in an editor without focus");
+  state = state.update({
+    effects: access.reconfigure(EditorState.readOnly.of(true)),
+  }).state;
+  kept("read-only without focus");
+  state = state.update({ changes: { from: 0, insert: "!" } }).state;
+  assert.ok(state.facet(fountainScript) !== script, "an edit parses again");
 });
 
 test("file labels, names, document links and counts understand Fountain", () => {

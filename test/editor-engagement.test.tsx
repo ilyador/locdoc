@@ -162,6 +162,41 @@ test("a heading on the first line renders at open and focusing the editor reveal
   }
 });
 
+test("a setext heading shows its underline only while the selection is on the heading", () => {
+  const source = "Story\n=====\nA first beat.\n\nScene\n-----\nMore.";
+  const doc = open(source);
+  const click = (text: string, offset = 0) =>
+    act(() =>
+      doc.view.dispatch({
+        selection: { anchor: source.indexOf(text) + offset },
+        userEvent: "select.pointer",
+      }),
+    );
+  try {
+    assert.equal(doc.line(".cm-line.md-h1"), "Story", "= underlines a heading");
+    assert.equal(doc.line(".cm-line.md-h2"), "Scene", "- a smaller one");
+    assert.ok(!/[=-]{5}/.test(doc.shown()), "both underlines are hidden");
+    assert.equal(
+      doc.page.container.querySelectorAll(".md-rule").length,
+      0,
+      "an underline is no rule",
+    );
+    click("Story", 2);
+    assert.ok(doc.shown().includes("====="), "its text shows the underline");
+    assert.ok(!doc.shown().includes("-----"), "the other one stays hidden");
+    assert.equal(doc.line(".cm-line.md-h1"), "Story");
+    click("=====", 5);
+    assert.ok(doc.shown().includes("====="), "so does the underline's line");
+    click("Scene");
+    assert.ok(doc.shown().includes("-----"));
+    assert.ok(!doc.shown().includes("====="), "away, it hides again");
+    click("More.");
+    assert.ok(!/[=-]{5}/.test(doc.shown()), "the next line is away");
+  } finally {
+    doc.close();
+  }
+});
+
 test("Locdoc's own selections and remote edits reveal nothing; typing does", () => {
   const doc = open("Some **bold** words.\n\nA second paragraph.");
   try {
@@ -233,6 +268,65 @@ test("find reveals the line of each match it selects", () => {
     assert.equal(selected().split(":")[1], "Sand", "Enter steps to the next");
     assert.ok(doc.figure(), "the image renders again once find moves on");
     assert.equal(doc.line(".cm-line.md-h2"), "## Sand dunes");
+  } finally {
+    doc.close();
+  }
+});
+
+test("a new editor lays its document out once as it opens, and still applies later changes", (t) => {
+  // Every view binds its dispatch as it is built, from the prototype.
+  const dispatch = t.mock.method(EditorView.prototype, "dispatch");
+  const doc = open(
+    "INT. HOUSE - DAY\n\nMAYA\nWhere were you?",
+    "Writing/Plot.fountain",
+  );
+  try {
+    assert.equal(
+      dispatch.mock.callCount(),
+      0,
+      "its configuration is current and it has no comments to show",
+    );
+    // A permission change applies in the commit that shows it.
+    doc.page.rerender(<MarkdownEditor {...doc.props} editable={false} />);
+    assert.equal(doc.view.state.readOnly, true);
+    // A rename changes its format.
+    doc.page.rerender(
+      <MarkdownEditor {...doc.props} editable={false} path="Writing/Plot.md" />,
+    );
+    assert.ok(
+      doc.page.container.querySelector('[aria-label="Markdown document"]'),
+    );
+    // Comments that arrive show, and leave when they go.
+    const comment = {
+      id: "c1",
+      body: "A note",
+      name: "alex",
+      canResolve: true,
+      quote: null,
+      anchor: null,
+      created: 0,
+      resolved: false,
+      replies: [],
+    };
+    doc.page.rerender(
+      <MarkdownEditor
+        {...doc.props}
+        editable={false}
+        path="Writing/Plot.md"
+        comments={[comment]}
+      />,
+    );
+    assert.ok(doc.page.container.querySelector(".comment-marker"));
+    doc.page.rerender(
+      <MarkdownEditor
+        {...doc.props}
+        editable={false}
+        path="Writing/Plot.md"
+        comments={[]}
+      />,
+    );
+    assert.equal(doc.page.container.querySelector(".comment-marker"), null);
+    assert.equal(dispatch.mock.callCount(), 4, "one for each change");
   } finally {
     doc.close();
   }

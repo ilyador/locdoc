@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { decodeState as decode } from "./api.ts";
 import { plainText, type DraftArchive } from "./drafts.ts";
 
 export type RemovedRecovery = {
@@ -9,9 +10,6 @@ export type RemovedRecovery = {
   collaborationEpoch: string;
   updates: { state: string }[];
 };
-
-const decode = (state: string) =>
-  Uint8Array.from(atob(state), (character) => character.charCodeAt(0));
 
 // Reconstruct a download only. This document has no provider or persistence
 // observer, and cannot publish recovered drafts or revive an old share link.
