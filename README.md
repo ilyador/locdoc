@@ -209,6 +209,8 @@ The local owner key is never a connector credential. OAuth uses separate, expiri
 
 For access outside this computer, point your hostname at it and reverse-proxy HTTPS to `127.0.0.1:3477`. A standalone [Caddy example](deployment/Caddyfile.snippet) includes WebSocket support. Set `LOCDOC_PUBLIC_URL=https://notes.example.com` in `.env`, restart Locdoc, then run `npm run owner -- --public` on the server computer to recognize your browser as owner at that address.
 
+Locdoc compresses JSON, styles and scripts itself with Brotli or gzip, so the proxy does not need to. Images, videos and fonts are sent unchanged, so byte ranges and video seeking keep working, and pages too, whole for the crawlers that preview links. An open workspace asks for its document list every 4 seconds; when nothing changed, the server answers 304 with no body, so a phone that keeps a document open uses a few kilobytes a minute. The owner's tree and each folder link's view have separate tags, and a tag never stands in for access.
+
 Forward and allow **TCP 80 and 443** for the HTTPS proxy. On an already enabled UFW firewall, use `sudo ufw allow 80/tcp` and `sudo ufw allow 443/tcp`. **Do not expose port 3477** publicly. UDP 443 is optional for HTTP/3. DNS, certificates, router and firewall changes are managed separately from Locdoc.
 
 Choose **Share** in a document, or switch to the **Folders** tab and use the sharing icon beside a folder. A document's share dialog also offers **Share containing folder**.

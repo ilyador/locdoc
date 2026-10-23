@@ -155,6 +155,48 @@ test("a listing that finds no change keeps the tree the workspace shows", async 
   assert.ok(row("Doc 12.md"));
 });
 
+test("an unchanged tree is listed again by its tag, without a body, and the listing it names stands", async () => {
+  const api = await open("Doc 47.md");
+  const listings = () => api.calls.filter((call) => call.path === "/api/tree");
+  const first = listings()[0];
+  assert.equal(first.held, null, "the first listing names no tag");
+  const shown = workspace.entries;
+  await act(() => workspace.loadTree());
+  const again = listings().at(-1)!;
+  assert.ok(again.held?.startsWith('W/"'), "the next one names its tag");
+  assert.equal(again.unchanged, true, "and is answered without a body");
+  assert.ok(workspace.entries === shown, "the tree shown stays as it is");
+  assert.equal(workspace.error, "");
+  // A 304 confirms the listing the tag was given for, not whatever the
+  // sidebar shows meanwhile: a change the server never made is undone, as a
+  // full listing would undo it.
+  act(() =>
+    workspace.patchEntries((entries) =>
+      entries.filter((entry) => entry.path !== "Doc 12.md"),
+    ),
+  );
+  assert.equal(row("Doc 12.md"), null);
+  await act(() => workspace.loadTree());
+  assert.equal(listings().at(-1)!.unchanged, true);
+  assert.ok(
+    workspace.entries.some((entry) => entry.path === "Doc 12.md"),
+    "the listing the server confirmed is shown again",
+  );
+  assert.ok(row("Doc 12.md"));
+  // A changed tree comes in full, with a new tag, and is asked by that one.
+  api.items.find((item) => item.path === "Doc 12.md")!.modified = 2_000_000;
+  await act(() => workspace.loadTree());
+  const changed = listings().at(-1)!;
+  assert.equal(changed.unchanged, false);
+  assert.equal(
+    workspace.entries.find((entry) => entry.path === "Doc 12.md")!.modified,
+    2_000_000,
+  );
+  await act(() => workspace.loadTree());
+  assert.equal(listings().at(-1)!.unchanged, true);
+  assert.notEqual(listings().at(-1)!.held, again.held);
+});
+
 // The next document's workspace has mounted once its row is current and its
 // editor shows it.
 async function opened(path: string) {

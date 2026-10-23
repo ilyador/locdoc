@@ -3,7 +3,7 @@ import { SIDEBAR_MIN, SIDEBAR_MAX } from "./sidebar-resize";
 import { hasUnstoredDrafts } from "./drafts";
 import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
-import { api, ownerSession, send } from "./api";
+import { api, ownerSession, revalidate, send, type Kept } from "./api";
 import { normalizePresence } from "./presence";
 import { useFileActions } from "./file-actions";
 import {
@@ -201,15 +201,22 @@ export function useWorkspace() {
   const treeRequest = useRef(0);
   const treeApplied = useRef(0);
   const treeChanged = useRef(0);
+  // The last listing the server sent in full, with its tag. A tree that has
+  // not changed since is answered without a body and this one stands, as if
+  // it had been sent again.
+  const listed = useRef<Kept<{ entries: Entry[] }> | null>(null);
   const loadTree = useCallback(async () => {
     const request = ++treeRequest.current;
     const changed = treeChanged.current;
     try {
-      const { entries } = await api<{ entries: Entry[] }>(
+      const kept = await revalidate<{ entries: Entry[] }>(
         sharedToken && folderView.current
           ? `/api/tree?token=${encodeURIComponent(sharedToken)}`
           : "/api/tree",
+        listed.current,
       );
+      listed.current = kept;
+      const { entries } = kept.body;
       if (request < treeApplied.current || changed !== treeChanged.current)
         return;
       treeApplied.current = request;

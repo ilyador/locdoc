@@ -7,7 +7,7 @@ edition = "2024"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["fs", "set-header", "limit", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "set-header", "limit", "trace", "compression-gzip", "compression-br"] }
 yrs = { version = "=0.28.0", features = ["sync"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -38,6 +38,8 @@ rmcp = { version = "=3.5.0", default-features = false, features = ["server", "tr
 
 [dev-dependencies]
 tempfile = "3"
+flate2 = "1"
+brotli = "8"
 rusqlite = { version = "0.38", features = ["functions"] }
 
 [[bin]]
