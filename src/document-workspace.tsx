@@ -1,11 +1,13 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
 } from "react";
-import { IconContext, WarningCircle, X } from "@phosphor-icons/react";
+import { createPortal } from "react-dom";
+import { WarningCircle, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import { MarkdownEditor } from "./editor";
 import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
@@ -24,7 +26,6 @@ import {
 import { VersionHistory } from "./version-history";
 import { IconButton } from "./ui";
 import { documentFormat, documentName } from "./document-format";
-import { NamePrompt } from "./name-prompt";
 import { CommentConversation, useConversation } from "./document-conversation";
 import { DocumentFooter } from "./document-footer";
 import { DocumentFormatbar } from "./document-formatbar";
@@ -46,7 +47,8 @@ import {
 } from "./workspace-panels";
 import { baseName, within } from "./file-names";
 import { TrashedDocument, TrashedNotice } from "./trash";
-import { WorkspaceSidebar } from "./workspace-sidebar";
+import { SharedDocumentNote } from "./workspace-sidebar";
+import type { DocumentPort, Frame } from "./workspace-frame";
 import {
   EmptyWorkspace,
   OpeningDocument,
@@ -55,7 +57,13 @@ import {
 import { type Entry, sharedToken } from "./model";
 import type { Workspace } from "./workspace";
 
-export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
+export function DocumentWorkspace({
+  workspace,
+  frame,
+}: {
+  workspace: Workspace;
+  frame: Frame;
+}) {
   const {
     config,
     entries,
@@ -65,7 +73,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     saveName,
     sidebar,
     setSidebar,
-    sidebarWidth,
     loadTree,
     files,
   } = workspace;
@@ -170,7 +177,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setPanel("link");
   };
   const fileInput = useRef<HTMLInputElement>(null);
-  const searchInput = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const accessQuery = sharedToken
@@ -195,11 +201,6 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   }, [name, session]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setSidebar(true);
-        searchInput.current?.focus();
-      }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         tell("Changes save automatically.");
@@ -264,6 +265,25 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     setShareFolderPath(path);
     setPanel("folder-share");
   };
+  // The sidebar stays mounted as documents open; while this document is
+  // open, it acts through this render's handlers.
+  const port: DocumentPort = {
+    choose,
+    prepare: prepareNavigation,
+    shareFolder,
+    settings: () => setPanel("settings"),
+  };
+  const ports = frame.port;
+  const own = useRef<DocumentPort | null>(null);
+  useLayoutEffect(() => {
+    own.current = ports.current = port;
+  });
+  useLayoutEffect(
+    () => () => {
+      if (ports.current === own.current) ports.current = null;
+    },
+    [ports],
+  );
   const updateShare = async (permission: string, rotate = false) => {
     const result = await api<ShareAccess>(
       endpoint("/share"),
@@ -306,9 +326,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
         }}
       />
     );
+  // The document's appearance applies to its own part of the workspace.
   const style = {
-    "--sidebar-custom-width":
-      sidebarWidth === null ? undefined : `${sidebarWidth}px`,
     "--doc-font": documentFontFamily(font, fontCategory),
     "--doc-size": `${fontSize}px`,
     "--doc-line-height": lineHeight,
@@ -318,322 +337,306 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   } as CSSProperties;
 
   return (
-    <IconContext.Provider value={{ size: 18, weight: "regular" }}>
-      {workspace.needsName && <NamePrompt onChoose={workspace.chooseName} />}
-      <div className={`app ${sidebar ? "with-sidebar" : ""}`} style={style}>
-        <button
-          className="sidebar-scrim"
-          aria-label="Close sidebar"
-          aria-hidden={!sidebar}
-          inert={!sidebar}
-          tabIndex={-1}
-          onClick={() => setSidebar(false)}
-        />
-        <WorkspaceSidebar
-          workspace={workspace}
+    <>
+      {sharedToken &&
+        doc &&
+        !config?.folder &&
+        frame.note &&
+        createPortal(
+          <SharedDocumentNote doc={doc} filename={filename} />,
+          frame.note,
+        )}
+      <main className="workspace" style={style}>
+        <DocumentTopbar
           doc={doc}
+          path={path}
           filename={filename}
-          searchInput={searchInput}
-          choose={choose}
-          prepare={prepareNavigation}
-          onCreate={openCreate}
-          onShareFolder={shareFolder}
-          onSettings={() => setPanel("settings")}
+          people={people}
+          sidebar={sidebar}
+          openSidebar={() => setSidebar(true)}
+          commentsOpen={thread.commentsOpen}
+          toggleComments={thread.toggle}
+          share={trashed ? undefined : () => setPanel("share")}
         />
-        <main className="workspace">
-          <DocumentTopbar
-            doc={doc}
-            path={path}
-            filename={filename}
-            people={people}
-            sidebar={sidebar}
-            openSidebar={() => setSidebar(true)}
-            commentsOpen={thread.commentsOpen}
-            toggleComments={thread.toggle}
-            share={trashed ? undefined : () => setPanel("share")}
+        {storageWarning && (
+          <div className="storage-notice" role="status">
+            {storageWarning}
+          </div>
+        )}
+        {trashed && doc && <TrashedNotice files={files} item={trashed.item} />}
+        <DraftRecoveryNotice
+          records={recovery}
+          dismiss={clearRecovery}
+          onError={setError}
+        />
+        {error && (
+          <div className="error-banner" role="alert">
+            <WarningCircle />
+            <span>{error}</span>
+            <button onClick={() => location.reload()}>Reload</button>
+          </div>
+        )}
+        {doc && (
+          <DocumentFormatbar
+            editable={doc.edit}
+            format={format}
+            font={font}
+            fontSize={fontSize}
+            setFontSize={setFontSize}
+            appearanceOpen={panel === "appearance"}
+            toggleAppearance={toggleAppearance}
+            appearanceTrigger={appearanceTrigger}
+            optionsOpen={panel === "document"}
+            openOptions={() => setPanel("document")}
+            formatFountain={(kind) => editor.current?.formatFountain(kind)}
+            tools={formattingTools()}
           />
-          {storageWarning && (
-            <div className="storage-notice" role="status">
-              {storageWarning}
-            </div>
-          )}
-          {trashed && doc && (
-            <TrashedNotice files={files} item={trashed.item} />
-          )}
-          <DraftRecoveryNotice
-            records={recovery}
-            dismiss={clearRecovery}
-            onError={setError}
-          />
-          {error && (
-            <div className="error-banner" role="alert">
-              <WarningCircle />
-              <span>{error}</span>
-              <button onClick={() => location.reload()}>Reload</button>
-            </div>
-          )}
-          {doc && (
-            <DocumentFormatbar
-              editable={doc.edit}
-              format={format}
-              font={font}
-              fontSize={fontSize}
-              setFontSize={setFontSize}
-              appearanceOpen={panel === "appearance"}
-              toggleAppearance={toggleAppearance}
-              appearanceTrigger={appearanceTrigger}
-              optionsOpen={panel === "document"}
-              openOptions={() => setPanel("document")}
-              formatFountain={(kind) => editor.current?.formatFountain(kind)}
-              tools={formattingTools()}
+        )}
+        <div
+          className={`document-layout ${panel === "appearance" ? "with-appearance" : ""}`}
+        >
+          {panel === "appearance" && (
+            <AppearancePanel
+              owner={!!config?.owner}
+              value={appearance}
+              onClose={() => {
+                setPanel(null);
+                appearanceTrigger.current?.focus({ preventScroll: true });
+              }}
             />
           )}
-          <div
-            className={`document-layout ${panel === "appearance" ? "with-appearance" : ""}`}
-          >
-            {panel === "appearance" && (
-              <AppearancePanel
-                owner={!!config?.owner}
-                value={appearance}
-                onClose={() => {
+          {trashed && !doc ? (
+            <TrashedDocument
+              files={files}
+              item={trashed.item}
+              path={trashed.path}
+            />
+          ) : !config ||
+            (!doc &&
+              !error &&
+              Boolean((sharedToken && !config.folder) || id)) ? (
+            <OpeningDocument />
+          ) : !config.owner && !sharedToken ? (
+            <OwnerWelcome onOpen={() => setPanel("login")} />
+          ) : !doc ? (
+            <EmptyWorkspace
+              config={config}
+              error={error}
+              onCreate={() => openCreate("file")}
+            />
+          ) : (
+            <div className="writing-pane">
+              <div
+                className="document-canvas"
+                onClick={(event) => {
+                  // Native editor selections and media controls own their clicks.
+                  if (event.target === event.currentTarget)
+                    editor.current?.focus();
+                }}
+              >
+                {session ? (
+                  <div>
+                    <MarkdownEditor
+                      key={session.ydoc.clientID}
+                      ref={editor}
+                      {...session}
+                      editable={doc.edit}
+                      id={doc.id}
+                      scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
+                      token={doc.mediaToken || sharedToken}
+                      owner={doc.owner}
+                      mediaRetry={mediaRetry}
+                      path={doc.path}
+                      entries={entries}
+                      onLink={setLinkTarget}
+                      onInsertLink={markdown ? startLink : undefined}
+                      onIntegrityError={setError}
+                      onComment={thread.start}
+                      onUpload={
+                        markdown
+                          ? upload
+                          : () =>
+                              tell(
+                                "Use a Markdown document for images and videos.",
+                              )
+                      }
+                      comments={comments}
+                      activeComment={currentComment?.id}
+                      commentDraft={selection}
+                      onOpenComment={thread.open}
+                      conversation={
+                        conversation && (
+                          <CommentConversation
+                            thread={thread}
+                            busy={busy}
+                            editable={!!doc?.edit}
+                          />
+                        )
+                      }
+                    />
+                  </div>
+                ) : (
+                  <div className="loading-surface">
+                    <div className="loading-line" />
+                    <div className="loading-line" />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+        <DocumentFooter
+          status={status}
+          doc={doc}
+          id={id}
+          text={session?.ydoc.getText("content")}
+        />
+        <input
+          ref={fileInput}
+          className="visually-hidden"
+          type="file"
+          accept="image/png,image/jpeg,image/gif,image/webp,image/avif,video/mp4,video/webm,video/quicktime"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) upload(f);
+            e.target.value = "";
+          }}
+        />
+        <dialog
+          ref={dialog}
+          aria-labelledby="panel-title"
+          className="dialog"
+          onCancel={() => setPanel(null)}
+          onClick={(e) => {
+            if (e.target === dialog.current) setPanel(null);
+          }}
+        >
+          <div className="dialog-content">
+            <div className="dialog-heading">
+              <h2 id="panel-title">{panelTitle(panel)}</h2>
+              <IconButton label="Close dialog" onClick={() => setPanel(null)}>
+                <X size={18} />
+              </IconButton>
+            </div>
+            {panel === "link" && doc?.edit && (
+              <LinkPicker
+                entries={entries}
+                selection={linkSelection?.quote || ""}
+                onInsert={(url, label) => {
+                  editor.current?.insertLink(
+                    url,
+                    label,
+                    linkSelection?.anchor || null,
+                  );
                   setPanel(null);
-                  appearanceTrigger.current?.focus({ preventScroll: true });
+                  requestAnimationFrame(() => editor.current?.focus());
                 }}
               />
             )}
-            {trashed && !doc ? (
-              <TrashedDocument
-                files={files}
-                item={trashed.item}
-                path={trashed.path}
+            {panel === "share" && doc && !trashed && (
+              <DocumentSharePanel
+                doc={doc}
+                filename={filename}
+                name={name}
+                onChange={updateShare}
+                onShareFolder={shareFolder}
               />
-            ) : !config ||
-              (!doc &&
-                !error &&
-                Boolean((sharedToken && !config.folder) || id)) ? (
-              <OpeningDocument />
-            ) : !config.owner && !sharedToken ? (
-              <OwnerWelcome onOpen={() => setPanel("login")} />
-            ) : !doc ? (
-              <EmptyWorkspace
+            )}
+            {panel === "folder-share" && config?.owner && shareFolderPath && (
+              <FolderShare
+                key={shareFolderPath}
+                path={shareFolderPath}
+                name={name}
+                onChanged={loadTree}
+              />
+            )}
+            {panel === "login" && (
+              <OwnerLoginForm
+                apiKey={apiKey}
+                setApiKey={setApiKey}
+                busy={busy}
+                onSubmit={login}
+              />
+            )}
+            {panel === "settings" && (
+              <WorkspaceSettings
                 config={config}
-                error={error}
-                onCreate={() => openCreate("file")}
+                id={id}
+                doc={doc}
+                session={session}
+                endpoint={endpoint}
+                name={name}
+                saveName={saveName}
+                files={files}
+                toggleAppearance={toggleAppearance}
+                lock={() =>
+                  action(async () => {
+                    await api("/api/logout", send("POST"));
+                    location.href = "/";
+                  })
+                }
               />
-            ) : (
-              <div className="writing-pane">
-                <div
-                  className="document-canvas"
-                  onClick={(event) => {
-                    // Native editor selections and media controls own their clicks.
-                    if (event.target === event.currentTarget)
-                      editor.current?.focus();
-                  }}
-                >
-                  {session ? (
-                    <div>
-                      <MarkdownEditor
-                        key={session.ydoc.clientID}
-                        ref={editor}
-                        {...session}
-                        editable={doc.edit}
-                        id={doc.id}
-                        scrollKey={`locdoc.scroll.${config.owner ? "owner" : config.guest}.${doc.id}`}
-                        token={doc.mediaToken || sharedToken}
-                        owner={doc.owner}
-                        mediaRetry={mediaRetry}
-                        path={doc.path}
-                        entries={entries}
-                        onLink={setLinkTarget}
-                        onInsertLink={markdown ? startLink : undefined}
-                        onIntegrityError={setError}
-                        onComment={thread.start}
-                        onUpload={
-                          markdown
-                            ? upload
-                            : () =>
-                                tell(
-                                  "Use a Markdown document for images and videos.",
-                                )
-                        }
-                        comments={comments}
-                        activeComment={currentComment?.id}
-                        commentDraft={selection}
-                        onOpenComment={thread.open}
-                        conversation={
-                          conversation && (
-                            <CommentConversation
-                              thread={thread}
-                              busy={busy}
-                              editable={!!doc?.edit}
-                            />
-                          )
-                        }
-                      />
-                    </div>
-                  ) : (
-                    <div className="loading-surface">
-                      <div className="loading-line" />
-                      <div className="loading-line" />
-                    </div>
-                  )}
-                </div>
-              </div>
+            )}
+            {panel === "history" && doc && (
+              <VersionHistory
+                endpoint={endpoint}
+                onRestore={() => {
+                  setPanel(null);
+                  tell(
+                    "Version restored. Your previous text was kept in history.",
+                  );
+                }}
+              />
+            )}
+            {panel === "document" && doc && (
+              <DocumentOptions
+                doc={doc}
+                format={format}
+                endpoint={endpoint()}
+                formatting={formattingTools(true)}
+                onDownload={() => {
+                  downloadDocument(doc, session);
+                  setPanel(null);
+                }}
+                onHistory={() => setPanel("history")}
+                onRename={(path) => {
+                  setDoc((doc) => (doc ? { ...doc, path } : doc));
+                  files.renamed(doc.id, path);
+                  setPanel(null);
+                }}
+              />
             )}
           </div>
-          <DocumentFooter
-            status={status}
-            doc={doc}
-            id={id}
-            text={session?.ydoc.getText("content")}
-          />
-          <input
-            ref={fileInput}
-            className="visually-hidden"
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/avif,video/mp4,video/webm,video/quicktime"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) upload(f);
-              e.target.value = "";
-            }}
-          />
-          <dialog
-            ref={dialog}
-            aria-labelledby="panel-title"
-            className="dialog"
-            onCancel={() => setPanel(null)}
-            onClick={(e) => {
-              if (e.target === dialog.current) setPanel(null);
-            }}
-          >
-            <div className="dialog-content">
-              <div className="dialog-heading">
-                <h2 id="panel-title">{panelTitle(panel)}</h2>
-                <IconButton label="Close dialog" onClick={() => setPanel(null)}>
-                  <X size={18} />
-                </IconButton>
-              </div>
-              {panel === "link" && doc?.edit && (
-                <LinkPicker
-                  entries={entries}
-                  selection={linkSelection?.quote || ""}
-                  onInsert={(url, label) => {
-                    editor.current?.insertLink(
-                      url,
-                      label,
-                      linkSelection?.anchor || null,
-                    );
-                    setPanel(null);
-                    requestAnimationFrame(() => editor.current?.focus());
-                  }}
-                />
-              )}
-              {panel === "share" && doc && !trashed && (
-                <DocumentSharePanel
-                  doc={doc}
-                  filename={filename}
-                  name={name}
-                  onChange={updateShare}
-                  onShareFolder={shareFolder}
-                />
-              )}
-              {panel === "folder-share" && config?.owner && shareFolderPath && (
-                <FolderShare
-                  key={shareFolderPath}
-                  path={shareFolderPath}
-                  name={name}
-                  onChanged={loadTree}
-                />
-              )}
-              {panel === "login" && (
-                <OwnerLoginForm
-                  apiKey={apiKey}
-                  setApiKey={setApiKey}
-                  busy={busy}
-                  onSubmit={login}
-                />
-              )}
-              {panel === "settings" && (
-                <WorkspaceSettings
-                  config={config}
-                  id={id}
-                  doc={doc}
-                  session={session}
-                  endpoint={endpoint}
-                  name={name}
-                  saveName={saveName}
-                  files={files}
-                  toggleAppearance={toggleAppearance}
-                  lock={() =>
-                    action(async () => {
-                      await api("/api/logout", send("POST"));
-                      location.href = "/";
-                    })
-                  }
-                />
-              )}
-              {panel === "history" && doc && (
-                <VersionHistory
-                  endpoint={endpoint}
-                  onRestore={() => {
-                    setPanel(null);
-                    tell(
-                      "Version restored. Your previous text was kept in history.",
-                    );
-                  }}
-                />
-              )}
-              {panel === "document" && doc && (
-                <DocumentOptions
-                  doc={doc}
-                  format={format}
-                  endpoint={endpoint()}
-                  formatting={formattingTools(true)}
-                  onDownload={() => {
-                    downloadDocument(doc, session);
-                    setPanel(null);
-                  }}
-                  onHistory={() => setPanel("history")}
-                  onRename={(path) => {
-                    setDoc((doc) => (doc ? { ...doc, path } : doc));
-                    files.renamed(doc.id, path);
-                    setPanel(null);
-                  }}
-                />
-              )}
-            </div>
-          </dialog>
-        </main>
-        {linkTarget && doc && (
-          <LinkPreview
-            key={linkTarget.url}
-            target={linkTarget}
-            source={doc.id}
-            token={sharedToken}
-            onClose={closeLink}
-            onDocument={(next) => {
-              if (sharedToken && !config?.folder) {
-                void session?.drafts
-                  .flush()
-                  .then(() => location.assign(`/d/${next}`))
-                  .catch(() =>
-                    setError(
-                      "Could not store unsaved changes. Keep this document open until connected.",
-                    ),
-                  );
-              } else void openDocument(next);
-            }}
-          />
-        )}
-        <div className="toast-region">
-          <Toast message={toast} onDismiss={dismiss} />
-          <FileActionToast files={files} />
-        </div>
-        <div className="visually-hidden" aria-live="polite" aria-atomic="true">
-          <span key={files.announcement.seq}>{files.announcement.text}</span>
-        </div>
+        </dialog>
+      </main>
+      {linkTarget && doc && (
+        <LinkPreview
+          key={linkTarget.url}
+          target={linkTarget}
+          source={doc.id}
+          token={sharedToken}
+          onClose={closeLink}
+          onDocument={(next) => {
+            if (sharedToken && !config?.folder) {
+              void session?.drafts
+                .flush()
+                .then(() => location.assign(`/d/${next}`))
+                .catch(() =>
+                  setError(
+                    "Could not store unsaved changes. Keep this document open until connected.",
+                  ),
+                );
+            } else void openDocument(next);
+          }}
+        />
+      )}
+      <div className="toast-region">
+        <Toast message={toast} onDismiss={dismiss} />
+        <FileActionToast files={files} />
       </div>
-    </IconContext.Provider>
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        <span key={files.announcement.seq}>{files.announcement.text}</span>
+      </div>
+    </>
   );
 }

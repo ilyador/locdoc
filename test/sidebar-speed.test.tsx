@@ -4,8 +4,8 @@ import { JSDOM } from "jsdom";
 import React from "react";
 
 // A workspace of hundreds of documents, as the owner's sidebar lists it. The
-// sidebar renders whenever the open document changes and mounts again for
-// each document, so its work must not grow with every row on each render.
+// sidebar renders again for every change to the workspace, so its work must
+// not grow with every row it lists on each render.
 let render, cleanup, act;
 let DocumentSidebar, useFileActions;
 before(async () => {

@@ -15,10 +15,41 @@ import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document, type Entry } from "./model";
 import type { Workspace } from "./workspace";
 
-export function WorkspaceSidebar({
-  workspace,
+// What a shared document's link lets its visitor do, in the sidebar of a
+// link to a single document. The document's own workspace shows it, through
+// the sidebar's `note`.
+export function SharedDocumentNote({
   doc,
   filename,
+}: {
+  doc: Document;
+  filename: string;
+}) {
+  return (
+    <div className="shared-sidebar">
+      <FileText />
+      <strong className="doc-label">
+        <span className="doc-title" dir="auto">
+          {filename}
+        </span>{" "}
+        <span className="doc-extension">{documentExtension(doc.path)}</span>
+      </strong>
+      <p>
+        {doc.edit
+          ? "You can edit this document and leave comments."
+          : "You can read this document and leave comments."}
+      </p>
+      <span className="subtle-label">
+        <GlobeSimple size={14} />
+        Anyone with this link
+      </span>
+    </div>
+  );
+}
+
+export function WorkspaceSidebar({
+  workspace,
+  note,
   searchInput,
   choose,
   prepare,
@@ -27,8 +58,8 @@ export function WorkspaceSidebar({
   onSettings,
 }: {
   workspace: Workspace;
-  doc: Document | null;
-  filename: string;
+  // Where the open document's workspace shows its note, if it has one.
+  note?: (element: HTMLElement | null) => void;
   searchInput: RefObject<HTMLInputElement | null>;
   choose: (entry: Entry) => void;
   prepare: () => Promise<void>;
@@ -151,25 +182,8 @@ export function WorkspaceSidebar({
           )}
         </>
       )}
-      {sharedToken && doc && !config?.folder && (
-        <div className="shared-sidebar">
-          <FileText />
-          <strong className="doc-label">
-            <span className="doc-title" dir="auto">
-              {filename}
-            </span>{" "}
-            <span className="doc-extension">{documentExtension(doc.path)}</span>
-          </strong>
-          <p>
-            {doc.edit
-              ? "You can edit this document and leave comments."
-              : "You can read this document and leave comments."}
-          </p>
-          <span className="subtle-label">
-            <GlobeSimple size={14} />
-            Anyone with this link
-          </span>
-        </div>
+      {note && sharedToken && !config?.folder && (
+        <div ref={note} style={{ display: "contents" }} />
       )}
       <div className="sidebar-bottom">
         <div className="local-note">

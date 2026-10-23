@@ -518,8 +518,7 @@ test("a folder link visitor's tree keeps its place and keyboard focus as the nex
       : response({ entries: shared });
   localStorage.setItem("locdoc.sidebarView", "date");
   let workspace;
-  // Like WorkspaceView, which mounts a new DocumentWorkspace, and with it the
-  // sidebar, for every document.
+  // A sidebar that mounts again for every document keeps its place too.
   function Visitor() {
     workspace = useWorkspace();
     return (

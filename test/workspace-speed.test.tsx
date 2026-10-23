@@ -8,7 +8,7 @@ import { fileApi } from "./fixtures/file-api.ts";
 // The owner's whole workspace, as the browser mounts it. The tree is listed
 // again every four seconds while a document is open; what the workspace
 // does with a listing decides how much renders again while the owner types.
-let render, screen, waitFor, cleanup, act;
+let render, screen, waitFor, cleanup, act, fireEvent;
 let WorkspaceView, useWorkspace;
 let workspace;
 
@@ -82,7 +82,7 @@ before(async () => {
     onclose;
   } as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, screen, waitFor, cleanup, act } =
+  ({ render, screen, waitFor, cleanup, act, fireEvent } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
   ({ useWorkspace } = await import("../src/workspace.ts"));
@@ -153,4 +153,42 @@ test("a listing that finds no change keeps the tree the workspace shows", async 
     "the saved document moves to the top of By date",
   );
   assert.ok(row("Doc 12.md"));
+});
+
+// The next document's workspace has mounted once its row is current and its
+// editor shows it.
+async function opened(path: string) {
+  await waitFor(() => assert.equal(workspace.id, idOf(path)));
+  await waitFor(() =>
+    assert.equal(row(path).getAttribute("aria-current"), "page"),
+  );
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("textbox", { name: "Markdown document" })),
+  );
+}
+
+test("opening a document keeps the sidebar and the rows it lists", async () => {
+  await open("Doc 47.md");
+  const sidebar = document.querySelector(".sidebar");
+  const listed = row("Doc 40.md");
+  fireEvent.click(row("Doc 30.md"));
+  await opened("Doc 30.md");
+  assert.ok(
+    document.querySelector(".sidebar") === sidebar,
+    "the sidebar stays mounted",
+  );
+  assert.ok(
+    row("Doc 40.md") === listed,
+    "the rows of other documents are not built again",
+  );
+  assert.equal(row("Doc 47.md").getAttribute("aria-current"), null);
+  // The keyboard shortcut still finds the sidebar's search, opening it.
+  act(() => workspace.setSidebar(false));
+  fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+  assert.equal(workspace.sidebar, true);
+  assert.ok(
+    document.activeElement ===
+      screen.getByRole("textbox", { name: "Find a document" }),
+    "Ctrl K focuses the search",
+  );
 });

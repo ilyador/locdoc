@@ -167,8 +167,8 @@ export function useWorkspace() {
       // Both views remain available without storage.
     }
   }, [sidebarView]);
-  // The sidebar mounts again with each document's workspace, and its list
-  // takes its scroll position back from here.
+  // How far the sidebar's list is scrolled in each view; a list that mounts
+  // again takes its position back from here.
   const sidebarScroll = useRef<SidebarScroll>({
     date: 0,
     folders: 0,

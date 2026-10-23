@@ -23,9 +23,9 @@ const views = [
 ] as const;
 
 // What the sidebar lists for a tree and a search: the matching documents,
-// and every entry a match makes visible, by folder. A listing stays the same
-// object until the tree changes, so it is worked out once for it, also when
-// the sidebar mounts again for another document.
+// and every entry a match makes visible, by folder. The tree stays the same
+// object until it changes, so this is worked out once for it, however often
+// the sidebar renders.
 type Listing = {
   entries: Entry[];
   needle: string;
@@ -113,8 +113,8 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
-  // Where the list was scrolled, kept by the workspace while this sidebar
-  // mounts again for each document.
+  // Where the list was scrolled, kept by the workspace for a sidebar that
+  // mounts again.
   scroll?: SidebarScroll;
   expanded: Set<string>;
   toggleFolder: (path: string) => void;
@@ -154,9 +154,8 @@ export function DocumentSidebar({
     if (focused && focused !== list && list.contains(focused))
       focused.scrollIntoView?.({ block: "nearest" });
   }, [showing]);
-  // Each document's workspace mounts this sidebar again. The list takes its
-  // position back before it paints and keeps it as it goes, so opening a
-  // document leaves the list where it was.
+  // A list that mounts again takes its position back before it paints and
+  // keeps it as it goes.
   useLayoutEffect(() => {
     const list = panel.current!;
     list.scrollTop = places[shown.current.slot];

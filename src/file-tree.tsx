@@ -87,9 +87,9 @@ type RowHandlers = {
   element: (path: string, element: HTMLLIElement | null) => void;
 };
 
-// One row of the tree. A workspace lists a thousand of them and the sidebar
-// renders whenever the open document changes, so a row renders again only
-// when something it shows changes.
+// One row of the tree. A workspace lists a thousand of them and the tree
+// renders again for each change to the workspace, so a row renders again
+// only when something it shows changes.
 const TreeEntry = memo(function TreeEntry({
   entry: e,
   depth,
