@@ -273,6 +273,65 @@ test("find reveals the line of each match it selects", () => {
   }
 });
 
+test("a new editor lays its document out once as it opens, and still applies later changes", (t) => {
+  // Every view binds its dispatch as it is built, from the prototype.
+  const dispatch = t.mock.method(EditorView.prototype, "dispatch");
+  const doc = open(
+    "INT. HOUSE - DAY\n\nMAYA\nWhere were you?",
+    "Writing/Plot.fountain",
+  );
+  try {
+    assert.equal(
+      dispatch.mock.callCount(),
+      0,
+      "its configuration is current and it has no comments to show",
+    );
+    // A permission change applies in the commit that shows it.
+    doc.page.rerender(<MarkdownEditor {...doc.props} editable={false} />);
+    assert.equal(doc.view.state.readOnly, true);
+    // A rename changes its format.
+    doc.page.rerender(
+      <MarkdownEditor {...doc.props} editable={false} path="Writing/Plot.md" />,
+    );
+    assert.ok(
+      doc.page.container.querySelector('[aria-label="Markdown document"]'),
+    );
+    // Comments that arrive show, and leave when they go.
+    const comment = {
+      id: "c1",
+      body: "A note",
+      name: "alex",
+      canResolve: true,
+      quote: null,
+      anchor: null,
+      created: 0,
+      resolved: false,
+      replies: [],
+    };
+    doc.page.rerender(
+      <MarkdownEditor
+        {...doc.props}
+        editable={false}
+        path="Writing/Plot.md"
+        comments={[comment]}
+      />,
+    );
+    assert.ok(doc.page.container.querySelector(".comment-marker"));
+    doc.page.rerender(
+      <MarkdownEditor
+        {...doc.props}
+        editable={false}
+        path="Writing/Plot.md"
+        comments={[]}
+      />,
+    );
+    assert.equal(doc.page.container.querySelector(".comment-marker"), null);
+    assert.equal(dispatch.mock.callCount(), 4, "one for each change");
+  } finally {
+    doc.close();
+  }
+});
+
 test("a new preview configuration keeps the user's engagement", () => {
   const doc = open("# Title\n\nSee [the other](Other.md).");
   try {
