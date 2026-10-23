@@ -1,0 +1,156 @@
+import { before, after, afterEach, test } from "node:test";
+import assert from "node:assert/strict";
+import { JSDOM } from "jsdom";
+import "fake-indexeddb/auto";
+import React from "react";
+import { fileApi } from "./fixtures/file-api.ts";
+
+// The owner's whole workspace, as the browser mounts it. The tree is listed
+// again every four seconds while a document is open; what the workspace
+// does with a listing decides how much renders again while the owner types.
+let render, screen, waitFor, cleanup, act;
+let WorkspaceView, useWorkspace;
+let workspace;
+
+before(async () => {
+  const dom = new JSDOM(
+    "<!doctype html><html><head></head><body></body></html>",
+    { url: "http://localhost/", pretendToBeVisual: true },
+  );
+  for (const key of [
+    "window",
+    "Window",
+    "document",
+    "location",
+    "history",
+    "localStorage",
+    "navigator",
+    "Node",
+    "Element",
+    "HTMLElement",
+    "HTMLVideoElement",
+    "MutationObserver",
+    "DOMRect",
+    "getComputedStyle",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
+  ])
+    Object.defineProperty(globalThis, key, {
+      value:
+        typeof dom.window[key] === "function" &&
+        [
+          "getComputedStyle",
+          "requestAnimationFrame",
+          "cancelAnimationFrame",
+        ].includes(key)
+          ? dom.window[key].bind(dom.window)
+          : dom.window[key],
+      configurable: true,
+      writable: true,
+    });
+  window.matchMedia = () =>
+    ({
+      matches: false,
+      addEventListener() {},
+      removeEventListener() {},
+    }) as any;
+  window.HTMLDialogElement.prototype.showModal = function () {
+    this.open = true;
+  };
+  window.HTMLDialogElement.prototype.close = function () {
+    this.open = false;
+  };
+  window.Range.prototype.getClientRects = () => [] as any;
+  window.Range.prototype.getBoundingClientRect = () => new window.DOMRect();
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as any;
+  // Document sockets never open here; tests drive the HTTP contract.
+  globalThis.WebSocket = class {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    static CLOSING = 2;
+    static CLOSED = 3;
+    readyState = 0;
+    send() {}
+    close() {
+      this.readyState = 3;
+      this.onclose?.({});
+    }
+    onclose;
+  } as any;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  ({ render, screen, waitFor, cleanup, act } =
+    await import("@testing-library/react"));
+  ({ WorkspaceView } = await import("../src/app.tsx"));
+  ({ useWorkspace } = await import("../src/workspace.ts"));
+});
+afterEach(() => {
+  cleanup();
+  for (const key of ["locdoc.sidebarView", "locdoc.document", "locdoc.sidebar"])
+    localStorage.removeItem(key);
+});
+after(() => window.close());
+
+function App() {
+  workspace = useWorkspace();
+  return <WorkspaceView workspace={workspace} />;
+}
+const files = [
+  "Notes/",
+  ...Array.from(
+    { length: 12 },
+    (_, n) => `Notes/Note ${String(n).padStart(2, "0")}.md`,
+  ),
+  ...Array.from(
+    { length: 48 },
+    (_, n) => `Doc ${String(n).padStart(2, "0")}.md`,
+  ),
+];
+const idOf = (path: string) => path.replace(/\W+/g, "-").toLowerCase();
+const row = (path: string) =>
+  document.querySelector<HTMLElement>(
+    `[role="treeitem"][data-path="${path}"]`,
+  )!;
+async function open(document: string) {
+  const api = fileApi(files);
+  globalThis.fetch = api.fetch as typeof fetch;
+  localStorage.setItem("locdoc.sidebarView", "date");
+  localStorage.setItem("locdoc.document", idOf(document));
+  localStorage.setItem("locdoc.sidebar", "open");
+  render(<App />);
+  await waitFor(() => assert.ok(workspace.entries.length));
+  await waitFor(() =>
+    assert.ok(screen.queryByRole("textbox", { name: "Markdown document" })),
+  );
+  return api;
+}
+
+test("a listing that finds no change keeps the tree the workspace shows", async () => {
+  const api = await open("Doc 47.md");
+  const shown = workspace.entries;
+  await act(() => workspace.loadTree());
+  assert.ok(
+    workspace.entries === shown,
+    "an unchanged listing changes nothing that depends on the tree",
+  );
+  // Saving a document changes its time; the other entries stay as they were.
+  api.items.find((item) => item.path === "Doc 12.md")!.modified = 2_000_000;
+  await act(() => workspace.loadTree());
+  const listed = workspace.entries;
+  assert.ok(listed !== shown, "a changed listing is shown");
+  const saved = listed.find((entry) => entry.path === "Doc 12.md")!;
+  assert.equal(saved.modified, 2_000_000);
+  assert.ok(
+    listed.every((entry) => entry === saved || shown.includes(entry)),
+    "every other entry keeps its object",
+  );
+  assert.equal(
+    document.querySelector('[role="treeitem"]')!.getAttribute("data-path"),
+    "Doc 12.md",
+    "the saved document moves to the top of By date",
+  );
+  assert.ok(row("Doc 12.md"));
+});
