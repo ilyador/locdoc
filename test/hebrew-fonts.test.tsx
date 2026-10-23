@@ -33,41 +33,66 @@ test("each document font is followed by a Hebrew face that pairs with it", () =>
     [
       "JetBrains Mono",
       "",
-      '"JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace',
+      '"Locdoc Shapes", "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace',
     ],
     [
       "Courier Prime",
       "",
-      '"Courier Prime", "Locdoc Hebrew Typewriter", ui-monospace, monospace',
+      '"Locdoc Shapes", "Courier Prime", "Locdoc Hebrew Typewriter", ui-monospace, monospace',
     ],
-    ["IBM Plex Sans", "", '"IBM Plex Sans", "Locdoc Hebrew Sans", sans-serif'],
+    [
+      "IBM Plex Sans",
+      "",
+      '"Locdoc Shapes", "IBM Plex Sans", "Locdoc Hebrew Sans", sans-serif',
+    ],
     [
       "DM Sans",
       "",
-      '"DM Sans Variable", "Locdoc Hebrew Geometric", sans-serif',
+      '"Locdoc Shapes", "DM Sans Variable", "Locdoc Hebrew Geometric", sans-serif',
     ],
-    ["Lora", "", '"Lora", "Locdoc Hebrew Serif", Georgia, serif'],
-    ["Georgia", "", '"Georgia", "Locdoc Hebrew Serif", Georgia, serif'],
-    ["monospace", "", 'ui-monospace, "Locdoc Hebrew Mono", monospace'],
+    [
+      "Lora",
+      "",
+      '"Locdoc Shapes", "Lora", "Locdoc Hebrew Serif", Georgia, serif',
+    ],
+    [
+      "Georgia",
+      "",
+      '"Locdoc Shapes", "Georgia", "Locdoc Hebrew Serif", Georgia, serif',
+    ],
+    [
+      "monospace",
+      "",
+      '"Locdoc Shapes", ui-monospace, "Locdoc Hebrew Mono", monospace',
+    ],
     // Families installed from Google Fonts keep their fallbacks and get a
     // partner for their catalog category.
     [
       "Merriweather",
       "Serif",
-      '"Merriweather", "Locdoc Hebrew Serif", sans-serif',
+      '"Locdoc Shapes", "Merriweather", "Locdoc Hebrew Serif", sans-serif',
     ],
     [
       "Space Mono",
       "Monospace",
-      '"Space Mono", "Locdoc Hebrew Mono", sans-serif',
+      '"Locdoc Shapes", "Space Mono", "Locdoc Hebrew Mono", sans-serif',
     ],
-    ["Inter", "Sans Serif", '"Inter", "Locdoc Hebrew Sans", sans-serif'],
-    ["Caveat", "Handwriting", '"Caveat", "Locdoc Hebrew Sans", sans-serif'],
+    [
+      "Inter",
+      "Sans Serif",
+      '"Locdoc Shapes", "Inter", "Locdoc Hebrew Sans", sans-serif',
+    ],
+    [
+      "Caveat",
+      "Handwriting",
+      '"Locdoc Shapes", "Caveat", "Locdoc Hebrew Sans", sans-serif',
+    ],
   ];
   for (const [font, category, family] of pairs)
     assert.equal(documentFontFamily(font, category), family, font);
 
-  // The interface and code faces have Hebrew partners too.
+  // The interface and code faces have Hebrew partners too, after the shapes
+  // face that leads every stack.
   const stylesheet = readFileSync(
     new URL("../src/style.css", import.meta.url),
     "utf8",
@@ -75,7 +100,9 @@ test("each document font is followed by a Hebrew face that pairs with it", () =>
   for (const token of ["--ui-font", "--reading-font", "--code-font"])
     assert.match(
       stylesheet,
-      new RegExp(`${token}:\\s*"[^"]+", "Locdoc Hebrew (Sans|Mono)"`),
+      new RegExp(
+        `${token}:\\s*"Locdoc Shapes", "[^"]+", "Locdoc Hebrew (Sans|Mono)"`,
+      ),
       token,
     );
 });

@@ -20,7 +20,7 @@ function hebrewPartner(font: string, category: string) {
   return '"Locdoc Hebrew Sans"';
 }
 // Each family keeps its fallbacks; its Hebrew partner comes right after it.
-export function documentFontFamily(font: string, category = "") {
+function familyStack(font: string, category: string) {
   const hebrew = hebrewPartner(font, category);
   if (["JetBrains Mono", "Courier Prime"].includes(font))
     return `"${font}", ${hebrew}, ui-monospace, monospace`;
@@ -29,6 +29,12 @@ export function documentFontFamily(font: string, category = "") {
   if (["Asul", "Lora", "Georgia"].includes(font))
     return `"${font}", ${hebrew}, Georgia, serif`;
   return `"${font}", ${hebrew}, sans-serif`;
+}
+// The shapes face (shape-fonts.css) leads every stack. It covers only the
+// Geometric Shapes block, so a meter's circles come from one font in every
+// family, including one that has some shapes of its own.
+export function documentFontFamily(font: string, category = "") {
+  return `"Locdoc Shapes", ${familyStack(font, category)}`;
 }
 const bundledFonts = [
   "JetBrains Mono",

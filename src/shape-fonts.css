@@ -1,0 +1,20 @@
+/* One face for the Geometric Shapes block, first in every font stack, so a
+   progress meter such as "◉◉◉○○" draws all its circles from the same font in
+   every document family and on every platform. Noto Sans Math draws ○ and ◉
+   with one thin ring, ◉ adding a dot inside it, and ● as the same disc
+   filled. Its circles stand on the baseline at capital height; the size
+   adjustment lifts the light ring just above the capitals, so it reads as
+   large as the letters beside it. The range keeps every other character in
+   its own face, and the file loads only when a page shows a shape. One face
+   serves every weight, and font synthesis is off, so circles stay thin in
+   headings and emphasis. */
+@font-face {
+  font-family: "Locdoc Shapes";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url("@fontsource/noto-sans-math/files/noto-sans-math-latin-400-normal.woff2")
+    format("woff2");
+  unicode-range: U+25A0-25FF;
+  size-adjust: 106%;
+}

@@ -154,8 +154,12 @@ Courier Prime is bundled as the default Fountain font. Font, text size, line
 height and page width preferences are saved separately for Markdown and Fountain
 in each browser.
 Both formats offer **Scroll past end**, leaving half a viewport of writing room
-below the last line. Markdown also has a **Paragraph spacing** slider, initially
-15% of line height, for paragraphs and list items.
+below the last line, and a **Paragraph spacing** slider, initially 15% of line
+height.
+
+Completion circles such as `◉◉○○○` use one bundled shapes font, so empty and
+completed rings match across document fonts. Other characters keep the selected
+font and its language fallbacks; document source stays unchanged.
 
 Type `INT.`, `EXT.`, uppercase character names, dialogue and parentheticals
 naturally. In Hebrew, `פנים.`, `חוץ.` and `פנים/חוץ.` start scene headings

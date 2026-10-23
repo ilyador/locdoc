@@ -35,8 +35,11 @@
   --fountain-scene: #971e70;
   --fountain-speaker: #566f8b;
   --fountain-parenthetical: #806b88;
-  /* Each family is followed by its Hebrew partner from hebrew-fonts.css. */
-  --ui-font: "IBM Plex Sans", "Locdoc Hebrew Sans", "Segoe UI", sans-serif;
+  /* Each stack starts with the shapes face from shape-fonts.css, and each
+     family is followed by its Hebrew partner from hebrew-fonts.css. */
+  --ui-font:
+    "Locdoc Shapes", "IBM Plex Sans", "Locdoc Hebrew Sans", "Segoe UI",
+    sans-serif;
   --ui-body-size: 0.9375rem;
   --ui-control-size: 0.875rem;
   --ui-meta-size: 0.8125rem;
@@ -49,8 +52,11 @@
   --weight-bold: 700;
   --display-font: "Bebas Neue", "Arial Narrow", sans-serif;
   --reading-font:
-    "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace;
-  --code-font: "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace, monospace;
+    "Locdoc Shapes", "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace,
+    monospace;
+  --code-font:
+    "Locdoc Shapes", "JetBrains Mono", "Locdoc Hebrew Mono", ui-monospace,
+    monospace;
   --doc-font: var(--reading-font);
   --doc-size: 18px;
   --doc-line-height: 1.85;
@@ -3313,7 +3319,8 @@ button:hover {
   background: var(--subtle);
   padding: 15px;
   font:
-    0.9375rem/1.8 ui-monospace,
+    0.9375rem/1.8 "Locdoc Shapes",
+    ui-monospace,
     "Locdoc Hebrew Mono",
     monospace;
   white-space: pre-wrap;
