@@ -9,7 +9,7 @@ import { fileApi } from "./fixtures/file-api.ts";
 // again every four seconds while a document is open; what the workspace
 // does with a listing decides how much renders again while the owner types.
 let render, screen, waitFor, cleanup, act, fireEvent;
-let WorkspaceView, useWorkspace;
+let WorkspaceView, useWorkspace, spliceEntries;
 let workspace;
 
 before(async () => {
@@ -85,7 +85,7 @@ before(async () => {
   ({ render, screen, waitFor, cleanup, act, fireEvent } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
-  ({ useWorkspace } = await import("../src/workspace.ts"));
+  ({ useWorkspace, spliceEntries } = await import("../src/workspace.ts"));
 });
 afterEach(() => {
   cleanup();
@@ -195,6 +195,98 @@ test("an unchanged tree is listed again by its tag, without a body, and the list
   await act(() => workspace.loadTree());
   assert.equal(listings().at(-1)!.unchanged, true);
   assert.notEqual(listings().at(-1)!.held, again.held);
+});
+
+test("a changed tree comes as only what changed since the listing held, which the sidebar shows", async () => {
+  const api = await open("Doc 47.md");
+  const listings = () => api.calls.filter((call) => call.path === "/api/tree");
+  const shown = workspace.entries;
+  // Typing in a document changes its time: only that entry is sent.
+  api.items.find((item) => item.path === "Doc 12.md")!.modified = 2_000_000;
+  await act(() => workspace.loadTree());
+  assert.equal(listings().at(-1)!.spliced, true, "only what changed is sent");
+  const listed = workspace.entries;
+  const saved = listed.find((entry) => entry.path === "Doc 12.md")!;
+  assert.equal(saved.modified, 2_000_000);
+  assert.ok(
+    listed.every((entry) => entry === saved || shown.includes(entry)),
+    "every other entry keeps its object",
+  );
+  assert.equal(
+    document.querySelector('[role="treeitem"]')!.getAttribute("data-path"),
+    "Doc 12.md",
+    "the saved document moves to the top of By date",
+  );
+  // A rename on the desktop, a new document and a removed one.
+  api.rename("Doc 30.md", "Doc thirty.md");
+  api.items.push({
+    ...api.items.find((i) => i.path === "Doc 01.md")!,
+    path: "Doc new.md",
+    id: "doc-new",
+    title: "Doc new",
+  });
+  api.items.splice(
+    api.items.findIndex((i) => i.path === "Doc 02.md"),
+    1,
+  );
+  await act(() => workspace.loadTree());
+  assert.equal(listings().at(-1)!.spliced, true);
+  assert.ok(row("Doc thirty.md") && row("Doc new.md"));
+  assert.equal(row("Doc 30.md"), null);
+  assert.equal(row("Doc 02.md"), null);
+  assert.deepEqual(
+    workspace.entries.map((entry) => [entry.path, entry.modified]),
+    api.items.map((item) => [item.path, item.modified]),
+    "the splices make the listing the server holds",
+  );
+  // Asked again by the tag the splice came with, it is unchanged.
+  await act(() => workspace.loadTree());
+  assert.equal(listings().at(-1)!.unchanged, true);
+  assert.equal(workspace.error, "");
+});
+
+test("a splice applies only where it fits the listing kept", () => {
+  const entry = (path: string) => ({
+    path,
+    kind: "file",
+    id: path,
+    shared: false,
+  });
+  const kept = { entries: ["a", "b", "c", "d"].map(entry) };
+  const [a, b, c, d] = kept.entries;
+  const e = entry("e");
+  const made = spliceEntries(kept, {
+    edits: [
+      [0, 0, [e]],
+      [1, 2, []],
+      [4, 0, [entry("f")]],
+    ],
+  })!;
+  assert.deepEqual(
+    made.entries.map((item) => item.path),
+    ["e", "a", "d", "f"],
+  );
+  assert.ok(
+    made.entries[1] === a && made.entries[2] === d,
+    "kept entries are the objects they were",
+  );
+  assert.deepEqual(spliceEntries(kept, { edits: [] })!.entries, [a, b, c, d]);
+  for (const edits of [
+    undefined,
+    "edits",
+    [
+      [2, 1, []],
+      [1, 0, []],
+    ],
+    [[3, 2, []]],
+    [[-1, 0, []]],
+    [[0, 1.5, []]],
+    [[0, 0, [null]]],
+    [[0, 0, [{ kind: "file" }]]],
+    [[0, 0]],
+  ])
+    assert.equal(spliceEntries(kept, { edits }), null, JSON.stringify(edits));
+  assert.equal(spliceEntries(kept, null), null);
 });
 
 // The next document's workspace has mounted once its row is current and its

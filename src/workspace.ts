@@ -3,7 +3,14 @@ import { SIDEBAR_MIN, SIDEBAR_MAX } from "./sidebar-resize";
 import { hasUnstoredDrafts } from "./drafts";
 import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
-import { api, ownerSession, revalidate, send, type Kept } from "./api";
+import {
+  api,
+  ownerSession,
+  revalidate,
+  send,
+  type Changes,
+  type Kept,
+} from "./api";
 import { normalizePresence } from "./presence";
 import { useFileActions } from "./file-actions";
 import {
@@ -48,6 +55,50 @@ function sameEntry(a: Entry, b: Entry) {
     keys.every((key) => a[key] === b[key])
   );
 }
+
+// A listing the server sends as what changed since the one kept: edits in
+// order, each [at, removed, entries], replacing `removed` entries of the kept
+// listing from position `at` with `entries`. Every entry they keep is the
+// object it was. Null when the edits do not fit the kept listing, which is
+// then asked for again whole.
+export function spliceEntries(
+  kept: { entries: Entry[] },
+  changes: unknown,
+): { entries: Entry[] } | null {
+  const edits = (changes as { edits?: unknown } | null)?.edits;
+  if (!Array.isArray(edits)) return null;
+  const listed = kept.entries;
+  const entries: Entry[] = [];
+  let next = 0;
+  for (const edit of edits) {
+    if (!Array.isArray(edit) || edit.length !== 3) return null;
+    const [at, removed, added] = edit as [unknown, unknown, unknown];
+    if (
+      !Number.isInteger(at) ||
+      !Number.isInteger(removed) ||
+      (at as number) < next ||
+      (removed as number) < 0 ||
+      (at as number) + (removed as number) > listed.length ||
+      !Array.isArray(added) ||
+      !added.every(
+        (entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          typeof entry.path === "string",
+      )
+    )
+      return null;
+    for (; next < (at as number); next++) entries.push(listed[next]);
+    entries.push(...(added as Entry[]));
+    next = (at as number) + (removed as number);
+  }
+  for (; next < listed.length; next++) entries.push(listed[next]);
+  return { entries };
+}
+const treeChanges: Changes<{ entries: Entry[] }> = {
+  manipulation: "splice",
+  apply: spliceEntries,
+};
 
 // Workspace state survives document navigation. No document content, sharing
 // state, comments or asynchronous document mutations live at this level.
@@ -201,9 +252,9 @@ export function useWorkspace() {
   const treeRequest = useRef(0);
   const treeApplied = useRef(0);
   const treeChanged = useRef(0);
-  // The last listing the server sent in full, with its tag. A tree that has
-  // not changed since is answered without a body and this one stands, as if
-  // it had been sent again.
+  // The last listing the server sent, with its tag. A tree that has not
+  // changed since is answered without a body and this one stands, as if it
+  // had been sent again; one that changed comes as only what changed.
   const listed = useRef<Kept<{ entries: Entry[] }> | null>(null);
   const loadTree = useCallback(async () => {
     const request = ++treeRequest.current;
@@ -214,6 +265,7 @@ export function useWorkspace() {
           ? `/api/tree?token=${encodeURIComponent(sharedToken)}`
           : "/api/tree",
         listed.current,
+        { changes: treeChanges },
       );
       listed.current = kept;
       const { entries } = kept.body;

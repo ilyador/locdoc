@@ -144,6 +144,164 @@ async fn an_unchanged_listing_is_answered_without_its_body_in_each_callers_own_v
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// The listing `edits` make of `held`, as a client applies a splice.
+fn spliced(held: &[u8], splice: &[u8]) -> Value {
+    let held: Value = serde_json::from_slice(held).unwrap();
+    let splice: Value = serde_json::from_slice(splice).unwrap();
+    let listed = held["entries"].as_array().unwrap();
+    let (mut entries, mut next) = (Vec::new(), 0);
+    for edit in splice["edits"].as_array().unwrap() {
+        let at = edit[0].as_u64().unwrap() as usize;
+        let removed = edit[1].as_u64().unwrap() as usize;
+        assert!(at >= next && at + removed <= listed.len(), "{edit}");
+        entries.extend_from_slice(&listed[next..at]);
+        entries.extend(edit[2].as_array().unwrap().iter().cloned());
+        next = at + removed;
+    }
+    entries.extend_from_slice(&listed[next..]);
+    json!({ "entries": entries })
+}
+
+#[tokio::test]
+async fn a_changed_listing_is_sent_as_what_changed_since_the_one_its_caller_holds() {
+    use std::time::{Duration, SystemTime};
+    let (_directory, s) = store();
+    for n in 0..120 {
+        s.create_document(&format!("Notes/Draft {n:03}.md"))
+            .unwrap();
+    }
+    s.create_document("plan.md").unwrap();
+    let token = folder_link(&s, "Notes", "view");
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let splice = ("a-im", "splice");
+    let (status, headers, held) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+
+    // A save changes one document's time: only that entry is sent.
+    fs::File::options()
+        .append(true)
+        .open(s.root.join("Notes/Draft 007.md"))
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000))
+        .unwrap();
+    let (_, _, whole) = get(&base, "/api/tree", &[owner]).await;
+    let (status, headers, body) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::IM_USED);
+    assert_eq!(header(&headers, "im".parse().unwrap()), Some("splice"));
+    assert_eq!(
+        header(&headers, "delta-base".parse().unwrap()),
+        Some(tag.as_str())
+    );
+    assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-store"));
+    let next = header(&headers, header::ETAG).unwrap().to_owned();
+    assert_ne!(next, tag);
+    let edits: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(edits["edits"].as_array().unwrap().len(), 1, "{edits}");
+    assert_eq!(edits["edits"][0][1], 1, "one entry replaced: {edits}");
+    assert_eq!(edits["edits"][0][2][0]["modified"], 2_000_000_000u64);
+    assert!(
+        body.len() * 50 < whole.len(),
+        "{} bytes of {}",
+        body.len(),
+        whole.len()
+    );
+    assert!(
+        spliced(&held, &body) == serde_json::from_slice::<Value>(&whole).unwrap(),
+        "the splice makes the whole listing"
+    );
+    // Asked again by the new tag, it is unchanged.
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &next), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+
+    // Names made, moved and removed, from the first listing held.
+    s.create_document("Notes/Draft 050b.md").unwrap();
+    fs::rename(s.root.join("plan.md"), s.root.join("Notes/plan.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    fs::remove_file(s.root.join("Notes/Draft 100.md")).unwrap();
+    let (_, _, whole) = get(&base, "/api/tree", &[owner]).await;
+    let (status, _, body) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::IM_USED);
+    assert!(
+        spliced(&held, &body) == serde_json::from_slice::<Value>(&whole).unwrap(),
+        "the splice makes the whole listing"
+    );
+
+    // A page that does not ask for splices, as one loaded before them, is
+    // sent the whole listing, as is a caller whose listing is unknown.
+    for headers in [
+        vec![owner, ("if-none-match", tag.as_str())],
+        vec![owner, ("if-none-match", "W/\"unknown\""), splice],
+        vec![
+            owner,
+            ("if-none-match", tag.as_str()),
+            ("a-im", "splice;q=0"),
+        ],
+    ] {
+        let (status, _, body) = get(&base, "/api/tree", &headers).await;
+        assert_eq!(status, StatusCode::OK, "{headers:?}");
+        assert!(body == whole, "{headers:?}");
+    }
+    // A listing that changed in more than half its entries comes whole.
+    for n in 0..120 {
+        if let Ok(file) = fs::File::options()
+            .append(true)
+            .open(s.root.join(format!("Notes/Draft {n:03}.md")))
+        {
+            file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_100_000_000))
+                .unwrap();
+        }
+    }
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Each view splices only from listings it sent itself: the owner's tag
+    // is no base for the folder link's view, nor its tag for the owner's.
+    let folder = format!("/api/tree?token={token}");
+    let (status, headers, _) = get(&base, &folder, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let visitor = header(&headers, header::ETAG).unwrap().to_owned();
+    s.create_document("Notes/after.md").unwrap();
+    let (status, _, _) = get(&base, &folder, &[("if-none-match", &tag), splice]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &visitor), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = get(&base, &folder, &[("if-none-match", &visitor), splice]).await;
+    assert_eq!(status, StatusCode::IM_USED);
+    let edits: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(edits["edits"][0][2][0]["path"], "after.md", "{edits}");
+    // A tag is no credential, with or without a splice.
+    let (status, _, _) = get(&base, "/api/tree", &[("if-none-match", &tag), splice]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 fn entry(body: &[u8], path: &str) -> Option<Value> {
     let value: Value = serde_json::from_slice(body).unwrap();
     value["entries"]

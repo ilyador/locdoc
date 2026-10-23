@@ -48,3 +48,24 @@ pub(super) fn names(h: &HeaderMap, tag: &str) -> bool {
         .flat_map(|value| value.split(','))
         .any(|candidate| candidate.trim() == "*" || opaque(candidate) == wanted)
 }
+
+/// Whether the request accepts the instance manipulation `name` (RFC 3229
+/// A-IM): an item of its list, not refused with q=0.
+pub(super) fn manipulates(h: &HeaderMap, name: &str) -> bool {
+    h.get_all("a-im")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|item| {
+            let mut parts = item.split(';').map(str::trim);
+            parts
+                .next()
+                .is_some_and(|token| token.eq_ignore_ascii_case(name))
+                && !parts.any(|parameter| {
+                    parameter
+                        .strip_prefix("q=")
+                        .and_then(|q| q.trim().parse::<f32>().ok())
+                        .is_some_and(|q| q == 0.0)
+                })
+        })
+}

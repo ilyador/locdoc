@@ -8,8 +8,14 @@
 //! document's time, so it patches that entry instead. Without a watcher, or
 //! after it reported an error, or for a folder on a filesystem whose other
 //! clients change files unseen, every listing is walked, as before.
+//!
+//! Each view also keeps the last few listings it sent. A caller that names
+//! one of them by its tag and accepts splices (RFC 3229 delta encoding,
+//! `A-IM: splice`) is answered `226 IM Used` with only what changed since:
+//! while someone types, that is the one entry whose time changed.
 use super::*;
-use axum::http::HeaderValue;
+use axum::http::{HeaderName, HeaderValue};
+use std::collections::VecDeque;
 use std::os::unix::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -19,6 +25,12 @@ use std::time::{Duration, Instant};
 const REWALK: Duration = Duration::from_secs(60);
 /// Views kept: the owner's tree and folder links'.
 const VIEWS: usize = 32;
+/// Listings each view keeps after sending them, so that a caller holding
+/// one is sent only what changed since. Each tab or device holds one.
+const SENT: usize = 8;
+/// The instance manipulation (RFC 3229) of an answer that holds only what
+/// changed since the listing its caller holds.
+pub(super) const SPLICE: &str = "splice";
 /// Document files whose time a notice may have changed, kept for patching.
 const TOUCHED: usize = 4096;
 
@@ -243,6 +255,8 @@ struct Index {
 struct View {
     used: u64,
     current: Option<Arc<Current>>,
+    /// The listings sent last, newest last.
+    sent: VecDeque<Arc<Listing>>,
 }
 
 #[derive(Default)]
@@ -504,38 +518,147 @@ pub(super) async fn listing(
     Ok(s.listings.walked(scope, base, now, walked))
 }
 
-/// The listing as JSON, or 304 Not Modified when the request's If-None-Match
-/// names it. It is compared only once the handler has authorized the caller
-/// for this view, and each view's listings have tags of their own.
-pub(super) fn answer(h: &HeaderMap, listing: &Listing) -> Result<Response> {
-    #[derive(Serialize)]
-    struct Whole<'a> {
-        entries: Vec<&'a Entry>,
+impl Listings {
+    /// The listing for a caller of this view: 304 Not Modified when its
+    /// If-None-Match names it; 226 IM Used with only what changed when it
+    /// names a listing this view sent recently and accepts splices; the
+    /// whole listing otherwise. A tag is compared only once the handler has
+    /// authorized the caller for this view, and only with this view's
+    /// listings, so it never stands for another caller's listing.
+    pub(super) fn answer(
+        &self,
+        h: &HeaderMap,
+        scope: &str,
+        listing: &Arc<Listing>,
+    ) -> Result<Response> {
+        let etag = HeaderValue::from_str(&listing.tag).expect("a listing's tag is a header value");
+        if conditional::names(h, &listing.tag) {
+            return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
+        }
+        let held = {
+            let mut views = self.views.lock().unwrap();
+            let view = views.view(scope);
+            let held = conditional::manipulates(h, SPLICE)
+                .then(|| {
+                    view.sent
+                        .iter()
+                        .rev()
+                        .find(|sent| conditional::names(h, &sent.tag))
+                        .cloned()
+                })
+                .flatten();
+            if !view
+                .sent
+                .back()
+                .is_some_and(|sent| Arc::ptr_eq(sent, listing))
+            {
+                view.sent.retain(|sent| !Arc::ptr_eq(sent, listing));
+                view.sent.push_back(listing.clone());
+                if view.sent.len() > SENT {
+                    view.sent.pop_front();
+                }
+            }
+            held
+        };
+        let json = HeaderValue::from_static("application/json");
+        if let Some(held) = held
+            && let Some(edits) = edits(&held.entries, &listing.entries)
+        {
+            #[derive(Serialize)]
+            struct Splice<'a> {
+                edits: Vec<Edit<'a>>,
+            }
+            let base = HeaderValue::from_str(&held.tag).expect("a listing's tag is a header value");
+            return Ok((
+                StatusCode::IM_USED,
+                [
+                    (header::CONTENT_TYPE, json),
+                    (header::ETAG, etag),
+                    (
+                        HeaderName::from_static("im"),
+                        HeaderValue::from_static(SPLICE),
+                    ),
+                    (HeaderName::from_static("delta-base"), base),
+                ],
+                serde_json::to_vec(&Splice { edits }).map_err(unprepared)?,
+            )
+                .into_response());
+        }
+        #[derive(Serialize)]
+        struct Whole<'a> {
+            entries: Vec<&'a Entry>,
+        }
+        let body = serde_json::to_vec(&Whole {
+            entries: listing.entries.iter().map(|entry| &**entry).collect(),
+        })
+        .map_err(unprepared)?;
+        Ok(([(header::CONTENT_TYPE, json), (header::ETAG, etag)], body).into_response())
     }
-    let etag = HeaderValue::from_str(&listing.tag).expect("a listing's tag is a header value");
-    if conditional::names(h, &listing.tag) {
-        return Ok((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
-    }
-    let body = serde_json::to_vec(&Whole {
-        entries: listing.entries.iter().map(|entry| &**entry).collect(),
-    })
-    .map_err(|_| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The listing could not be prepared.".into(),
-        )
-    })?;
-    Ok((
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/json"),
-            ),
-            (header::ETAG, etag),
-        ],
-        body,
+}
+
+fn unprepared(_: serde_json::Error) -> ApiError {
+    ApiError(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "The listing could not be prepared.".into(),
     )
-        .into_response())
+}
+
+/// One change to a listing: `removed` entries of it from position `at`
+/// give way to `entries`.
+type Edit<'a> = (usize, usize, Vec<&'a Entry>);
+
+/// What changed from listing `old` to `new`, as edits in order, each at a
+/// position of `old`. None when they would hold more than half of `new`:
+/// the whole listing is then about as small.
+fn edits<'a>(old: &[Arc<Entry>], new: &'a [Arc<Entry>]) -> Option<Vec<Edit<'a>>> {
+    use similar::{Algorithm, DiffTag, capture_diff_slices_deadline};
+    // Each distinct entry as a number, which the diff compares.
+    fn numbered<'e>(numbers: &mut HashMap<&'e Entry, u32>, entries: &'e [Arc<Entry>]) -> Vec<u32> {
+        entries
+            .iter()
+            .map(|entry| {
+                let next = numbers.len() as u32;
+                *numbers.entry(entry).or_insert(next)
+            })
+            .collect()
+    }
+    // Listings in a row share the entries that did not change: only the
+    // part between the first and the last that differ is compared by value.
+    let same = |(a, b): (&Arc<Entry>, &Arc<Entry>)| Arc::ptr_eq(a, b);
+    let start = old.iter().zip(new).take_while(|&pair| same(pair)).count();
+    let end = old[start..]
+        .iter()
+        .rev()
+        .zip(new[start..].iter().rev())
+        .take_while(|&pair| same(pair))
+        .count();
+    let mut numbers = HashMap::new();
+    let before = numbered(&mut numbers, &old[start..old.len() - end]);
+    let after = numbered(&mut numbers, &new[start..new.len() - end]);
+    // A diff that takes too long is coarser, never wrong.
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let mut edits: Vec<Edit<'a>> = Vec::new();
+    let mut sent = 0;
+    let ops = capture_diff_slices_deadline(Algorithm::Myers, &before, &after, Some(deadline));
+    for op in ops {
+        let (tag, removed, added) = op.as_tag_tuple();
+        if tag == DiffTag::Equal {
+            continue;
+        }
+        let (at, removed) = (start + removed.start, removed.len());
+        let added = start + added.start..start + added.end;
+        sent += added.len();
+        let added = new[added].iter().map(|entry| &**entry);
+        match edits.last_mut() {
+            // Next to the last edit, with nothing kept between: one edit.
+            Some(last) if last.0 + last.1 == at => {
+                last.1 += removed;
+                last.2.extend(added);
+            }
+            _ => edits.push((at, removed, added.collect())),
+        }
+    }
+    (sent * 2 <= new.len()).then_some(edits)
 }
 
 #[cfg(test)]
@@ -676,6 +799,86 @@ mod tests {
                 )
                 .unwrap();
         assert_eq!(stored, 0);
+    }
+
+    fn listed(path: &str, modified: u64) -> Arc<Entry> {
+        Arc::new(Entry {
+            path: path.into(),
+            kind: "file",
+            id: Some(path.into()),
+            shared: false,
+            modified,
+            title: path.into(),
+            url: None,
+            format: Some("markdown"),
+            file: None,
+        })
+    }
+
+    #[test]
+    fn edits_make_the_new_listing_from_the_old_one() {
+        // A small, fixed-seed generator: every run tries the same lists.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        for round in 0..300 {
+            let old: Vec<_> = (0..random(60))
+                .map(|n| listed(&format!("{n}.md"), 1))
+                .collect();
+            let mut new = old.clone();
+            for _ in 0..random(4) {
+                match random(4) {
+                    0 if !new.is_empty() => {
+                        new.remove(random(new.len()));
+                    }
+                    1 => {
+                        let at = random(new.len() + 1);
+                        new.insert(at, listed(&format!("new {round} {at}.md"), 2));
+                    }
+                    2 if !new.is_empty() => {
+                        let at = random(new.len());
+                        new[at] = listed(&new[at].path.clone(), 3);
+                    }
+                    _ if new.len() > 1 => {
+                        let entry = new.remove(random(new.len()));
+                        new.insert(random(new.len() + 1), entry);
+                    }
+                    _ => {}
+                }
+            }
+            let Some(edits) = edits(&old, &new) else {
+                continue;
+            };
+            let mut made: Vec<&Entry> = Vec::new();
+            let mut next = 0;
+            for (at, removed, added) in &edits {
+                assert!(*at >= next && at + removed <= old.len(), "round {round}");
+                made.extend(old[next..*at].iter().map(|entry| &**entry));
+                made.extend(added.iter().copied());
+                next = at + removed;
+            }
+            made.extend(old[next..].iter().map(|entry| &**entry));
+            assert!(
+                made.iter().copied().eq(new.iter().map(|entry| &**entry)),
+                "round {round}"
+            );
+        }
+        // One changed time is one entry; most changed is the whole listing.
+        let old: Vec<_> = (0..10).map(|n| listed(&format!("{n}.md"), 1)).collect();
+        let mut new = old.clone();
+        new[4] = listed("4.md", 2);
+        let one = edits(&old, &new).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!((one[0].0, one[0].1, one[0].2.len()), (4, 1, 1));
+        let most: Vec<_> = (0..10).map(|n| listed(&format!("{n}.md"), 2)).collect();
+        assert!(edits(&old, &most).is_none());
+        let emptied = edits(&old, &[]).unwrap();
+        assert_eq!(emptied.len(), 1);
+        assert_eq!((emptied[0].0, emptied[0].1, emptied[0].2.len()), (0, 10, 0));
     }
 
     #[test]

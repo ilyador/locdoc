@@ -68,10 +68,14 @@ export function fileApi(
     method: string;
     path: string;
     body?: any;
-    // A listing's request: the tag it named, and whether it was answered 304.
+    // A listing's request: the tag it named, and whether it was answered
+    // 304, or 226 with only what changed since the listing it named.
     held?: string | null;
     unchanged?: boolean;
+    spliced?: boolean;
   }[] = [];
+  // The listings sent, by tag, as a server keeps the last few it sent.
+  const sent = new Map<string, Item[]>();
   const holds = new Map<string, () => Promise<void>>();
   const failures = new Map<string, { status: number; error: string }>();
   const exists = (path: string) => items.some((other) => other.path === path);
@@ -126,16 +130,55 @@ export function fileApi(
       });
     if (route === "/api/tree") {
       // As the server does: the listing a request names by its tag is
-      // answered 304, without a body.
+      // answered 304, without a body, and a caller that holds one sent
+      // earlier and accepts splices is sent only what changed since.
       const tag = `W/"${createHash("sha256").update(JSON.stringify(listing)).digest("hex").slice(0, 32)}"`;
-      call.held = new Headers(init.headers).get("If-None-Match");
+      const headers = new Headers(init.headers);
+      call.held = headers.get("If-None-Match");
       call.unchanged = call.held === tag;
-      return call.unchanged
-        ? new Response(null, { status: 304, headers: { etag: tag } })
-        : new Response(JSON.stringify({ entries: listing }), {
-            status: 200,
-            headers: { "content-type": "application/json", etag: tag },
-          });
+      if (call.unchanged)
+        return new Response(null, { status: 304, headers: { etag: tag } });
+      const base =
+        headers.get("A-IM") === "splice" && call.held
+          ? sent.get(call.held)
+          : undefined;
+      sent.set(tag, listing);
+      call.spliced = !!base;
+      if (base) {
+        // One edit, from the first entry that differs to the last.
+        const same = (a?: Item, b?: Item) =>
+          JSON.stringify(a) === JSON.stringify(b);
+        let start = 0;
+        while (start < base.length && same(base[start], listing[start]))
+          start++;
+        let end = 0;
+        while (
+          end < base.length - start &&
+          end < listing.length - start &&
+          same(base[base.length - 1 - end], listing[listing.length - 1 - end])
+        )
+          end++;
+        const edits = [
+          [
+            start,
+            base.length - start - end,
+            listing.slice(start, listing.length - end),
+          ],
+        ];
+        return new Response(JSON.stringify({ edits }), {
+          status: 226,
+          headers: {
+            "content-type": "application/json",
+            etag: tag,
+            im: "splice",
+            "delta-base": call.held!,
+          },
+        });
+      }
+      return new Response(JSON.stringify({ entries: listing }), {
+        status: 200,
+        headers: { "content-type": "application/json", etag: tag },
+      });
     }
     if (route === "/api/files" && method === "POST") {
       if (exists(body.path)) return taken();

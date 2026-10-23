@@ -780,7 +780,7 @@ async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
     }
     Ok(browser_auth::logout_response())
 }
-#[derive(Serialize, Clone, PartialEq, Eq)]
+#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 struct Entry {
     path: String,
     kind: &'static str,
@@ -953,14 +953,14 @@ async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Re
         let scope = format!("folder {}", folder.token);
         let listing =
             listings::listing(&s, &scope, base, move |s| folders::walk(s, &folder)).await?;
-        return listings::answer(&h, &listing);
+        return s.listings.answer(&h, &scope, &listing);
     }
     if !s.owner(&h) {
         return Err(denied());
     }
     let root = s.root.clone();
     let listing = listings::listing(&s, "owner", root, owner_walk).await?;
-    listings::answer(&h, &listing)
+    s.listings.answer(&h, "owner", &listing)
 }
 /// The owner's whole tree, every entry inside a folder link marked shared.
 fn owner_walk(s: &Store) -> Result<Walk> {
