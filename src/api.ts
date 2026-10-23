@@ -77,11 +77,13 @@ export type Kept<T> = { path: string; tag: string; body: T };
 export async function revalidate<T>(
   path: string,
   kept: Kept<T> | null,
+  { signal }: { signal?: AbortSignal } = {},
 ): Promise<Kept<T>> {
   const held = kept?.path === path && kept.tag ? kept : null;
   const response = await request(path, {
     // The page keeps the copy itself; the HTTP cache stores nothing.
     cache: "no-store",
+    signal,
     headers: held ? { "If-None-Match": held.tag } : {},
   });
   if (held && response.status === 304) return held;

@@ -1336,19 +1336,40 @@ fn load(s: &Store, d: &Document, r: &mut Room) -> Result<Loaded> {
     }
     Ok((source, threads, values))
 }
+/// A document's threads, polled every two seconds while it has any. A caller
+/// that names the list it holds is answered 304 while that list is still
+/// what it would be sent. Tags are made from the caller's view: the
+/// document, whether it may resolve every thread, and the guest whose own
+/// threads it may resolve. They are compared only once the caller is
+/// authorized, so a tag never stands in for access.
 pub(super) async fn list(
     State(s): State<App>,
     AxPath(id): AxPath<String>,
     Query(a): Query<Access>,
     h: HeaderMap,
-) -> Result<Json<Value>> {
+) -> Result<Response> {
     doc_job(s, id.clone(), move |s| {
         let d = s.doc(&id)?;
         let (owner, editor) = s.access(&h, &d, &a)?;
         let guest = guest_id(&h).ok();
         let room = s.room(&d)?;
-        let mut r = room.lock().unwrap();
-        list_payload(s, &d, &mut r, owner || editor, guest.as_deref()).map(Json)
+        let value = {
+            let mut r = room.lock().unwrap();
+            list_payload(s, &d, &mut r, owner || editor, guest.as_deref())?
+        };
+        let access = if owner {
+            "owner"
+        } else if editor {
+            "edit"
+        } else {
+            "view"
+        };
+        let view = format!(
+            "comments {} {access} {}",
+            d.id,
+            guest.as_deref().unwrap_or_default()
+        );
+        conditional::json(&h, &view, &value)
     })
     .await
 }

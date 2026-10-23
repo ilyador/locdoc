@@ -144,6 +144,142 @@ async fn an_unchanged_listing_is_answered_without_its_body_in_each_callers_own_v
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+fn comments(body: &[u8]) -> Vec<(String, bool)> {
+    let value: Value = serde_json::from_slice(body).unwrap();
+    value["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| {
+            (
+                thread["body"].as_str().unwrap().to_owned(),
+                thread["canResolve"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unchanged_comment_list_is_answered_without_its_body_in_each_callers_own_view() {
+    let (_directory, s) = store();
+    let page = s.create_document("Notes/page.md").unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='view',token='page-link' WHERE id=?",
+            [&page.id],
+        )
+        .unwrap();
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let browser = |guest: char| format!("locdoc_guest={}", guest.to_string().repeat(64));
+    let (alex, visitor, other) = (browser('a'), browser('b'), browser('c'));
+    let owner = [
+        ("authorization", bearer.as_str()),
+        ("cookie", alex.as_str()),
+    ];
+    let list = format!("/api/docs/{}/comments", page.id);
+    let linked = format!("{list}?token=page-link");
+    let post = |body: &'static str| {
+        let url = format!("{base}{list}");
+        let (bearer, alex) = (bearer.clone(), alex.clone());
+        async move {
+            let response = reqwest::Client::new()
+                .post(url)
+                .header("authorization", bearer)
+                .header("cookie", alex)
+                .header("content-type", "application/json")
+                .body(json!({"body": body, "name": "alex"}).to_string())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    };
+    post("First thought").await;
+
+    let (status, headers, body) = get(&base, &list, &owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body), [("First thought".to_owned(), true)]);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+    assert!(tag.starts_with("W/\"") && tag.ends_with('"'), "{tag}");
+    // The list the owner holds: no body, the same tag.
+    let (status, headers, body) =
+        get(&base, &list, &[owner[0], owner[1], ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
+    assert_eq!(header(&headers, header::ETAG), Some(tag.as_str()));
+    assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-store"));
+
+    // A link visitor sees the same thread without the owner's rights, under
+    // its own tags: neither view's tag answers for the other.
+    let guest = |cookie: &str, held: Option<&str>| {
+        let mut headers = vec![("cookie", cookie.to_owned())];
+        headers.extend(held.map(|tag| ("if-none-match", tag.to_owned())));
+        headers
+    };
+    let ask = |headers: Vec<(&'static str, String)>| {
+        let url = linked.clone();
+        let base = base.clone();
+        async move {
+            let headers: Vec<(&str, &str)> =
+                headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            get(&base, &url, &headers).await
+        }
+    };
+    let (status, headers, body) = ask(guest(&visitor, Some(&tag))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner's tag is not the visitor's"
+    );
+    assert_eq!(comments(&body), [("First thought".to_owned(), false)]);
+    let visiting = header(&headers, header::ETAG).unwrap().to_owned();
+    assert_ne!(visiting, tag);
+    let (status, _, body) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
+    let (status, _, _) = get(
+        &base,
+        &list,
+        &[owner[0], owner[1], ("if-none-match", &visiting)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the visitor's tag is not the owner's"
+    );
+    // Another browser on the same link is sent the same list, under its own
+    // tag: whose threads a guest may resolve is part of the view.
+    let (status, headers, body) = ask(guest(&other, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body), [("First thought".to_owned(), false)]);
+    assert_ne!(header(&headers, header::ETAG), Some(visiting.as_str()));
+
+    // A new thread answers in full, with a new tag.
+    post("Second thought").await;
+    let (status, headers, body) =
+        get(&base, &list, &[owner[0], owner[1], ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body).len(), 2);
+    assert_ne!(header(&headers, header::ETAG), Some(tag.as_str()));
+    let (status, _, body) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body).len(), 2);
+
+    // A tag is no credential: a link turned off is refused, never confirmed.
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='private' WHERE id=?",
+            [&page.id],
+        )
+        .unwrap();
+    let (status, _, _) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 fn gunzip(bytes: &[u8]) -> Vec<u8> {
     let mut plain = Vec::new();
     flate2::read::GzDecoder::new(bytes)
