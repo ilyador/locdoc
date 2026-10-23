@@ -130,7 +130,113 @@ function shown(view: EditorView) {
   return rows;
 }
 
+// Every displayed block, a line as in shown() and a widget, such as a table
+// or figure, as its element. An empty document's placeholder is no text.
+function displayed(view: EditorView) {
+  const rows: string[] = [];
+  const walk = (parent: Element, wrapper: string[]) => {
+    for (const child of parent.children) {
+      if (child.classList.contains("cm-line")) {
+        const classes = [...wrapper, ...child.classList].filter(
+          (name) => name !== "cm-line",
+        );
+        const text = [...child.childNodes]
+          .filter(
+            (node) =>
+              !(node instanceof window.Element) ||
+              !node.classList.contains("cm-placeholder"),
+          )
+          .map((node) => node.textContent)
+          .join("");
+        rows.push(`${classes.sort().join(" ")}: ${text}`);
+      } else if (child.querySelector(".cm-line"))
+        walk(child, [...child.classList]);
+      else
+        rows.push(
+          [child.tagName.toLowerCase(), ...[...child.classList].sort()].join(
+            ".",
+          ),
+        );
+    }
+  };
+  walk(view.contentDOM, []);
+  return rows;
+}
+
 const record = "[[comment(alex): note]]";
+
+test("a table at the end of a document shows its conversation after it, and no empty line", () => {
+  const table = "| One | Two |\n| --- | --- |\n| Body | Cell |";
+  const source = `${table}\n\n${record}`;
+  const ydoc = new Y.Doc();
+  const text = ydoc.getText("content");
+  text.insert(0, source);
+  const at = (index: number, assoc = 0) =>
+    Y.relativePositionToJSON(
+      Y.createRelativePositionFromTypeIndex(text, index, assoc),
+    );
+  const from = source.indexOf("Body");
+  const thread = {
+    id: "c1",
+    name: "alex",
+    body: "note",
+    canResolve: true,
+    quote: "Body",
+    anchor: { start: at(from), end: at(from + 4, -1) },
+    created: 0,
+    resolved: false,
+    replies: [],
+  };
+  const awareness = new Awareness(ydoc);
+  const provider = { awareness } as any;
+  const page = render(
+    <MarkdownEditor
+      ydoc={ydoc}
+      provider={provider}
+      id="table-end"
+      editable={false}
+      path="Notes/table.md"
+      onChange={() => {}}
+      onComment={() => {}}
+      onUpload={() => {}}
+      comments={[thread]}
+    />,
+  );
+  try {
+    const view = EditorView.findFromDOM(
+      page.container.querySelector(".cm-editor")!,
+    )!;
+    assert.deepEqual(displayed(view), [
+      "div.md-table-preview",
+      "div.comment-marker-block",
+    ]);
+    page.rerender(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={provider}
+        id="table-end"
+        editable={false}
+        path="Notes/table.md"
+        onChange={() => {}}
+        onComment={() => {}}
+        onUpload={() => {}}
+        comments={[thread]}
+        activeComment="c1"
+        conversation={<p>The conversation</p>}
+      />,
+    );
+    assert.deepEqual(displayed(view), [
+      "div.md-table-preview",
+      "div.comment-marker-block",
+      "div.inline-comment-host",
+    ]);
+    assert.equal(text.toString(), source);
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
 
 test("a Markdown line after a comment record on its own line keeps its own styling", () => {
   for (const [source, expected] of [

@@ -1,4 +1,5 @@
 import { markdownLanguage } from "@codemirror/lang-markdown";
+import type { Tree } from "@lezer/common";
 import type { MarkdownConfig, MarkdownParser } from "@lezer/markdown";
 
 // One physical line per message. Escapes keep multiline text and delimiters
@@ -64,7 +65,15 @@ const literalNodes = new Set([
 ]);
 const allMessages = new RegExp(messagePattern.source.slice(1), "g");
 export function sourceComments(source: string, plain = false): SourceThread[] {
-  if (!source.includes("[[comment(")) return [];
+  return sourceCommentTree(source, plain).threads;
+}
+// The conversations of a source, and the Markdown structure that decided
+// which records are literal. Plain text has none.
+export function sourceCommentTree(
+  source: string,
+  plain = false,
+): { threads: SourceThread[]; tree: Tree | null } {
+  if (!source.includes("[[comment(")) return { threads: [], tree: null };
   const literals: { from: number; to: number }[] = [];
   // Markdown leaves records in code, HTML and links literal. Plain text has
   // no such syntax: only an escape keeps a record literal there.
@@ -138,7 +147,7 @@ export function sourceComments(source: string, plain = false): SourceThread[] {
         messages: [{ name: message.name, body: message.body }],
       });
   }
-  return threads;
+  return { threads, tree };
 }
 
 export function commentReadingText(source: string, plain = false) {

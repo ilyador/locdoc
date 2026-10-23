@@ -18,7 +18,8 @@ import {
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import type { Anchor } from "./editor-types";
-import { sourceComments } from "./comment-syntax";
+import type { Tree } from "@lezer/common";
+import { sourceCommentTree } from "./comment-syntax";
 import { mediaPreview, wholeLineImage } from "./markdown-media";
 import { textDirection, type TextDirection } from "./bidi";
 
@@ -171,7 +172,8 @@ function parseSourceComments(state: EditorState) {
   const plain = state.facet(plainCommentRecords);
   const source = state.doc.toString();
   const hidden: { from: number; to: number }[] = [];
-  for (const thread of sourceComments(source, plain)) {
+  const { threads, tree } = sourceCommentTree(source, plain);
+  for (const thread of threads) {
     const first = state.doc.lineAt(thread.from),
       last = state.doc.lineAt(thread.to);
     const standalone =
@@ -190,8 +192,46 @@ function parseSourceComments(state: EditorState) {
         : to;
     else hidden.push({ from, to });
   }
+  // Records on lines of their own at the end of the document, or after the
+  // blank line that Markdown needs between a table or HTML block and them,
+  // also hide the line breaks before them, so they never show as an empty
+  // line. They keep the line break after them: the next line stays its own.
+  const text = source.trimEnd().length;
+  for (const range of hidden) {
+    const line = state.doc.lineAt(range.from);
+    if (line.from !== range.from || line.number === 1) continue;
+    const end = range.to >= text;
+    if (!end && source[range.to - 1] !== "\n") continue;
+    let above = state.doc.line(line.number - 1);
+    let blank = false;
+    while (!above.text.trim() && above.number > 1) {
+      blank = true;
+      above = state.doc.line(above.number - 1);
+    }
+    if (
+      !above.text.trim() ||
+      (!end && !(blank && separatedBlock(tree, above.to)))
+    )
+      continue;
+    range.from = above.to;
+    if (source[range.to - 1] === "\n") range.to--;
+  }
   cache.set(state.doc, hidden);
   return hidden;
+}
+
+// Whether a table or HTML block ends at `end`: a record on the next line
+// would join it, so it needs a blank line before the record.
+function separatedBlock(tree: Tree | null, end: number) {
+  for (let node = tree?.resolveInner(end, -1) ?? null; node; node = node.parent)
+    if (
+      node.to === end &&
+      /^(?:Table|HTMLBlock|CommentBlock|ProcessingInstructionBlock)$/.test(
+        node.name,
+      )
+    )
+      return true;
+  return false;
 }
 
 // Whether a transaction only moved the hidden records, so every one of them
@@ -241,8 +281,10 @@ export function shownLines(state: EditorState): ShownLines {
 // Most typing cannot change which source records are annotations. Keep their
 // positions mapped instead of serializing and parsing the entire document.
 // Bracket syntax can span physical lines (including reference-link labels), so
-// inspect the containing paragraph, not just the edited line. Structural edits
-// keep the exact parser path below; no second comment grammar is maintained.
+// inspect the containing paragraph, not just the edited line. A table or HTML
+// block decides what records after it hide, so edits in one are reparsed too.
+// Structural edits keep the exact parser path below; no second comment
+// grammar is maintained.
 function mapsSourceComments(tr: Transaction, hidden: Range[]) {
   const inspected = new Set<number>();
   let safe = true;
@@ -299,7 +341,7 @@ function hasVisibleSourceSyntax(line: Line, hidden: Range[]) {
     if (hidden[middle].to <= line.from) low = middle + 1;
     else high = middle;
   }
-  for (const marker of line.text.matchAll(/[\\[\]<>`~]/g)) {
+  for (const marker of line.text.matchAll(/[\\[\]<>`~|]/g)) {
     const position = line.from + marker.index;
     while (low < hidden.length && hidden[low].to <= position) low++;
     if (low === hidden.length || position < hidden[low].from) return true;
@@ -366,6 +408,27 @@ export function resolveCommentAnchor(
   }
 }
 
+// The first hidden range that ends after `pos`, which holds it if it starts
+// before it.
+function hiddenRangeAfter(state: EditorState, pos: number): Range | undefined {
+  const hidden = sourceCommentRanges(state);
+  let low = 0,
+    high = hidden.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (hidden[middle].to <= pos) low = middle + 1;
+    else high = middle;
+  }
+  return hidden[low];
+}
+
+// Records hidden right after a table or figure, with the line break before
+// them, belong to its block: a line of their own would show as empty.
+export function hiddenAfter(state: EditorState, end: number) {
+  const range = hiddenRangeAfter(state, end);
+  return range?.from === end ? range.to : end;
+}
+
 // Split the displayed text at its anchor, without inserting Markdown newlines.
 // A rendered table is indivisible, so conversations belong after its preview.
 // Its marker sits at the end edge of the table or figure, which is the left
@@ -382,7 +445,7 @@ function commentPosition(
   ) {
     if (node.name === "Table")
       return {
-        pos: state.doc.lineAt(node.to).to,
+        pos: hiddenAfter(state, state.doc.lineAt(node.to).to),
         block: true,
         direction: textDirection(state.sliceDoc(node.from, node.to)),
       };
@@ -390,7 +453,11 @@ function commentPosition(
   const line = state.doc.lineAt(pos);
   const image = state.facet(mediaPreview) && wholeLineImage(line.text);
   if (image)
-    return { pos: line.to, block: true, direction: textDirection(image.alt) };
+    return {
+      pos: hiddenAfter(state, line.to),
+      block: true,
+      direction: textDirection(image.alt),
+    };
   return { pos, block: false };
 }
 
