@@ -10,16 +10,15 @@ import { trashItem, type FileActions } from "./file-actions";
 import { baseName, parentPath } from "./file-names";
 import type { TrashItem } from "./model";
 import { sidebarTimestamp } from "./recent-documents";
+import { Abbreviated } from "./ui";
 import { useRemote } from "./use-remote";
 
 const deletedAgo = (item: TrashItem) => sidebarTimestamp(item.deleted);
-// "deleted 5m ago", "deleted just now" or "deleted on Mar 4".
-const deletedWhen = (label: string) =>
-  label === "now"
-    ? "deleted just now"
-    : label.endsWith("ago")
-      ? `deleted ${label}`
-      : `deleted on ${label}`;
+// "deleted 5m ago", read as "deleted 5 minutes ago", or "deleted just now".
+const deletedWhen = ({ label, phrase }: { label: string; phrase: string }) => ({
+  label: label === "now" ? "deleted just now" : `deleted ${label} ago`,
+  phrase: `deleted ${phrase}`,
+});
 const contents = (item: TrashItem) =>
   item.kind === "folder"
     ? `Folder · ${item.documents} ${item.documents === 1 ? "document" : "documents"}`
@@ -110,7 +109,7 @@ export function RecentlyDeleted({ files }: { files: FileActions }) {
                       <>
                         {" · "}
                         <time dateTime={stamp.dateTime} title={stamp.title}>
-                          {deletedWhen(stamp.label)}
+                          <Abbreviated {...deletedWhen(stamp)} />
                         </time>
                       </>
                     )}
@@ -204,7 +203,8 @@ export function TrashedDocument({
 }) {
   const { busy, restore } = useRestore(files, item);
   const stamp = deletedAgo(item);
-  const when = stamp ? deletedWhen(stamp.label) : "deleted";
+  // A sentence spells the age out: "deleted 5 minutes ago".
+  const when = stamp ? deletedWhen(stamp).phrase : "deleted";
   const folder = item.kind === "folder";
   return (
     <div className="welcome trashed-document">

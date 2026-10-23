@@ -596,6 +596,30 @@ button:hover {
   text-overflow: ellipsis;
   font-weight: var(--weight-medium);
 }
+/* The breadcrumb, with when the document last changed in quiet metadata
+   under it, beside Open sidebar. */
+.topbar-heading {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+.topbar-titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.document-modified {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--ui-caption-size);
+  font-weight: var(--weight-regular);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
 .top-actions {
   display: flex;
   align-items: center;
@@ -3054,6 +3078,9 @@ button:hover {
     gap: 6px;
     font-size: var(--ui-meta-size);
   }
+  .topbar-heading {
+    gap: 6px;
+  }
   .crumb-home {
     display: none;
   }
@@ -3067,8 +3094,19 @@ button:hover {
     font-family: var(--display-font);
     letter-spacing: 0;
   }
-  .with-sidebar .crumb-current {
+  .with-sidebar .crumb-current,
+  .with-sidebar .document-modified {
     display: none;
+  }
+  /* Only the date fits beside the actions; screen readers still hear
+     "Modified" before it. */
+  .document-modified-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
   }
   .button {
     font-size: var(--ui-control-size);

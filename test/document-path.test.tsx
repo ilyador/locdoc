@@ -251,3 +251,44 @@ test("deleting the open document keeps its text readable until Undo reopens it",
   assert.ok(row("Notes/Plan.md"));
   assert.ok(screen.getByRole("button", { name: "Share" }));
 });
+
+test("the header shows when the open document's file last changed, in full, and follows its saves", async () => {
+  await open(files, "notes-plan-md");
+  await waitFor(() => assert.ok(editor()));
+  const plan = api.items.find((item) => item.path === "Notes/Plan.md")!;
+  const full = (seconds: number) =>
+    new Date(seconds * 1000).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  const header = () => {
+    const time = document.querySelector(".topbar .document-modified time");
+    return {
+      text: time?.parentElement!.textContent,
+      dateTime: time?.getAttribute("datetime"),
+    };
+  };
+  // The time the sidebar lists for the document.
+  const listed = () =>
+    row("Notes/Plan.md").querySelector("time")!.getAttribute("datetime");
+  fireEvent.click(row("Notes"));
+  assert.deepEqual(header(), {
+    text: `Modified ${full(plan.modified)}`,
+    dateTime: listed(),
+  });
+  // A save, here or on the desktop, gives the file a new time, which the
+  // next listing brings.
+  for (const saved of [
+    new Date(2026, 9, 23, 15, 42, 5),
+    new Date(2026, 9, 23, 15, 47, 59),
+  ]) {
+    plan.modified = Math.floor(+saved / 1000);
+    await act(() => workspace.loadTree());
+    assert.deepEqual(header(), {
+      text: `Modified ${full(plan.modified)}`,
+      dateTime: saved.toISOString(),
+    });
+    assert.equal(header().dateTime, listed(), "the sidebar's own time");
+  }
+  assert.match(header().text!, /2026/, "with its year");
+});

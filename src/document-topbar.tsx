@@ -8,6 +8,7 @@ import {
 } from "@phosphor-icons/react";
 import type { RefObject } from "react";
 import { documentExtension } from "./document-format";
+import { headerTimestamp } from "./recent-documents";
 import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document } from "./model";
 
@@ -15,6 +16,7 @@ export function DocumentTopbar({
   doc,
   path,
   filename,
+  modified,
   people,
   sidebar,
   openSidebar,
@@ -27,6 +29,9 @@ export function DocumentTopbar({
   // The document's current path, which follows renames.
   path: string | null;
   filename: string;
+  // When the document's file last changed, in seconds, as the sidebar lists
+  // it. A link to a single document lists none, so it shows no time.
+  modified?: number;
   people: { name: string; color: string }[];
   sidebar: boolean;
   openSidebar: () => void;
@@ -37,9 +42,10 @@ export function DocumentTopbar({
   // Absent while the document is in the trash: its links are suspended.
   share?: () => void;
 }) {
+  const changed = headerTimestamp(modified);
   return (
     <header className="topbar">
-      <div className="breadcrumbs">
+      <div className="topbar-heading">
         {!sidebar && (
           <IconButton
             ref={sidebarTrigger}
@@ -49,26 +55,38 @@ export function DocumentTopbar({
             <SidebarSimple />
           </IconButton>
         )}
-        <span className="crumb-home">
-          {sharedToken ? "Shared" : "Documents"}
-        </span>
-        <CaretRight size={12} />
-        {path?.includes("/") && (
-          <>
-            <span className="crumb-folder">
-              <PathText path={path.split("/").slice(0, -1).join("/")} />
+        <div className="topbar-titles">
+          <div className="breadcrumbs">
+            <span className="crumb-home">
+              {sharedToken ? "Shared" : "Documents"}
             </span>
             <CaretRight size={12} />
-          </>
-        )}
-        <span className="crumb-current doc-label">
-          <span className="doc-title" dir="auto">
-            {filename}
-          </span>{" "}
-          {path && (
-            <span className="doc-extension">{documentExtension(path)}</span>
+            {path?.includes("/") && (
+              <>
+                <span className="crumb-folder">
+                  <PathText path={path.split("/").slice(0, -1).join("/")} />
+                </span>
+                <CaretRight size={12} />
+              </>
+            )}
+            <span className="crumb-current doc-label">
+              <span className="doc-title" dir="auto">
+                {filename}
+              </span>{" "}
+              {path && (
+                <span className="doc-extension">{documentExtension(path)}</span>
+              )}
+            </span>
+          </div>
+          {changed && (
+            <p className="document-modified">
+              <span className="document-modified-label">Modified </span>
+              <time dateTime={changed.dateTime} dir="auto">
+                {changed.label}
+              </time>
+            </p>
           )}
-        </span>
+        </div>
       </div>
       <div className="top-actions">
         {doc && (
