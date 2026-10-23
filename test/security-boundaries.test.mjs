@@ -5,13 +5,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import WebSocket from "ws";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
 
-const base = "http://127.0.0.1:3532";
+// The fixture server takes a free port: a fixed one can belong to another
+// local server.
+let base;
+async function freePort() {
+  const listener = createServer().listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  const { port } = listener.address();
+  listener.close();
+  await once(listener, "close");
+  return port;
+}
 const key = "security-boundaries-fixture-owner";
 let dir,
   server,
@@ -106,6 +117,7 @@ async function rejected(doc, frame) {
   await request("/api/config", { owner: false });
 }
 before(async () => {
+  base = `http://127.0.0.1:${await freePort()}`;
   dir = await mkdtemp(join(tmpdir(), "locdoc-security-test-"));
   await mkdir(join(dir, "docs"));
   await mkdir(join(dir, "state"));
@@ -113,7 +125,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3532",
+      LOCDOC_BIND: new URL(base).host,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: "https://notes.example.test",
