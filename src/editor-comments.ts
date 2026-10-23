@@ -6,9 +6,10 @@ import {
   Facet,
   StateEffect,
   StateField,
+  Text,
+  Transaction,
   type ChangeDesc,
   type Line,
-  type Transaction,
 } from "@codemirror/state";
 import {
   Decoration,
@@ -18,8 +19,12 @@ import {
 } from "@codemirror/view";
 import { syntaxTree } from "@codemirror/language";
 import type { Anchor } from "./editor-types";
-import type { Tree } from "@lezer/common";
-import { sourceCommentTree } from "./comment-syntax";
+import type { SyntaxNode, Tree } from "@lezer/common";
+import {
+  commentParser,
+  sourceCommentTree,
+  type SourceThread,
+} from "./comment-syntax";
 import { mediaPreview, wholeLineImage } from "./markdown-media";
 import { textDirection, type TextDirection } from "./bidi";
 
@@ -161,11 +166,14 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
 
 // Deleting the line break after records that end a line's text joins the
 // next line onto that text, as a reader sees it. The records move to where a
-// new comment there would be written: in plain text, to the end of the
-// joined line's text, rather than inside it, where a desktop editor would
-// show them; in Markdown, records behind the blank line that a table or HTML
+// new comment about the joined text would be written (server/comments.rs),
+// rather than staying inside that text, where a desktop editor would show
+// them: in plain text, to the end of the joined line's text; in Markdown and
+// Fountain, to the end of the text of the paragraph, heading or list item
+// the joined line is in. Records behind the blank line that a table or HTML
 // block needs go after the block the line joins, where that blank line stays
-// hidden instead of showing.
+// hidden instead of showing. A move that would change a conversation, what a
+// reader sees or how Markdown reads it leaves the plain deletion.
 function joinAfterRecords(tr: Transaction) {
   if (
     !tr.docChanged ||
@@ -174,49 +182,74 @@ function joinAfterRecords(tr: Transaction) {
   )
     return tr;
   const state = tr.startState;
-  const joins: Join[] = [];
+  const joints: Joint[] = [];
   tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
     if (inserted.length || to !== from + 1 || state.sliceDoc(from, to) !== "\n")
       return;
-    const join = recordsAfterJoin(state, from);
-    if (join) joins.push(join);
+    const joint = jointAt(state, from);
+    if (joint) joints.push(joint);
   });
-  if (joins.length !== 1) return tr;
-  const [join] = joins;
-  const correction = ChangeSet.of(
-    [
-      ...join.remove.map((range) => ({
-        from: tr.changes.mapPos(range.from, 1),
-        to: tr.changes.mapPos(range.to, -1),
-      })),
-      { from: tr.changes.mapPos(join.at, 1), insert: join.insert },
-    ],
-    tr.newDoc.length,
+  if (joints.length !== 1) return tr;
+  const [joint] = joints;
+  const doc = state.doc;
+  const shown = visibleTextRanges(state, joint.from, joint.end).filter(
+    (range) => doc.sliceString(range.from, range.to).trim(),
   );
-  // Every conversation stays whole, and none takes another as replies.
+  if (!shown.length) return tr;
+  const candidates = joinsAt(state, joint, shown);
+  if (!candidates.length) return tr;
   const plain = state.facet(plainCommentRecords);
-  const threads = (source: string) =>
-    sourceCommentTree(source, plain)
-      .threads.map((thread) => JSON.stringify(thread.messages))
+  const source = state.doc.toString();
+  const conversations = (threads: SourceThread[]) =>
+    threads
+      .map((thread) => JSON.stringify(thread.messages))
       .sort()
       .join("\n");
-  if (
-    threads(correction.apply(tr.newDoc).toString()) !==
-    threads(state.doc.toString())
-  )
-    return tr;
-  return [tr, { changes: correction, sequential: true }];
+  const before = conversations(sourceCommentTree(source, plain).threads);
+  for (const join of candidates) {
+    const correction = ChangeSet.of(
+      [
+        ...join.remove.map((range) => ({
+          from: tr.changes.mapPos(range.from, 1),
+          to: tr.changes.mapPos(range.to, -1),
+        })),
+        { from: tr.changes.mapPos(join.at, 1), insert: join.insert },
+      ],
+      tr.newDoc.length,
+    );
+    const result = parseSource(correction.apply(tr.newDoc).toString(), plain);
+    // What a reader sees joins as without the records that move.
+    const reference =
+      join.reference ??
+      parseSource(
+        withoutRanges(source, [
+          ...join.remove,
+          { from: joint.at, to: joint.at + 1 },
+        ]),
+        plain,
+      );
+    if (
+      conversations(result.threads) === before &&
+      readerText(result) === readerText(reference) &&
+      (!join.structure || readerShape(result) === readerShape(reference))
+    )
+      return [tr, { changes: correction, sequential: true }];
+  }
+  return tr;
 }
 
-// Records to take out of their place and what to write where.
-type Join = { remove: Range[]; at: number; insert: string };
+// Deleting the line break at `at` joins the text of the next line, which
+// starts at `from` and shows up to `end`, onto the text before `at`;
+// `records`, the hidden range at `index`, is where they meet.
+type Joint = {
+  at: number;
+  records: Range;
+  index: number;
+  from: number;
+  end: number;
+};
 
-// Where the records that the line break at `at` follows go, when they end
-// the text of its line and the next line joins that text: after the joined
-// line's text and the conversations that end it, as plain-text placement
-// (server/comments.rs) writes them, or after the table or HTML block that
-// the line joins.
-function recordsAfterJoin(state: EditorState, at: number): Join | null {
+function jointAt(state: EditorState, at: number): Joint | null {
   const doc = state.doc;
   if (at + 1 >= doc.length) return null;
   const hidden = sourceCommentRanges(state);
@@ -229,39 +262,63 @@ function recordsAfterJoin(state: EditorState, at: number): Join | null {
     !shownText(state, doc.lineAt(records.from).from, records.from).trim()
   )
     return null;
+  const from = at + 1;
   // The line that joins, as a reader sees it: up to the first line break
   // that no record hides.
-  const next = doc.lineAt(at + 1);
-  let end = next.to;
+  let end = doc.lineAt(from).to;
   for (let i = index + 1; i < hidden.length && hidden[i].from <= end; i++)
     if (hidden[i].to > end) end = doc.lineAt(hidden[i].to).to;
-  const shown = visibleTextRanges(state, next.from, end).filter((range) =>
-    doc.sliceString(range.from, range.to).trim(),
-  );
-  if (!shown.length) return null;
+  return { at, records, index, from, end };
+}
+
+// Records to take out of their place and what to write where. A join that
+// places records by Markdown's blocks also keeps how Markdown reads the
+// joined text: `reference`, that text without the records it moves.
+type Join = {
+  remove: Range[];
+  at: number;
+  insert: string;
+  structure?: boolean;
+  reference?: ParsedSource;
+};
+
+// Where the records of a joint go, best first, given the parts of the
+// joined line that show text: after the joined line's text and the
+// conversations that end it, as plain-text placement writes them; after the
+// table or HTML block that the line joins; or at the end of the joined
+// Markdown block's text.
+function joinsAt(state: EditorState, joint: Joint, shown: Range[]): Join[] {
+  const doc = state.doc;
+  const hidden = sourceCommentRanges(state);
+  const { records, index, from, end } = joint;
+  const next = doc.lineAt(from);
+  const insert = doc.sliceString(records.from, records.to).trim();
   if (!state.facet(plainCommentRecords)) {
+    if (doc.sliceString(records.from, records.from + 1) !== "\n")
+      return markdownJoins(state, joint, insert);
     // In Markdown, records behind the blank line that a table or HTML block
     // needs. The line joins the block, where records would be a table
     // cell's text or literal HTML: its own records go after it as well, each
     // behind a blank line, unless the line under them would underline them.
-    if (doc.sliceString(records.from, records.from + 1) !== "\n") return null;
     const below = doc.lineAt(end).number + 1;
     if (
       below <= doc.lines &&
       /^ {0,3}(?:=+|-+)[ \t]*$/.test(doc.line(below).text)
     )
-      return null;
+      return [];
     const moved = [
       records,
       ...hidden.filter((range) => range.from >= next.from && range.to <= end),
     ];
-    return {
-      remove: moved,
-      at: end,
-      insert: moved
-        .map((range) => "\n\n" + doc.sliceString(range.from, range.to).trim())
-        .join(""),
-    };
+    return [
+      {
+        remove: moved,
+        at: end,
+        insert: moved
+          .map((range) => "\n\n" + doc.sliceString(range.from, range.to).trim())
+          .join(""),
+      },
+    ];
   }
   const last = shown[shown.length - 1];
   const lastShown =
@@ -287,14 +344,12 @@ function recordsAfterJoin(state: EditorState, at: number): Join | null {
   // A record right after an odd run of backslashes would be escaped. Before
   // the last one it is not, unless only space separates it from other
   // records, which would take it as a reply: then it gets a line.
-  if (
-    !prefix &&
-    /\\*$/.exec(doc.sliceString(next.from, point))![0].length % 2
-  ) {
+  if (!prefix && /\\*$/.exec(doc.sliceString(from, point))![0].length % 2) {
     if (
       hidden.some(
         (range) =>
-          range.to > next.from &&
+          range !== records &&
+          range.to > from &&
           range.to <= point - 1 &&
           !doc.sliceString(range.to, point - 1).trim(),
       )
@@ -302,11 +357,220 @@ function recordsAfterJoin(state: EditorState, at: number): Join | null {
       prefix = "\n";
     else point--;
   }
+  return [{ remove: [records], at: point, insert: prefix + insert }];
+}
+
+// In Markdown and Fountain, a record about text goes at the end of the text
+// of the paragraph, heading or list item that holds it, or else of the last
+// one in its top-level block (server/comments.rs). Once the line joins, the
+// records of a joint are about the joined block's text.
+function markdownJoins(
+  state: EditorState,
+  { at, records, from }: Joint,
+  insert: string,
+): Join[] {
+  const joined = parseSource(
+    withoutRanges(state.doc.toString(), [records, { from: at, to: at + 1 }]),
+    false,
+  );
+  // How far the text after the joint moved, and where the joined line's
+  // text starts in it.
+  const shift = records.to - records.from + 1;
+  const start = from - shift;
+  // The last character a reader sees of the text before the joint.
+  const last = visibleBefore(
+    joined.text,
+    joined.threads,
+    Math.min(at, records.from),
+  );
+  if (last === null) return [];
+  return markdownTextEnds(joined, last)
+    .flatMap((end) => {
+      const before = visibleBefore(joined.text, joined.threads, end);
+      return before === null
+        ? []
+        : [textEnd(joined.text, joined.threads, before, end)];
+    })
+    .filter((place) => place.at >= start)
+    .map((place) => ({
+      remove: [records],
+      at: place.at + shift,
+      insert: place.prefix + insert,
+      structure: true,
+      reference: joined,
+    }));
+}
+
+// A source with its conversations and Markdown structure.
+type ParsedSource = {
+  text: string;
+  doc: Text;
+  threads: SourceThread[];
+  tree: Tree | null;
+};
+function parseSource(text: string, plain: boolean): ParsedSource {
   return {
-    remove: [records],
-    at: point,
-    insert: prefix + doc.sliceString(records.from, records.to).trim(),
+    text,
+    doc: Text.of(text.split("\n")),
+    ...sourceCommentTree(text, plain),
   };
+}
+
+// A text without the given ranges, which do not overlap.
+function withoutRanges(text: string, ranges: Range[]) {
+  let out = "",
+    from = 0;
+  for (const range of [...ranges].sort((a, b) => a.from - b.from)) {
+    out += text.slice(from, range.from);
+    from = Math.max(from, range.to);
+  }
+  return out + text.slice(from);
+}
+
+// The text a reader sees: the source without what its records hide.
+function readerText(source: ParsedSource) {
+  return withoutRanges(
+    source.text,
+    hiddenRanges(source.doc, source.text, source),
+  );
+}
+
+const textBlocks = /^(?:Paragraph|ATXHeading\d|SetextHeading\d)$/;
+
+// Where the text ends of the paragraph or heading that holds `last`, the
+// last character a reader sees of a passage, and of the last one in its
+// top-level block, when that is another.
+function markdownTextEnds(source: ParsedSource, last: number) {
+  const tree = source.tree ?? commentParser.parse(source.text);
+  let block: SyntaxNode | null = tree.resolveInner(last, 1);
+  while (block && !textBlocks.test(block.name)) block = block.parent;
+  if (!block) return [];
+  const ends = [blockTextEnd(source.text, block)];
+  let top: SyntaxNode = block;
+  while (top.parent?.parent) top = top.parent;
+  let latest = ends[0];
+  const visit = (node: SyntaxNode) => {
+    if (textBlocks.test(node.name))
+      latest = Math.max(latest, blockTextEnd(source.text, node));
+    else
+      for (let child = node.firstChild; child; child = child.nextSibling)
+        visit(child);
+  };
+  visit(top);
+  if (latest !== ends[0]) ends.push(latest);
+  return ends;
+}
+
+// The end of a paragraph's or heading's text: before a heading's closing
+// marks or underline, and the space before them.
+function blockTextEnd(text: string, node: SyntaxNode) {
+  let end = node.to;
+  if (node.name.startsWith("ATXHeading")) {
+    const marks = node.getChildren("HeaderMark");
+    if (marks.length > 1) end = marks[marks.length - 1].from;
+  } else if (node.name.startsWith("SetextHeading")) {
+    const mark = node.getChild("HeaderMark");
+    if (mark) end = Math.max(node.from, text.lastIndexOf("\n", mark.from - 1));
+  }
+  while (end > node.from && /[ \t]/.test(text[end - 1])) end--;
+  return end;
+}
+
+// The nearest character before `at` that a reader sees: neither space nor
+// part of a record.
+function visibleBefore(text: string, threads: SourceThread[], at: number) {
+  for (let end = at; ;) {
+    let index = end - 1;
+    while (index >= 0 && /\s/.test(text[index])) index--;
+    if (index < 0) return null;
+    const thread = threads.find((t) => t.from <= index && index < t.to);
+    if (!thread) return index;
+    end = thread.from;
+  }
+}
+
+// Where a record goes to end the text that ends at `point`, and its prefix,
+// as server/comments.rs writes it. `last` is the last character a reader
+// sees there. Conversations that end that text, or follow it with nothing
+// else between, would take a record right after the text as a reply: it
+// goes after them, behind a blank line. A record right after an odd run of
+// backslashes would be escaped. Before the last one it is not, unless only
+// space separates it from another conversation, which would take it as a
+// reply: then it gets a line.
+function textEnd(
+  text: string,
+  threads: SourceThread[],
+  last: number,
+  point: number,
+) {
+  let end: number | null = null;
+  for (const thread of threads) {
+    if (thread.to <= last) continue;
+    const ends =
+      thread.from < point &&
+      (thread.to >= point || !text.slice(thread.to, point).trim());
+    if (
+      ends ||
+      (thread.from >= point && !text.slice(point, thread.from).trim())
+    ) {
+      point = thread.to;
+      end = point;
+    } else if (thread.from >= point) break;
+  }
+  if (end !== null) return { at: end, prefix: "\n\n" };
+  let slashes = 0;
+  while (text[point - 1 - slashes] === "\\") slashes++;
+  if (slashes % 2) {
+    const before = point - 1;
+    let previous = threads.length - 1;
+    while (previous >= 0 && threads[previous].to > before) previous--;
+    return previous >= 0 && !text.slice(threads[previous].to, before).trim()
+      ? { at: point, prefix: "\n" }
+      : { at: before, prefix: "" };
+  }
+  return { at: point, prefix: "" };
+}
+
+// The structure Markdown reads in a source: every block and inline node but
+// the records, with the words each holds. A paragraph that holds only
+// records shows nothing.
+function readerShape(source: ParsedSource) {
+  const tree = source.tree ?? commentParser.parse(source.text);
+  const text = source.text;
+  const out: string[] = [];
+  const opened: number[] = [];
+  let pos = 0,
+    pending = "";
+  const flush = () => {
+    const words = pending.replace(/\s+/g, " ").trim();
+    if (words) out.push(JSON.stringify(words));
+    pending = "";
+  };
+  tree.iterate({
+    enter(node) {
+      if (node.name === "Document") return;
+      pending += text.slice(pos, node.from);
+      pos = Math.max(pos, node.from);
+      if (node.name === "LocdocComment") {
+        pos = node.to;
+        return false;
+      }
+      flush();
+      opened.push(out.length);
+      out.push(node.name);
+    },
+    leave(node) {
+      if (node.name === "Document") return;
+      pending += text.slice(pos, node.to);
+      pos = Math.max(pos, node.to);
+      flush();
+      const start = opened.pop()!;
+      if (node.name === "Paragraph" && out.length === start + 1)
+        out.length = start;
+      else out.push("/");
+    },
+  });
+  return out.join(" ");
 }
 
 // The text a reader sees from `from` to `to`.
@@ -328,13 +592,27 @@ function parseSourceComments(state: EditorState) {
   const cache = hiddenSources(state);
   const cached = cache.get(state.doc);
   if (cached) return cached;
-  const plain = state.facet(plainCommentRecords);
   const source = state.doc.toString();
-  const hidden: { from: number; to: number }[] = [];
-  const { threads, tree } = sourceCommentTree(source, plain);
+  const hidden = hiddenRanges(
+    state.doc,
+    source,
+    sourceCommentTree(source, state.facet(plainCommentRecords)),
+  );
+  cache.set(state.doc, hidden);
+  return hidden;
+}
+
+// What the records of a source hide: each conversation, with its line when
+// it has one of its own, and conversations that only space separates as one.
+function hiddenRanges(
+  doc: Text,
+  source: string,
+  { threads, tree }: { threads: SourceThread[]; tree: Tree | null },
+) {
+  const hidden: Range[] = [];
   for (const thread of threads) {
-    const first = state.doc.lineAt(thread.from),
-      last = state.doc.lineAt(thread.to);
+    const first = doc.lineAt(thread.from),
+      last = doc.lineAt(thread.to);
     const standalone =
       !source.slice(first.from, thread.from).trim() &&
       !source.slice(thread.to, last.to).trim();
@@ -345,7 +623,7 @@ function parseSourceComments(state: EditorState) {
       // Records that follow text on its line keep the line break after the
       // last of them, so the next line still shows as a line of its own.
       previous.to = source
-        .slice(state.doc.lineAt(previous.from).from, previous.from)
+        .slice(doc.lineAt(previous.from).from, previous.from)
         .trim()
         ? Math.min(to, last.to)
         : to;
@@ -357,15 +635,15 @@ function parseSourceComments(state: EditorState) {
   // line. They keep the line break after them: the next line stays its own.
   const text = source.trimEnd().length;
   for (const range of hidden) {
-    const line = state.doc.lineAt(range.from);
+    const line = doc.lineAt(range.from);
     if (line.from !== range.from || line.number === 1) continue;
     const end = range.to >= text;
     if (!end && source[range.to - 1] !== "\n") continue;
-    let above = state.doc.line(line.number - 1);
+    let above = doc.line(line.number - 1);
     let blank = false;
     while (!above.text.trim() && above.number > 1) {
       blank = true;
-      above = state.doc.line(above.number - 1);
+      above = doc.line(above.number - 1);
     }
     if (
       !above.text.trim() ||
@@ -375,7 +653,6 @@ function parseSourceComments(state: EditorState) {
     range.from = above.to;
     if (source[range.to - 1] === "\n") range.to--;
   }
-  cache.set(state.doc, hidden);
   return hidden;
 }
 

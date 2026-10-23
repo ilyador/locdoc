@@ -6,6 +6,7 @@ import React from "react";
 import * as Y from "yjs";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
+import { yUndoManagerKeymap } from "y-codemirror.next";
 import { sourceComments } from "../src/comment-syntax";
 import { documentFormat } from "../src/document-format";
 import { sourceCommentRanges } from "../src/editor-comments";
@@ -825,6 +826,136 @@ test("Backspace after records behind a table's or HTML block's blank line joins 
         sourceComments(source, false).map((t) => t.messages),
         `${label}: every conversation stays whole`,
       );
+    } finally {
+      editor.close();
+    }
+  }
+});
+
+// Presses a key in an editor whose caret is at `anchor`.
+function press(editor: ReturnType<typeof mount>, anchor: number, key: string) {
+  act(() =>
+    editor.view.dispatch({ selection: { anchor }, userEvent: "select" }),
+  );
+  act(() => {
+    editor.view.contentDOM.dispatchEvent(
+      new window.KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+}
+
+// The shared fixtures whose comment ends text that a joined line ends: each
+// source is the joined text, and its expected source is what placement
+// writes for a passage ending at `after`.
+const joins = () =>
+  JSON.parse(
+    readFileSync(
+      new URL("./fixtures/file-comments.json", import.meta.url),
+      "utf8",
+    ),
+  ).filter((c: any) => c.comment?.join) as {
+    name: string;
+    path: string;
+    source: string;
+    comment: { after: string; expected: string };
+  }[];
+
+test("joining a line onto text that a comment ends writes the record where placement would, as in the shared fixtures", () => {
+  const cases = joins();
+  assert.deepEqual(
+    [...new Set(cases.map((c) => documentFormat(c.path)))].sort(),
+    ["fountain", "markdown", "text"],
+  );
+  const added = "[[comment(ana): A note]]";
+  for (const c of cases) {
+    const at = c.source.indexOf(c.comment.after) + c.comment.after.length;
+    // The comment's record ends the first line, and the next line joins it.
+    const source = `${c.source.slice(0, at)}${added}\n${c.source.slice(at)}`;
+    for (const [key, caret] of [
+      ["Backspace", at + added.length + 1],
+      ["Delete", at + added.length],
+    ] as const) {
+      const label = `${c.name}, ${key}`;
+      const editor = mount(`Notes/${c.path}`, source, { editable: true });
+      const joined = mount(`Notes/${c.path}`, c.source, { editable: true });
+      try {
+        press(editor, caret, key);
+        assert.equal(editor.text.toString(), c.comment.expected, label);
+        assert.equal(
+          editor.view.state.selection.main.head,
+          at,
+          `${label}: the caret is where the lines join`,
+        );
+        act(() =>
+          joined.view.dispatch({
+            selection: { anchor: at },
+            userEvent: "select",
+          }),
+        );
+        assert.deepEqual(
+          shown(editor.view),
+          shown(joined.view),
+          `${label}: the lines show joined, as without the comment`,
+        );
+      } finally {
+        editor.close();
+        joined.close();
+      }
+    }
+  }
+});
+
+test("Backspace joining a Markdown line onto text that conversations end keeps their replies and order, in one undo", () => {
+  const [a, b, c] = [
+    "[[comment(alex): Which brand?]]",
+    "[[comment(ben): Oat]]",
+    "[[comment(cy): A note]]",
+  ];
+  for (const [path, source, joined, expected] of [
+    [
+      "Notes/list.md",
+      `Buy milk${a}\n${b}\nBuy eggs\nBuy bread`,
+      "Buy eggs",
+      `Buy milkBuy eggs\nBuy bread${a}\n${b}`,
+    ],
+    [
+      "Notes/list.md",
+      `Buy milk${a}\n\n${c}\nBuy eggs\n\nAfter`,
+      "Buy eggs",
+      `Buy milkBuy eggs${a}\n\n${c}\n\nAfter`,
+    ],
+    [
+      "Notes/script.fountain",
+      `MAYA\nWhere were you?${a}\n${b}\nI waited.\n\nBEN\nHere.`,
+      "I waited.",
+      `MAYA\nWhere were you?I waited.${a}\n${b}\n\nBEN\nHere.`,
+    ],
+  ] as const) {
+    const editor = mount(path, source, { editable: true });
+    try {
+      press(editor, source.indexOf(joined), "Backspace");
+      const label = JSON.stringify(source);
+      assert.equal(editor.text.toString(), expected, label);
+      assert.equal(
+        editor.view.state.selection.main.head,
+        expected.indexOf(joined),
+        `${label}: the caret is where the lines join`,
+      );
+      assert.deepEqual(
+        sourceComments(expected, false).map((t) => t.messages),
+        sourceComments(source, false).map((t) => t.messages),
+        `${label}: every conversation stays whole`,
+      );
+      act(() => {
+        yUndoManagerKeymap.find((binding) => binding.key === "Mod-z")!.run!(
+          editor.view,
+        );
+      });
+      assert.equal(editor.text.toString(), source, `${label}: one undo`);
     } finally {
       editor.close();
     }
