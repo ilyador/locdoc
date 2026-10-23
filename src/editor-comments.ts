@@ -61,7 +61,6 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
         )
           return tr;
         const hidden = sourceCommentRanges(tr.startState);
-        const plain = tr.startState.facet(plainCommentRecords);
         const doc = tr.startState.doc;
         const moves: {
           from: number;
@@ -73,19 +72,21 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
           if (!range || from !== to || !inserted.length) return;
           // Both sides of an invisible record occupy the same visible text
           // position. Type on its trailing side so a backslash cannot escape
-          // the delimiter. Plain text records that follow text on its line
-          // and hide later line breaks show at the end of that text, so its
-          // line keeps what is typed up to a line break, unless that ends in
-          // an odd run of backslashes.
+          // the delimiter. Records that follow text on its line and hide
+          // later line breaks show at the end of that text, so its line
+          // keeps what is typed up to a line break, unless that ends in an
+          // odd run of backslashes right before a record.
           const insert = inserted.toString();
           let lead = "";
           if (
-            plain &&
             doc.lineAt(range.from).from < range.from &&
             doc.lineAt(range.to).from > range.from
           ) {
             const line = insert.split("\n", 1)[0];
-            if ((line.length - line.replace(/\\+$/, "").length) % 2 === 0)
+            if (
+              doc.sliceString(range.from, range.from + 1) !== "[" ||
+              (line.length - line.replace(/\\+$/, "").length) % 2 === 0
+            )
               lead = line;
           }
           const trail = insert.slice(lead.length);
@@ -429,6 +430,13 @@ export function hiddenAfter(state: EditorState, end: number) {
   return range?.from === end ? range.to : end;
 }
 
+// The text of a line that a reader sees.
+function visibleLine(state: EditorState, line: Line) {
+  return visibleTextRanges(state, line.from, line.to)
+    .map((range) => state.sliceDoc(range.from, range.to))
+    .join("");
+}
+
 // Split the displayed text at its anchor, without inserting Markdown newlines.
 // A rendered table is indivisible, so conversations belong after its preview.
 // Its marker sits at the end edge of the table or figure, which is the left
@@ -451,14 +459,18 @@ function commentPosition(
       };
   }
   const line = state.doc.lineAt(pos);
-  const image = state.facet(mediaPreview) && wholeLineImage(line.text);
+  const image =
+    state.facet(mediaPreview) && wholeLineImage(visibleLine(state, line));
   if (image)
     return {
       pos: hiddenAfter(state, line.to),
       block: true,
       direction: textDirection(image.alt),
     };
-  return { pos, block: false };
+  // A passage selected up to the end of its line can end among the records
+  // hidden there, where nothing shows: its marker shows where they start.
+  const hidden = hiddenRangeAfter(state, pos);
+  return { pos: hidden && hidden.from < pos ? hidden.from : pos, block: false };
 }
 
 class CommentMarker extends WidgetType {

@@ -165,6 +165,52 @@ function displayed(view: EditorView) {
 
 const record = "[[comment(alex): note]]";
 
+test("typing at the end of a line before hidden records writes on that line", () => {
+  for (const [path, source] of [
+    ["Notes/second.md", `Text${record}\n\n[[comment(ana): A note]]\n## Next`],
+    ["Notes/table.md", `| A |\n| - |\n| x |\n\n${record}\n## Next`],
+    ["Notes/end.md", `A paragraph.\n\n${record}`],
+    [
+      "Notes/script.fountain",
+      `ALEX\nHello there.${record}\n\n[[comment(ana): A note]]\n\nBEN\nHi.`,
+    ],
+  ] as const) {
+    const shown = mount(path, source);
+    const [hidden] = sourceCommentRanges(shown.view.state);
+    shown.close();
+    for (const side of [hidden.from, hidden.to]) {
+      const editor = mount(path, source, { editable: true });
+      try {
+        act(() =>
+          editor.view.dispatch({
+            selection: { anchor: side },
+            userEvent: "select",
+          }),
+        );
+        act(() =>
+          editor.view.dispatch({
+            changes: { from: side, insert: "s" },
+            selection: { anchor: side + 1 },
+            userEvent: "input.type",
+          }),
+        );
+        assert.equal(
+          editor.text.toString(),
+          source.slice(0, hidden.from) + "s" + source.slice(hidden.from),
+          `${path} at ${side}`,
+        );
+        assert.equal(
+          sourceComments(editor.text.toString(), false).length,
+          sourceComments(source, false).length,
+          `${path} at ${side}: every conversation stays`,
+        );
+      } finally {
+        editor.close();
+      }
+    }
+  }
+});
+
 test("a table at the end of a document shows its conversation after it, and no empty line", () => {
   const table = "| One | Two |\n| --- | --- |\n| Body | Cell |";
   const source = `${table}\n\n${record}`;
@@ -235,6 +281,63 @@ test("a table at the end of a document shows its conversation after it, and no e
     page.unmount();
     awareness.destroy();
     ydoc.destroy();
+  }
+});
+
+test("a passage selected past the records that end its line still shows its marker", () => {
+  // The second passage was selected to the end of the line, after the first
+  // conversation's hidden record.
+  const first = `[[comment(alex): First]]`;
+  const source = `Text${first}\n\n[[comment(ana): Second]]\n## Next`;
+  for (const path of ["Notes/markers.md", "Notes/markers.fountain"]) {
+    const ydoc = new Y.Doc();
+    const text = ydoc.getText("content");
+    text.insert(0, source);
+    const at = (index: number, assoc = 0) =>
+      Y.relativePositionToJSON(
+        Y.createRelativePositionFromTypeIndex(text, index, assoc),
+      );
+    const thread = (id: string, end: number) => ({
+      id,
+      name: "alex",
+      body: "note",
+      canResolve: true,
+      quote: "Text",
+      anchor: { start: at(0), end: at(end, -1) },
+      created: 0,
+      resolved: false,
+      replies: [],
+    });
+    const awareness = new Awareness(ydoc);
+    const page = render(
+      <MarkdownEditor
+        ydoc={ydoc}
+        provider={{ awareness } as any}
+        id="markers"
+        editable={false}
+        path={path}
+        onChange={() => {}}
+        onComment={() => {}}
+        onUpload={() => {}}
+        comments={[thread("c1", 4), thread("c2", 4 + first.length)]}
+      />,
+    );
+    try {
+      const markers = [
+        ...page.container.querySelectorAll<HTMLElement>(".comment-marker"),
+      ];
+      assert.deepEqual(
+        markers.map((marker) => marker.dataset.commentId).sort(),
+        ["c1", "c2"],
+        path,
+      );
+      for (const marker of markers)
+        assert.equal(marker.closest(".cm-line")?.textContent, "Text", path);
+    } finally {
+      page.unmount();
+      awareness.destroy();
+      ydoc.destroy();
+    }
   }
 });
 

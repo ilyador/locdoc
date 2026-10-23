@@ -124,7 +124,9 @@ export function livePreview(
             if (
               from === line.from &&
               to <= line.to &&
-              !state.sliceDoc(to, line.to).trim()
+              !visibleTextRanges(state, to, line.to).some((range) =>
+                state.sliceDoc(range.from, range.to).trim(),
+              )
             ) {
               // The figure also covers records hidden right after it.
               const end = hiddenAfter(state, line.to);
