@@ -7,6 +7,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type CSSProperties,
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
@@ -47,6 +48,7 @@ import {
 import { mac, shortcuts } from "./shortcuts";
 import { isolateName } from "./bidi";
 import { PathText } from "./ui";
+import { keyedChunks, treeChunks } from "./tree-chunks";
 import type { SidebarView } from "./workspace";
 
 export type TreeRow =
@@ -84,7 +86,8 @@ type RowHandlers = {
   drop: (event: DragEvent, folder: string) => void;
   finishDrag: () => void;
   share: (path: string) => void;
-  element: (path: string, element: HTMLLIElement | null) => void;
+  // A row's element as it mounts; the function returned forgets it.
+  element: (path: string, element: HTMLLIElement) => () => void;
 };
 
 // One row of the tree. A workspace lists a thousand of them and the tree
@@ -148,7 +151,7 @@ const TreeEntry = memo(function TreeEntry({
   const name = baseName(e.path);
   const path = e.path;
   const ref = useCallback(
-    (element: HTMLLIElement | null) => handlers.current.element(path, element),
+    (element: HTMLLIElement) => handlers.current.element(path, element),
     [handlers, path],
   );
   return (
@@ -302,6 +305,12 @@ const TreeEntry = memo(function TreeEntry({
   );
 });
 
+// The path of a row element of the tree.
+const rowPath = (element: Element | null) =>
+  element instanceof HTMLElement && element.getAttribute("role") === "treeitem"
+    ? element.dataset.path
+    : undefined;
+
 // A VS Code-style ARIA tree: one row takes Tab focus, arrows move between
 // visible rows, Right and Left open, close and climb folders, Enter opens,
 // and owners get F2, Delete, a context menu and drag and drop.
@@ -336,6 +345,11 @@ export function FileTree({
   const treeId = useId();
   const container = useRef<HTMLDivElement>(null);
   const elements = useRef(new Map<string, HTMLLIElement>());
+  // A focused row that moves to another chunk mounts again; it takes the
+  // focus back as it does.
+  const refocus = useRef<string | null>(null);
+  // The keys of chunks holding a name field or a dragged row.
+  const kept = useRef(new Map<string, string>()).current;
   const entryRows = rows.filter(
     (row): row is Extract<TreeRow, { type: "entry" }> => row.type === "entry",
   );
@@ -394,10 +408,13 @@ export function FileTree({
   }, []);
   const request = files?.request;
   // A row an action asked to focus before the tree listed it, such as a
-  // restored item, with the element that kept focus while it was missing.
-  const waiting = useRef<{ path: string; holder: Element | null } | null>(
-    null,
-  );
+  // restored item, with the element that kept focus while it was missing,
+  // and that element's row: a row mounts again as it moves between chunks.
+  const waiting = useRef<{
+    path: string;
+    holder: Element | null;
+    holderRow?: string;
+  } | null>(null);
   useLayoutEffect(() => {
     if (!request || request.seq === handled.current) return;
     handled.current = request.seq;
@@ -412,6 +429,7 @@ export function FileTree({
       waiting.current = {
         path: request.path,
         holder: document.activeElement,
+        holderRow: rowPath(document.activeElement),
       };
   }, [request?.seq]);
   // Once the listing shows that row, it takes focus, unless focus moved on.
@@ -421,7 +439,12 @@ export function FileTree({
     if (!pending || !element) return;
     waiting.current = null;
     const active = document.activeElement;
-    if (!active || active === document.body || active === pending.holder)
+    if (
+      !active ||
+      active === document.body ||
+      active === pending.holder ||
+      (pending.holderRow !== undefined && rowPath(active) === pending.holderRow)
+    )
       focusRow(pending.path);
   });
 
@@ -799,8 +822,19 @@ export function FileTree({
     finishDrag,
     share: (path) => shareFolder?.(path),
     element: (path, element) => {
-      if (element) elements.current.set(path, element);
-      else elements.current.delete(path);
+      elements.current.set(path, element);
+      if (refocus.current === path) {
+        refocus.current = null;
+        const active = document.activeElement;
+        if (!active || active === document.body)
+          element.focus({ preventScroll: true });
+      }
+      return () => {
+        if (document.activeElement === element) refocus.current = path;
+        // The row's new element may have mounted first.
+        if (elements.current.get(path) === element)
+          elements.current.delete(path);
+      };
     },
   };
   // Before any layout effect, which may move focus into a row.
@@ -891,6 +925,13 @@ export function FileTree({
   const rendered = rows.map((row) =>
     row.type === "entry" ? rowFor(row) : createRow(row),
   );
+  const chunks = keyedChunks(
+    treeChunks(rows, view, [
+      files?.edit?.mode === "rename" ? files.edit.path : null,
+      dragging,
+    ]),
+    kept,
+  );
   useEffect(() => {
     if (nextLabel === Infinity) return;
     // A day at most, which also keeps the delay in range for setTimeout.
@@ -932,7 +973,24 @@ export function FileTree({
           className="tree"
           onKeyDown={onKeyDown}
         >
-          {rendered}
+          {chunks.map((chunk) => (
+            <li
+              key={chunk.key}
+              role="none"
+              className={chunk.holds ? "tree-chunk live" : "tree-chunk"}
+              style={
+                {
+                  "--folders": chunk.folders,
+                  "--files": chunk.files,
+                  "--paths": chunk.paths,
+                } as CSSProperties
+              }
+            >
+              <ul role="none">
+                {rendered.slice(chunk.start, chunk.start + chunk.size)}
+              </ul>
+            </li>
+          ))}
         </ul>
       )}
       {!entryRows.length && empty}

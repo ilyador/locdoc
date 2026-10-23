@@ -759,7 +759,7 @@ test("By date offers only document actions: rename, duplicate, copy paths and de
   act(() => workspace.files.startCreate("file"));
   assert.ok(
     document.querySelector("[role=treeitem].tree-create") ===
-      tree().firstElementChild,
+      tree().querySelector("[role=treeitem]"),
     "A new document's field opens at the top of By date",
   );
   key(screen.getByRole("textbox"), "Escape");

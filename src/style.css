@@ -3595,6 +3595,36 @@ button:hover {
     margin-right: -4px;
   }
 }
+/* A workspace lists a thousand rows, and laying out all of them held up the
+   first paint. The tree lays its rows out in chunks (src/tree-chunks.ts). A
+   chunk away from the screen skips its layout and keeps the height its rows
+   have when shown, row by row, so the list scrolls, returns to its place,
+   takes focus and finds text as before. Engines without content-visibility
+   lay out every row. */
+.tree-chunk {
+  display: block;
+  --title-line: calc(var(--ui-body-size) * 1.5);
+  --folder-row: 38px;
+  --file-row: 38px;
+  --path-row: calc(16px + var(--title-line) + var(--ui-caption-size) * 1.5);
+}
+.date-list .tree-chunk {
+  --file-row: max(38px, calc(16px + var(--title-line)));
+}
+@media (pointer: coarse), (max-width: 760px) {
+  .file-tree .tree-chunk {
+    --file-row: calc(16px + var(--title-line) + var(--ui-timestamp-size) * 1.5);
+  }
+}
+@supports (content-visibility: auto) {
+  .tree-chunk:not(.live) {
+    content-visibility: auto;
+    contain-intrinsic-height: calc(
+      var(--folders, 0) * var(--folder-row) + var(--files, 0) *
+        var(--file-row) + var(--paths, 0) * var(--path-row)
+    );
+  }
+}
 .tree-item.dragging {
   opacity: 0.45;
 }
