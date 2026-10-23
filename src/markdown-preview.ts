@@ -214,6 +214,40 @@ export function livePreview(
               state.doc.lineAt(from).from,
               Decoration.line({ class: `md-h${heading[1]}` }),
             );
+          // Every line of a setext heading's text is the heading. Its
+          // underline is its marker: away from the selection it hides with
+          // the line break before it, after the heading's last visible text.
+          const setext = name.match(/^SetextHeading(\d)$/);
+          if (setext) {
+            const mark = n.node.getChild("HeaderMark");
+            const underline = state.doc.lineAt(mark ? mark.from : to);
+            let end = underline.from;
+            for (let pos = from; pos < underline.from;) {
+              const line = state.doc.lineAt(pos);
+              lineStyle(
+                line.from,
+                Decoration.line({ class: `md-h${setext[1]}` }),
+              );
+              if (
+                visibleTextRanges(state, line.from, line.to).some((range) =>
+                  state.sliceDoc(range.from, range.to).trim(),
+                )
+              )
+                end = line.to;
+              pos = line.to + 1;
+            }
+            if (inactive(from, to))
+              for (const part of visibleTextRanges(state, end, underline.to))
+                if (part.to > part.from)
+                  decorations.push(
+                    Decoration.replace({}).range(part.from, part.to),
+                  );
+          }
+          if (name === "HorizontalRule" && inactive(from, to))
+            lineStyle(
+              state.doc.lineAt(from).from,
+              Decoration.line({ class: "md-rule" }),
+            );
           if (name === "StrongEmphasis" || name === "Emphasis") {
             const content = emphasisContentRange(n);
             decorations.push(
@@ -261,6 +295,11 @@ export function livePreview(
               "StrikethroughMark",
               "QuoteMark",
             ].includes(name) &&
+            // A setext underline hides with its heading, above.
+            !(
+              name === "HeaderMark" &&
+              n.node.parent?.name.startsWith("SetextHeading")
+            ) &&
             inactive(from, to) &&
             !codeLines.has(state.doc.lineAt(from).number)
           ) {
@@ -375,17 +414,6 @@ export function livePreview(
         Decoration.mark({ class: "md-list-prefix" }).range(from, content),
       );
     }
-    for (const range of ranges)
-      for (
-        let i = state.doc.lineAt(range.from).number;
-        i <= state.doc.lineAt(range.to).number;
-        i++
-      ) {
-        const line = state.doc.line(i);
-        if (codeLines.has(i) || tableLines.has(i)) continue;
-        if (/^\s*[-*_]{3,}\s*$/.test(line.text) && inactive(line.from, line.to))
-          lineStyle(line.from, Decoration.line({ class: "md-rule" }));
-      }
     for (const { at, style } of lineStyles) {
       const line = shown.of.get(at);
       if (line === undefined || blockStarts.has(line))

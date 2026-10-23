@@ -239,6 +239,21 @@ const markdownChecks: Record<string, (source: string) => void> = {
         assert.ok(has(six.line(0), "md-h6"), "up to six #"),
       );
     }),
+  "Heading\n===": (source) => {
+    for (const [underlined, level] of [
+      [source, "md-h1"],
+      ["Heading\n---", "md-h2"],
+    ] as const)
+      rendered(`${underlined}\n\nText`, "markdown", (view) => {
+        assert.ok(has(view.line(0), level), `${underlined}: ${level}`);
+        assert.deepEqual(
+          view.texts(),
+          ["Heading", "", "Text"],
+          `${underlined}: the underline is hidden`,
+        );
+        assert.equal(view.all(".md-rule").length, 0, "--- is not a rule");
+      });
+  },
   "**bold**": (source) =>
     rendered(source, "markdown", (view) => {
       assert.equal(view.one(".md-strong")?.textContent, "bold");
@@ -397,6 +412,11 @@ const markdownChecks: Record<string, (source: string) => void> = {
     rendered(source, "markdown", (view) =>
       assert.ok(has(view.line(0), "md-rule")),
     );
+    // Any thematic break is a rule, wherever the parser finds one.
+    rendered("Text\n\n* * *\n\n> Quote\n>\n> ___", "markdown", (view) => {
+      assert.ok(has(view.line(2), "md-rule"), "* * *");
+      assert.ok(has(view.line(6), "md-rule"), "a rule in a quote");
+    });
   },
   ...commentChecks("markdown"),
 };

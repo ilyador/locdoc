@@ -81,6 +81,11 @@ const markdown: SyntaxReference = {
             source: ["# ", "Heading"],
             meaning: "Heading; add # for smaller ones, up to six",
           },
+          {
+            source: ["", "Heading", "\n==="],
+            meaning:
+              "Also a heading; a line of --- under it makes a smaller one",
+          },
           { source: ["**", "bold", "**"], meaning: "Bold" },
           { source: ["*", "italic", "*"], meaning: "Italic, or _italic_" },
           { source: ["~~", "deleted", "~~"], meaning: "Strikethrough" },

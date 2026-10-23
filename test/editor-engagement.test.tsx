@@ -162,6 +162,41 @@ test("a heading on the first line renders at open and focusing the editor reveal
   }
 });
 
+test("a setext heading shows its underline only while the selection is on the heading", () => {
+  const source = "Story\n=====\nA first beat.\n\nScene\n-----\nMore.";
+  const doc = open(source);
+  const click = (text: string, offset = 0) =>
+    act(() =>
+      doc.view.dispatch({
+        selection: { anchor: source.indexOf(text) + offset },
+        userEvent: "select.pointer",
+      }),
+    );
+  try {
+    assert.equal(doc.line(".cm-line.md-h1"), "Story", "= underlines a heading");
+    assert.equal(doc.line(".cm-line.md-h2"), "Scene", "- a smaller one");
+    assert.ok(!/[=-]{5}/.test(doc.shown()), "both underlines are hidden");
+    assert.equal(
+      doc.page.container.querySelectorAll(".md-rule").length,
+      0,
+      "an underline is no rule",
+    );
+    click("Story", 2);
+    assert.ok(doc.shown().includes("====="), "its text shows the underline");
+    assert.ok(!doc.shown().includes("-----"), "the other one stays hidden");
+    assert.equal(doc.line(".cm-line.md-h1"), "Story");
+    click("=====", 5);
+    assert.ok(doc.shown().includes("====="), "so does the underline's line");
+    click("Scene");
+    assert.ok(doc.shown().includes("-----"));
+    assert.ok(!doc.shown().includes("====="), "away, it hides again");
+    click("More.");
+    assert.ok(!/[=-]{5}/.test(doc.shown()), "the next line is away");
+  } finally {
+    doc.close();
+  }
+});
+
 test("Locdoc's own selections and remote edits reveal nothing; typing does", () => {
   const doc = open("Some **bold** words.\n\nA second paragraph.");
   try {
