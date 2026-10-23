@@ -49,6 +49,7 @@ export function SharedDocumentNote({
 
 export function WorkspaceSidebar({
   workspace,
+  panel,
   note,
   searchInput,
   choose,
@@ -58,6 +59,7 @@ export function WorkspaceSidebar({
   onSettings,
 }: {
   workspace: Workspace;
+  panel?: RefObject<HTMLElement | null>;
   // Where the open document's workspace shows its note, if it has one.
   note?: (element: HTMLElement | null) => void;
   searchInput: RefObject<HTMLInputElement | null>;
@@ -92,6 +94,7 @@ export function WorkspaceSidebar({
     });
   return (
     <aside
+      ref={panel}
       id="workspace-sidebar"
       className={`sidebar ${sidebar ? "is-open" : ""}`}
       inert={!sidebar}
@@ -108,7 +111,11 @@ export function WorkspaceSidebar({
           </span>
           locdoc<span className="brand-dot">.</span>
         </a>
-        <IconButton label="Close sidebar" onClick={() => setSidebar(false)}>
+        <IconButton
+          label="Close sidebar"
+          data-sidebar-close=""
+          onClick={() => setSidebar(false)}
+        >
           <SidebarSimple />
         </IconButton>
       </div>

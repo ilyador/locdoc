@@ -184,6 +184,7 @@ export function DocumentWorkspace({
   const fileInput = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
+  const sidebarTrigger = useRef<HTMLButtonElement>(null);
   const accessQuery = sharedToken
     ? `?token=${encodeURIComponent(sharedToken)}`
     : "";
@@ -271,12 +272,15 @@ export function DocumentWorkspace({
     setPanel("folder-share");
   };
   // The sidebar stays mounted as documents open; while this document is
-  // open, it acts through this render's handlers.
+  // open, it acts through this render's handlers, and gives keyboard focus
+  // back to this document's Open sidebar.
   const port: DocumentPort = {
     choose,
     prepare: prepareNavigation,
     shareFolder,
     settings: () => setPanel("settings"),
+    trigger: sidebarTrigger,
+    focusesEditor: () => !!id && files.focusesEditor(id),
   };
   const ports = frame.port;
   const own = useRef<DocumentPort | null>(null);
@@ -351,7 +355,8 @@ export function DocumentWorkspace({
           <SharedDocumentNote doc={doc} filename={filename} />,
           frame.note,
         )}
-      <main className="workspace" style={style}>
+      {/* While the drawer covers the document, the document is out of reach. */}
+      <main className="workspace" style={style} inert={frame.covered}>
         <DocumentTopbar
           doc={doc}
           path={path}
@@ -359,6 +364,7 @@ export function DocumentWorkspace({
           people={people}
           sidebar={sidebar}
           openSidebar={() => setSidebar(true)}
+          sidebarTrigger={sidebarTrigger}
           commentsOpen={thread.commentsOpen}
           toggleComments={thread.toggle}
           share={trashed ? undefined : () => setPanel("share")}

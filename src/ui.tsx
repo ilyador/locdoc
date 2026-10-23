@@ -1,5 +1,6 @@
 import React, { Fragment, type CSSProperties } from "react";
 import { hasRightToLeft } from "./bidi";
+import { nameParts } from "./document-format";
 import { normalizePresence } from "./presence";
 const colors = ["#487495", "#b46538", "#526db0", "#a04c73", "#80752c"];
 export function IconButton({
@@ -7,7 +8,7 @@ export function IconButton({
   children,
   className = "",
   ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string }) {
+}: React.ComponentProps<"button"> & { label: string }) {
   return (
     <button
       className={`icon-button ${className}`}
@@ -48,7 +49,8 @@ export function Avatar({
 }
 // A path reads left to right like the interface, each folder in its own
 // direction, so Hebrew folder names cannot swap places or carry the slashes
-// with them. A path without right-to-left letters stays one plain string.
+// with them. A name keeps its extension after it, as the sidebar shows it. A
+// path without right-to-left letters stays one plain string.
 export function PathText({
   path,
   separator = " / ",
@@ -60,12 +62,16 @@ export function PathText({
   if (!hasRightToLeft(path)) return <>{parts.join(separator)}</>;
   return (
     <>
-      {parts.map((part, index) => (
-        <Fragment key={index}>
-          {index > 0 && separator}
-          <bdi>{part}</bdi>
-        </Fragment>
-      ))}
+      {parts.map((part, index) => {
+        const [title, extension] = nameParts(part);
+        return (
+          <Fragment key={index}>
+            {index > 0 && separator}
+            <bdi>{title}</bdi>
+            {extension}
+          </Fragment>
+        );
+      })}
     </>
   );
 }

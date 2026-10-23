@@ -158,6 +158,78 @@ test("names and paths inside sentences keep their own direction", () => {
   );
 });
 
+// A rendered path with each isolated part in brackets: what follows a bracket
+// reads after that part, left to right like the interface.
+const isolated = (element: Element) =>
+  Array.from(element.childNodes, (node) =>
+    node.nodeName === "BDI" ? `[${node.textContent}]` : node.textContent,
+  ).join("");
+
+test("a Hebrew file name keeps its extension after it wherever a path is shown", async () => {
+  const { PathText } = await import("../src/ui");
+  const { DocumentOptions } = await import("../src/workspace-panels");
+  const { RemovedDocumentRecovery } =
+    await import("../src/removed-document-recovery");
+  const path = "Notes/Art/“ככה התשוקה - כמו חדר נפתח.md";
+  const shown = (element: React.ReactElement) => {
+    const page = render(<span data-path="">{element}</span>);
+    const text = isolated(page.container.querySelector("[data-path]")!);
+    page.unmount();
+    return text;
+  };
+  assert.equal(
+    shown(<PathText path={path} separator="/" />),
+    "[Notes]/[Art]/[“ככה התשוקה - כמו חדר נפתח].md",
+    "The extension is outside the name's isolate, after it",
+  );
+  assert.equal(
+    shown(<PathText path="Notes/תמונות/צילום מסך.PNG" />),
+    "[Notes] / [תמונות] / [צילום מסך].PNG",
+    "An image keeps its extension after its name too",
+  );
+  assert.equal(
+    shown(<PathText path="Notes/גרסה 2.0" />),
+    "[Notes] / [גרסה 2.0]",
+    "A dot inside a name is part of it",
+  );
+  assert.equal(shown(<PathText path="Notes/Plan.md" />), "Notes / Plan.md");
+
+  // Document options names the open document by its path.
+  const options = render(
+    <DocumentOptions
+      doc={{ id: "x", path, owner: false, edit: false, usage: 0 } as any}
+      format="markdown"
+      endpoint="/api/docs/x"
+      formatting={null}
+      onDownload={() => {}}
+      onHistory={() => {}}
+      onRename={() => {}}
+    />,
+  );
+  assert.equal(
+    isolated(options.container.querySelector(".dialog-description")!),
+    "[Notes]/[Art]/[“ככה התשוקה - כמו חדר נפתח].md",
+  );
+  options.unmount();
+
+  // Removed document recovery lists documents by their last paths.
+  globalThis.fetch = (async () =>
+    new Response(JSON.stringify([{ id: "gone", path, removed: 1 }]), {
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch;
+  const recovery = render(<RemovedDocumentRecovery />);
+  fireEvent.click(recovery.getByText("Removed document recovery"));
+  const row = await waitFor(() => {
+    const element = recovery.container.querySelector(
+      ".removed-recovery-row > span",
+    );
+    assert.ok(element, "The removed document is listed");
+    return element;
+  });
+  assert.equal(isolated(row), "[Notes]/[Art]/[“ככה התשוקה - כמו חדר נפתח].md");
+  recovery.unmount();
+});
+
 test("Hebrew comments, the composer and the find fields read in their own direction", async () => {
   const { CommentThread, CommentComposer } = await import("../src/comments");
   const thread = render(
@@ -410,12 +482,9 @@ test("dialogs isolate Hebrew names and paths, and their fields follow typed text
   assert.equal(picker.getByRole("combobox").getAttribute("dir"), "auto");
   const result = picker.getByRole("option");
   assert.equal(result.querySelector("strong")!.getAttribute("dir"), "auto");
-  assert.deepEqual(
-    Array.from(
-      result.querySelectorAll("small bdi"),
-      (part) => part.textContent,
-    ),
-    ["Notes", "ארכיון", "שמן זית.md"],
+  assert.equal(
+    isolated(result.querySelector("small")!),
+    "[Notes]/[ארכיון]/[שמן זית].md",
   );
   picker.unmount();
   const history = render(

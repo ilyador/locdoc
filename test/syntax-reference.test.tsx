@@ -789,8 +789,9 @@ test("a tap toggles the reference and touch pointers never count as hovering", a
   assert.equal(down, false, "the press keeps the caret where it was");
 });
 
-test("the reference stays inside the viewport, above the label, on a phone and on a desktop", () => {
+test("the reference sits 8px above the label, inside the viewport, in every format on a phone and on a desktop", () => {
   const original = window.HTMLElement.prototype.getBoundingClientRect;
+  const computed = globalThis.getComputedStyle;
   const box = (left: number, top: number, width: number, height: number) =>
     ({
       left,
@@ -814,38 +815,88 @@ test("the reference stays inside the viewport, above the label, on a phone and o
     });
   };
   const saved = [window.innerWidth, window.innerHeight];
+  let label = box(0, 0, 0, 0);
+  // The panel as a browser lays it out: its width, and its content's height
+  // up to its maximum.
+  let content = { width: 0, height: 0 };
+  const laidOut = (layer: HTMLElement) => ({
+    width: content.width,
+    height: Math.min(content.height, parseFloat(layer.style.maxHeight)),
+  });
+  window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains("markdown-tag")) return label;
+    if (!this.classList.contains("syntax-reference"))
+      return original.call(this);
+    // It opens with menu-in, growing from 0.98 of its size from its bottom
+    // right corner, so its first frame's box is smaller than its layout.
+    const left = parseFloat(this.style.left) || 0;
+    const top = parseFloat(this.style.top) || 0;
+    const { width, height } = laidOut(this);
+    return box(
+      left + width * 0.02,
+      top + height * 0.02,
+      width * 0.98,
+      height * 0.98,
+    );
+  };
+  globalThis.getComputedStyle = ((element: Element, pseudo?: string) => {
+    const style = computed(element, pseudo);
+    if (!element.classList.contains("syntax-reference")) return style;
+    const { width, height } = laidOut(element as HTMLElement);
+    return new Proxy(style, {
+      get(target, key) {
+        if (key === "width") return `${width}px`;
+        if (key === "height") return `${height}px`;
+        const value = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }) as typeof getComputedStyle;
   try {
-    for (const [width, height, label, panel] of [
-      [390, 844, box(300, 816, 66, 20), box(0, 0, 358, 1600)],
-      [1258, 920, box(1160, 892, 76, 20), box(0, 0, 800, 560)],
-    ] as const) {
-      viewport(width, height);
-      window.HTMLElement.prototype.getBoundingClientRect = function () {
-        if (this.classList.contains("markdown-tag")) return label;
-        if (this.classList.contains("syntax-reference")) return panel;
-        return original.call(this);
-      };
-      const view = footer();
-      act(() => view.trigger.click());
-      const layer = view.panel()!;
-      const left = parseFloat(layer.style.left);
-      const top = parseFloat(layer.style.top);
-      const room = parseFloat(layer.style.maxHeight);
-      const shown = Math.min(panel.height, room);
-      assert.ok(left >= 16, `${width}px: inside the left gutter`);
-      assert.ok(left + panel.width <= width - 16, `${width}px: right gutter`);
-      assert.ok(top >= 12, `${width}px: below the top edge`);
-      assert.ok(top + shown <= label.top - 8, `${width}px: above the label`);
-      assert.ok(
-        room <= height * 0.72,
-        `${width}px: leaves part of the document in view`,
-      );
-      if (width > 1000)
-        assert.equal(left + panel.width, label.right, "aligned to the label");
-      cleanup();
-    }
+    for (const [width, height, labelBox] of [
+      [390, 844, box(300, 816, 66, 20)],
+      [1258, 920, box(1160, 892, 76, 20)],
+    ] as const)
+      for (const [format, panelWidth, panelHeight] of [
+        ["markdown", 800, 1600],
+        ["fountain", 800, 640],
+        ["text", 456, 520],
+      ] as const) {
+        const where = `${format} at ${width}px`;
+        viewport(width, height);
+        label = labelBox;
+        content = {
+          width: Math.min(panelWidth, width - 32),
+          height: panelHeight,
+        };
+        const view = footer(paths[format]);
+        act(() => view.trigger.click());
+        const layer = view.panel()!;
+        const left = parseFloat(layer.style.left);
+        const top = parseFloat(layer.style.top);
+        const room = parseFloat(layer.style.maxHeight);
+        const shown = laidOut(layer);
+        assert.ok(left >= 16, `${where}: inside the left gutter`);
+        assert.ok(left + shown.width <= width - 16, `${where}: right gutter`);
+        assert.ok(top >= 12, `${where}: below the top edge`);
+        assert.ok(
+          Math.abs(label.top - 8 - (top + shown.height)) < 0.01,
+          `${where}: its bottom is 8px above the label, not ${label.top - top - shown.height}px`,
+        );
+        assert.ok(
+          room <= height * 0.72,
+          `${where}: leaves part of the document in view`,
+        );
+        if (width > 1000)
+          assert.ok(
+            Math.abs(left + shown.width - label.right) < 0.01,
+            `${where}: aligned to the label's right edge`,
+          );
+        cleanup();
+      }
   } finally {
     window.HTMLElement.prototype.getBoundingClientRect = original;
+    globalThis.getComputedStyle = computed;
     viewport(saved[0], saved[1]);
   }
 });

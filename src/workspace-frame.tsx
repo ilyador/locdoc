@@ -7,8 +7,10 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { flushSync } from "react-dom";
 import { IconContext } from "@phosphor-icons/react";
 import { NamePrompt } from "./name-prompt";
+import { useSidebarFocus } from "./sidebar-focus";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import type { Entry } from "./model";
 import type { Workspace } from "./workspace";
@@ -21,20 +23,24 @@ export type DocumentPort = {
   prepare: () => Promise<void>;
   shareFolder: (path: string) => void;
   settings: () => void;
+  // The document's Open sidebar, which takes focus back as the sidebar
+  // closes.
+  trigger: RefObject<HTMLButtonElement | null>;
+  // Whether the document is about to focus its editor, as one created from
+  // the sidebar does.
+  focusesEditor: () => boolean;
 };
+// What the frame gives the open document's workspace.
 export type Frame = {
   port: RefObject<DocumentPort | null>;
   // Where the open document's workspace shows a shared document's note.
   note: HTMLElement | null;
+  // Whether the sidebar covers the document as a drawer. The document is out
+  // of reach meanwhile.
+  covered: boolean;
 };
 
 const icons = { size: 18, weight: "regular" } as const;
-
-export function useFrame() {
-  const port = useRef<DocumentPort | null>(null);
-  const [note, setNote] = useState<HTMLElement | null>(null);
-  return { frame: { port, note }, setNote };
-}
 
 // The workspace around the open document: the sidebar and the frame it
 // shares with the document. A workspace lists a thousand documents, and
@@ -42,18 +48,26 @@ export function useFrame() {
 // this stays mounted while the document inside it changes.
 export function WorkspaceFrame({
   workspace,
-  frame,
-  setNote,
   children,
 }: {
   workspace: Workspace;
-  frame: Frame;
-  setNote: (element: HTMLElement | null) => void;
-  children: ReactNode;
+  // The open document's workspace, given what the frame shares with it.
+  children: (frame: Frame) => ReactNode;
 }) {
   const { sidebar, setSidebar, sidebarWidth, files } = workspace;
+  const port = useRef<DocumentPort | null>(null);
+  const [note, setNote] = useState<HTMLElement | null>(null);
+  const panel = useRef<HTMLElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
-  const { port } = frame;
+  // Keyboard focus moves into the sidebar as it opens and back out to the
+  // open document as it closes.
+  const covered = useSidebarFocus({
+    open: sidebar,
+    setOpen: setSidebar,
+    sidebar: panel,
+    trigger: () => port.current?.trigger.current ?? null,
+    editorTakesFocus: () => !!port.current?.focusesEditor(),
+  });
   const choose = useCallback(
     (entry: Entry) => port.current?.choose(entry),
     [port],
@@ -71,7 +85,8 @@ export function WorkspaceFrame({
     const onKey = (e: KeyboardEvent) => {
       if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setSidebar(true);
+        // A closed sidebar is inert: it opens before its search takes focus.
+        flushSync(() => setSidebar(true));
         searchInput.current?.focus();
       }
     };
@@ -96,6 +111,7 @@ export function WorkspaceFrame({
         />
         <WorkspaceSidebar
           workspace={workspace}
+          panel={panel}
           note={setNote}
           searchInput={searchInput}
           choose={choose}
@@ -104,7 +120,7 @@ export function WorkspaceFrame({
           onShareFolder={shareFolder}
           onSettings={settings}
         />
-        {children}
+        {children({ port, note, covered })}
       </div>
     </IconContext.Provider>
   );

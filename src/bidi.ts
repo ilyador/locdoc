@@ -1,3 +1,5 @@
+import { nameParts } from "./document-format";
+
 export type TextDirection = "ltr" | "rtl";
 
 // Letters of the right-to-left scripts: Hebrew, Arabic, Syriac, Thaana, N'Ko,
@@ -31,11 +33,11 @@ export function isolate(text: string) {
   return hasRightToLeft(text) ? `\u{2068}${text}\u{2069}` : text;
 }
 
-// A file or folder name keeps a document's extension after its title, where
-// the sidebar shows it.
+// A file or folder name keeps its extension after its title, where the
+// sidebar shows it.
 export function isolateName(name: string) {
-  const extension = /\.(md|fountain|txt)$/i.exec(name)?.[0] || "";
-  return isolate(name.slice(0, name.length - extension.length)) + extension;
+  const [title, extension] = nameParts(name);
+  return isolate(title) + extension;
 }
 
 // Each folder of a path keeps its place, left to right like the interface.

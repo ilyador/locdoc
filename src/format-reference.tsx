@@ -87,9 +87,18 @@ export function FormatReference({ format }: { format: DocumentFormat }) {
       Math.min(anchor.top - GAP - TOP, window.innerHeight * 0.72),
     );
     layer.style.maxHeight = `${room}px`;
-    const box = layer.getBoundingClientRect();
-    const width = Math.min(box.width, window.innerWidth - EDGE * 2);
-    const height = Math.min(box.height, room);
+    // Its border box in the layout. The panel opens growing from its bottom
+    // right corner, and its smaller box on that first frame would place it
+    // over the label.
+    const size = getComputedStyle(layer);
+    const width = Math.min(
+      parseFloat(size.width) || layer.offsetWidth,
+      window.innerWidth - EDGE * 2,
+    );
+    const height = Math.min(
+      parseFloat(size.height) || layer.offsetHeight,
+      room,
+    );
     layer.style.left = `${Math.max(
       EDGE,
       Math.min(anchor.right - width, window.innerWidth - EDGE - width),
