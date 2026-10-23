@@ -3,7 +3,7 @@
 A small, self-hosted Markdown and Fountain editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
 
 - Real nested folders and ordinary UTF-8 `.md`, `.fountain` and `.txt` files.
-- A searchable sidebar with **By date** and **Folders** tabs; your selected view is remembered locally.
+- A searchable sidebar with **By date** and **Folders** tabs, both newest first; your selected view is remembered locally.
 - File actions as in a code editor's explorer, with a trash: a deleted document or folder can always be put back.
 - Autosave, live Markdown formatting, task lists, tables, local images and videos.
 - Live Fountain screenplay formatting: scene headings, dialogue, parentheticals, transitions, title pages, notes, and dual dialogue.
@@ -255,6 +255,8 @@ To reclaim retained storage, the owner can delete unwanted files from `.assets/`
 Useful shortcuts: Ctrl/Cmd K to find a document, or to link the text selected in a Markdown document, Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
 
 ## Files, folders and the trash
+
+The **By date** tab lists every document, newest first. The **Folders** tab lists the real folders: in every folder, the documents root included, folders come before documents, each newest first. A folder goes by the newest document anywhere inside it, and folders that hold no document come after the others; ties go by name. A document saved in Locdoc or in a desktop editor moves to the top of its folder, and its folders move up through their parents, once the next listing brings its new time; open folders stay open and the list keeps its place. A search hides rows without reordering the rest, and folder links list their folders the same way. **Move to…** lists folders by name.
 
 The **Folders** tab offers file actions as in a code editor's explorer: **New File** and **New Folder** with an inline name, **Rename**, **Delete**, **Duplicate**, **Copy Path** and **Copy Relative Path**, and dragging documents and folders onto a folder or the root to move them. The **By date** tab offers the document actions that need no folder.
 

@@ -603,3 +603,95 @@ test("a folder link visitor's tree keeps its place and keyboard focus as the nex
     "The arrow keys go on from there",
   );
 });
+
+test("a folder link visitor's tree lists folders, then documents, by their latest change, and follows an edit with the next poll", async () => {
+  const doc = (path: string, modified: number) => ({
+    kind: "file",
+    path,
+    id: path.replace(/\W+/g, "-"),
+    shared: true,
+    modified,
+    title: path.split("/").pop()!.replace(/\.md$/, ""),
+  });
+  const folder = (path: string) => ({
+    kind: "folder",
+    path,
+    id: null,
+    shared: true,
+    modified: 0,
+    title: path,
+  });
+  const listing = [
+    folder("Drafts"),
+    doc("Drafts/intro.md", 200),
+    doc("Drafts/outline.md", 300),
+    folder("Final"),
+    doc("Final/chapter.md", 500),
+    doc("readme.md", 100),
+    doc("summary.md", 400),
+  ];
+  let current = listing;
+  globalThis.fetch = async (input) =>
+    String(input).startsWith("/api/open/")
+      ? response({
+          owner: false,
+          root: "",
+          guest: "guest",
+          publicUrl: location.origin,
+          folder: { name: "Book", permission: "view" },
+          entries: listing,
+          document: { id: "summary-md" },
+        })
+      : response({ entries: current });
+  let workspace;
+  function Visitor() {
+    workspace = useWorkspace();
+    return (
+      <WorkspaceSidebar
+        workspace={workspace}
+        searchInput={{ current: null }}
+        choose={() => {}}
+        prepare={async () => {}}
+        onCreate={() => {}}
+        onShareFolder={() => {}}
+        onSettings={() => {}}
+      />
+    );
+  }
+  render(<Visitor />);
+  const row = (path) =>
+    document.querySelector(`[role="treeitem"][data-path="${path}"]`);
+  await waitFor(() => assert.ok(row("Drafts")));
+  assert.equal(workspace.sidebarView, "folders");
+  fireEvent.click(row("Drafts"));
+  fireEvent.click(row("Final"));
+  const paths = () =>
+    Array.from(
+      document.querySelectorAll('[role="treeitem"][data-path]'),
+      (element) => element.getAttribute("data-path"),
+    );
+  assert.deepEqual(paths(), [
+    "Final",
+    "Final/chapter.md",
+    "Drafts",
+    "Drafts/outline.md",
+    "Drafts/intro.md",
+    "summary.md",
+    "readme.md",
+  ]);
+  current = listing.map((entry) =>
+    entry.path === "Drafts/intro.md" ? { ...entry, modified: 900 } : entry,
+  );
+  await act(() => workspace.loadTree());
+  assert.deepEqual(paths(), [
+    "Drafts",
+    "Drafts/intro.md",
+    "Drafts/outline.md",
+    "Final",
+    "Final/chapter.md",
+    "summary.md",
+    "readme.md",
+  ]);
+  assert.equal(row("Drafts").getAttribute("aria-expanded"), "true");
+  assert.equal(row("Final").getAttribute("aria-expanded"), "true");
+});

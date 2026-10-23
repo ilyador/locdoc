@@ -184,10 +184,20 @@ test("a long workspace lists its rows without building a collator or date format
       assert.equal(listed.join("\n"), expected.join("\n"), "newest first");
     } else {
       const title = (e: any) => e.title;
+      // A folder is as new as its newest document; a document as itself.
+      const latest = (e: any) =>
+        e.kind === "folder"
+          ? Math.max(
+              ...files
+                .filter((file) => file.path.startsWith(`${e.path}/`))
+                .map((file) => file.modified),
+            )
+          : e.modified;
       const order = (list: any[]) =>
         [...list].sort(
           (a, b) =>
             Number(b.kind === "folder") - Number(a.kind === "folder") ||
+            latest(b) - latest(a) ||
             title(a).localeCompare(title(b), undefined, {
               numeric: true,
               sensitivity: "base",
@@ -207,7 +217,7 @@ test("a long workspace lists its rows without building a collator or date format
       assert.equal(
         listed.join("\n"),
         expected.join("\n"),
-        "folders first, by name",
+        "folders first, then documents, each newest first",
       );
     }
     for (const row of rows.filter((row) => row.classList.contains("file"))) {

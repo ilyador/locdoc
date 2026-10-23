@@ -12,8 +12,9 @@ import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
 import { parentPath } from "./file-names";
 import {
-  compareNames,
-  comparePaths,
+  folderSortKey,
+  latestChangeFirst,
+  latestChanges,
   recentDocuments,
 } from "./recent-documents";
 
@@ -62,7 +63,7 @@ function listingOf(entries: Entry[], needle: string): Listing {
   listings.set(entries, listing);
   return listing;
 }
-// The visible entries of each folder, folders first, then by title.
+// The visible entries of each folder, in the order latestChangeFirst gives.
 function folders(listing: Listing) {
   if (listing.children) return listing.children;
   const children = new Map<string, Entry[]>();
@@ -73,20 +74,13 @@ function folders(listing: Listing) {
     siblings.push(entry);
     children.set(parent, siblings);
   }
+  // A folder's latest change counts every document in it, matching a search
+  // or not, so a search hides rows without reordering the rest.
+  const latest = latestChanges(listing.entries);
   for (const siblings of children.values()) {
-    // Each title is worked out once.
     const sorted = siblings
-      .map((entry) => ({
-        entry,
-        folder: entry.kind === "folder",
-        title: documentTitle(entry),
-      }))
-      .sort(
-        (a, b) =>
-          Number(b.folder) - Number(a.folder) ||
-          compareNames(a.title, b.title) ||
-          comparePaths(a.entry.path, b.entry.path),
-      );
+      .map((entry) => folderSortKey(entry, latest))
+      .sort(latestChangeFirst);
     sorted.forEach((item, index) => (siblings[index] = item.entry));
   }
   return (listing.children = children);

@@ -1,4 +1,5 @@
 import type { Entry } from "./model";
+import { documentTitle } from "./document-links.ts";
 
 // Making a collator or a date format costs far more than using one, and the
 // sidebar uses them for every row it lists. These are made once, with the
@@ -52,6 +53,63 @@ export function recentDocuments(entries: Entry[]) {
         (b.modified || 0) - (a.modified || 0) || comparePaths(a.path, b.path),
     );
 }
+
+// When each folder last changed: the time of the newest document anywhere
+// inside it. A folder with no document at any depth has none.
+export function latestChanges(entries: Entry[]) {
+  const latest = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.kind !== "file") continue;
+    const time = entry.modified || 0;
+    let end = entry.path.lastIndexOf("/");
+    while (end > 0) {
+      const folder = entry.path.slice(0, end);
+      const known = latest.get(folder);
+      // The folders above it are at least as new already.
+      if (known !== undefined && known >= time) break;
+      latest.set(folder, time);
+      end = folder.lastIndexOf("/");
+    }
+  }
+  return latest;
+}
+
+// What the Folders view sorts an entry by among the entries of its folder,
+// worked out once for each entry.
+export type FolderSortKey = {
+  entry: Entry;
+  title: string;
+  folder: boolean;
+  // A folder with no document at any depth.
+  empty: boolean;
+  // In seconds, 0 for none: a document's own time, a folder's latest change,
+  // or an empty folder's own time if the listing has one.
+  time: number;
+};
+export function folderSortKey(
+  entry: Entry,
+  latest: Map<string, number>,
+): FolderSortKey {
+  const folder = entry.kind === "folder";
+  const changed = folder ? latest.get(entry.path) : undefined;
+  return {
+    entry,
+    title: documentTitle(entry),
+    folder,
+    empty: folder && changed === undefined,
+    time: changed ?? (entry.modified || 0),
+  };
+}
+
+// The Folders view's order in every folder, the root included: folders
+// above documents, each newest first, a folder by its latest change. Empty
+// folders come after the others. Ties go by name.
+export const latestChangeFirst = (a: FolderSortKey, b: FolderSortKey) =>
+  Number(b.folder) - Number(a.folder) ||
+  Number(a.empty) - Number(b.empty) ||
+  b.time - a.time ||
+  compareNames(a.title, b.title) ||
+  comparePaths(a.entry.path, b.entry.path);
 
 // The written forms of each time the sidebar shows, which never change. A
 // listing shows the same times each time it renders.
