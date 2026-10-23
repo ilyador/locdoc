@@ -317,11 +317,19 @@ pub(super) fn previewed(content: &str) -> HashSet<String> {
     }
     previewed
 }
+/// Whether a canonical path is in a trash folder: a `.trash`, where other
+/// applications keep deleted files, or Locdoc's own `.locdoc-trash`. Media in
+/// one is served to nobody, its owner included, unlike a file in another
+/// dot-named folder, which only link visitors never see.
+pub(super) fn in_trash(path: &Path) -> bool {
+    path.components()
+        .any(|part| part.as_os_str() == ".trash" || part.as_os_str() == namespace::TRASH)
+}
 /// The file a local media reference of `d` names, or why Locdoc shows it to
 /// nobody, its owner included: `outside` the documents folder, `missing`,
-/// `hidden` in a trash folder, `invalid` when it is spelled as no path Locdoc
-/// opens (an absolute path, backslashes, `://` or broken percent-encoding),
-/// or as `unservable` judges the file.
+/// in the `state` folder or in a `trash` folder, `invalid` when it is spelled
+/// as no path Locdoc opens (an absolute path, backslashes, `://` or broken
+/// percent-encoding), or as `unservable` judges the file.
 fn owner_file(
     s: &Store,
     d: &Document,
@@ -353,11 +361,13 @@ fn unresolved(s: &Store, d: &Document, reference: &str) -> &'static str {
         .join(Path::new(&d.path).parent().unwrap())
         .join(decoded.as_ref());
     match fs::canonicalize(&path) {
+        Ok(file) if !file.starts_with(&s.root) => "outside",
         // Inside the documents folder only a state folder kept there and a
         // trash folder are refused.
         Ok(file) if s.in_state(&file) => "state",
-        Ok(file) if file.starts_with(&s.root) => "hidden",
-        Ok(_) => "outside",
+        Ok(file) if in_trash(&file) => "trash",
+        // It appeared after `Store::media_path` found nothing there.
+        Ok(_) => "missing",
         // Nothing is there; a spelling that climbs out names nothing inside.
         Err(_) => {
             let mut spelled = PathBuf::new();
@@ -1159,8 +1169,18 @@ mod tests {
                 .unwrap();
         }
         fs::write(dir.path().join("outside.png"), &png).unwrap();
-        fs::create_dir_all(s.root.join(".locdoc-trash/item")).unwrap();
-        fs::write(s.root.join(".locdoc-trash/item/old.png"), &png).unwrap();
+        // Locdoc's own trash, and the `.trash` other applications keep at the
+        // top of a folder they open: neither is served, not even to the
+        // owner, unlike another dot-named folder.
+        for path in [
+            ".locdoc-trash/item/old.png",
+            ".trash/older.png",
+            "Notes/.trash/binned.png",
+            "Notes/.dot/kept.png",
+        ] {
+            fs::create_dir_all(s.root.join(path).parent().unwrap()).unwrap();
+            fs::write(s.root.join(path), &png).unwrap();
+        }
         // The desktop file approves every one of them.
         fs::write(
             s.root.join("Notes/page.md"),
@@ -1168,6 +1188,8 @@ mod tests {
                 "![big](big.png) ![clip](big.mp4) ![small](clip.mp4) ![photo](photo.png)\n",
                 "![notes](notes.png) ![gone](gone.png) ![outside](../../outside.png)\n",
                 "![trashed](../.locdoc-trash/item/old.png) ![windows](pics\\photo.png)\n",
+                "![older](../.trash/older.png) ![binned](.trash/binned.png)\n",
+                "![kept](.dot/kept.png)\n",
             ),
         )
         .unwrap();
@@ -1178,7 +1200,10 @@ mod tests {
             payload["hiddenMedia"],
             json!([
                 {"path": "../../outside.png", "reason": "outside"},
-                {"path": "../.locdoc-trash/item/old.png", "reason": "hidden"},
+                {"path": "../.locdoc-trash/item/old.png", "reason": "trash"},
+                {"path": "../.trash/older.png", "reason": "trash"},
+                {"path": ".dot/kept.png", "reason": "hidden"},
+                {"path": ".trash/binned.png", "reason": "trash"},
                 {"path": "big.mp4", "reason": "too-large"},
                 {"path": "big.png", "reason": "too-large"},
                 {"path": "gone.png", "reason": "missing"},
@@ -1190,14 +1215,27 @@ mod tests {
         let (_, refused) = room
             .lock()
             .unwrap()
-            .share_media(&s, &d, &["big.png".into(), "big.mp4".into()])
+            .share_media(
+                &s,
+                &d,
+                &[
+                    "big.png".into(),
+                    "big.mp4".into(),
+                    "../.locdoc-trash/item/old.png".into(),
+                    "../.trash/older.png".into(),
+                    ".dot/kept.png".into(),
+                ],
+            )
             .unwrap();
         drop(room);
         assert_eq!(
             refused,
             [
                 ("big.png".to_string(), "too-large"),
-                ("big.mp4".to_string(), "too-large")
+                ("big.mp4".to_string(), "too-large"),
+                ("../.locdoc-trash/item/old.png".to_string(), "trash"),
+                ("../.trash/older.png".to_string(), "trash"),
+                (".dot/kept.png".to_string(), "hidden"),
             ]
         );
         let request = |path: &str, token: Option<&str>, headers: HeaderMap| {
@@ -1211,13 +1249,18 @@ mod tests {
             let response = request(path, Some("page-link"), HeaderMap::new()).await;
             assert_eq!(response.unwrap().status(), StatusCode::OK, "{path}");
         }
+        // The owner's editor loads an image in another dot-named folder.
+        let kept = request(".dot/kept.png", None, owner(&s)).await;
+        assert_eq!(kept.unwrap().status(), StatusCode::OK);
         for (path, reason) in [
             ("big.png", "too-large"),
             ("big.mp4", "too-large"),
             ("notes.png", "unsupported"),
             ("gone.png", "missing"),
             ("../../outside.png", "outside"),
-            ("../.locdoc-trash/item/old.png", "hidden"),
+            ("../.locdoc-trash/item/old.png", "trash"),
+            ("../.trash/older.png", "trash"),
+            (".trash/binned.png", "trash"),
             ("pics\\photo.png", "invalid"),
         ] {
             // The owner's editor learns why it has no picture to show.

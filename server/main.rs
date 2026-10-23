@@ -416,7 +416,7 @@ impl Store {
         self.resolve_media(Path::new(&d.path).parent().unwrap(), rel)
     }
     /// The file a media reference names from a folder, inside the root and
-    /// outside `.trash`, Locdoc's own trash and the state folder.
+    /// outside every `media::in_trash` folder and the state folder.
     fn resolve_media(&self, folder: &Path, rel: &str) -> Result<PathBuf> {
         if rel.contains("://") || rel.starts_with('/') || rel.contains('\\') {
             return Err(bad("Only local attachments are supported."));
@@ -432,9 +432,7 @@ impl Store {
             .map_err(|_| ApiError(StatusCode::NOT_FOUND, "Attachment not found.".into()))?;
         if !canonical.starts_with(&self.root)
             || self.in_state(&canonical)
-            || canonical
-                .components()
-                .any(|p| p.as_os_str() == ".trash" || p.as_os_str() == namespace::TRASH)
+            || media::in_trash(&canonical)
         {
             return Err(denied());
         }

@@ -14,10 +14,12 @@ type ShareResult = { ok: boolean; shared: string[]; refused: Refusal[] };
 // shown as inert text.
 const reason = (code: string) =>
   Object.hasOwn(mediaReasons, code) ? mediaReasons[code] : code;
-// Locdoc serves these to nobody, so there is no picture to load.
+// Locdoc serves these to nobody, so there is no picture to load. A file in
+// another hidden folder ("hidden") is still the owner's to see.
 const unavailable = new Set([
   "missing",
   "outside",
+  "trash",
   "state",
   "too-large",
   "unsupported",

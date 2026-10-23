@@ -89,6 +89,7 @@ export const mediaReasons: Record<string, string> = {
   missing: "File not found",
   outside: "Outside your documents folder",
   hidden: "In a hidden file or folder",
+  trash: "In a trash folder",
   state: "In Locdoc's state folder",
   "too-large": "Over the 5 MB image or 20 MB video limit",
   unsupported: "Not an image or video Locdoc can show",

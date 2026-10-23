@@ -20,7 +20,9 @@ export type TrashItem = {
   documents: number;
 };
 // A media reference the owner's editor shows that link visitors cannot see,
-// and why. Only "unapproved" is the owner's to change from Locdoc.
+// and why. Only "unapproved" is the owner's to change from Locdoc. "hidden"
+// is a dot-named file or folder the owner still sees; "trash" is a `.trash`
+// or `.locdoc-trash` folder, which serves nobody.
 export type HiddenMedia = {
   path: string;
   reason:
@@ -28,6 +30,7 @@ export type HiddenMedia = {
     | "missing"
     | "outside"
     | "hidden"
+    | "trash"
     | "state"
     | "too-large"
     | "unsupported"
