@@ -205,7 +205,7 @@ test("comments the server adds to plain text show no new line, as in the shared 
         (thread) =>
           thread.messages.length === 1 &&
           thread.messages[0].name === "ana" &&
-          thread.messages[0].body === "A note",
+          thread.messages[0].body === (c.comment.body ?? "A note"),
       ),
       `${c.name}: the new comment is its own conversation`,
     );

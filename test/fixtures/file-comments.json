@@ -439,6 +439,17 @@
     }
   },
   {
+    "name": "Markdown: a comment whose own | would make a table header of its line continues the paragraph on the next line",
+    "path": "notes.md",
+    "source": "a\n- | -",
+    "threads": [],
+    "comment": {
+      "after": "a",
+      "body": "one | two",
+      "expected": "a\n[[comment(ana): one | two]]\n- | -"
+    }
+  },
+  {
     "name": "Markdown: a paragraph that a heading follows gains no line",
     "path": "notes.md",
     "source": "# ADHD\nMost of it is wrong.\nSo first, we need to talk about choice.\n## 1\nMore.",
@@ -674,6 +685,56 @@
     }
   },
   {
+    "name": "Markdown: fenced code that a rule follows gives the record the line after the rule, which a record on the line after the fence would underline as a heading",
+    "path": "notes.md",
+    "source": "```\ncode\n```\n---",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "```\ncode\n```\n---\n[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: fenced code that a rule and more text follow gives the record the line after the rule",
+    "path": "notes.md",
+    "source": "```\ncode\n```\n---\nMore",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "```\ncode\n```\n---\n[[comment(ana): A note]]\nMore"
+    }
+  },
+  {
+    "name": "Markdown: fenced code that === follows ends the next paragraph's text with the record",
+    "path": "notes.md",
+    "source": "Text\n\n```\ncode\n```\n===\nMore",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "Text\n\n```\ncode\n```\n===\nMore[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: fenced code that a blank line and a rule follow takes the record on the line after its fence",
+    "path": "notes.md",
+    "source": "```\ncode\n```\n\n---",
+    "threads": [],
+    "comment": {
+      "after": "code",
+      "expected": "```\ncode\n```\n[[comment(ana): A note]]\n\n---"
+    }
+  },
+  {
+    "name": "Markdown: a table that a rule follows gives the record the line after the rule",
+    "path": "notes.md",
+    "source": "| A |\n| - |\n| x |\n---\nMore",
+    "threads": [],
+    "comment": {
+      "after": "x",
+      "expected": "| A |\n| - |\n| x |\n---\n[[comment(ana): A note]]\nMore"
+    }
+  },
+  {
     "name": "Markdown: an HTML block keeps a blank line before the record",
     "path": "notes.md",
     "source": "<div>\nhi\n</div>\n\nAfter",
@@ -691,6 +752,16 @@
     "comment": {
       "after": "---",
       "expected": "Text\n\n---\n[[comment(ana): A note]]\n\nMore"
+    }
+  },
+  {
+    "name": "Markdown: a rule that another rule follows gives the record the line after the second rule",
+    "path": "notes.md",
+    "source": "Text\n\n---\n---\nMore",
+    "threads": [],
+    "comment": {
+      "after": "---",
+      "expected": "Text\n\n---\n---\n[[comment(ana): A note]]\nMore"
     }
   },
   {
