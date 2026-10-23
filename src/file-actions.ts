@@ -730,6 +730,7 @@ export function useFileActions({
       editorFocus.current = null;
       return true;
     },
+    focusesEditor: (id: string) => editorFocus.current === id,
   };
 }
 export type FileActions = ReturnType<typeof useFileActions>;

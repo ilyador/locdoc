@@ -5,6 +5,7 @@ import {
   useState,
   type CSSProperties,
 } from "react";
+import { flushSync } from "react-dom";
 import { IconContext, WarningCircle, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import { MarkdownEditor } from "./editor";
@@ -47,6 +48,7 @@ import {
 import { baseName, within } from "./file-names";
 import { TrashedDocument, TrashedNotice } from "./trash";
 import { WorkspaceSidebar } from "./workspace-sidebar";
+import { useSidebarFocus } from "./sidebar-focus";
 import {
   EmptyWorkspace,
   OpeningDocument,
@@ -173,6 +175,17 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
   const searchInput = useRef<HTMLInputElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
+  const sidebarPanel = useRef<HTMLElement>(null);
+  const sidebarTrigger = useRef<HTMLButtonElement>(null);
+  // While the drawer covers the document, the document is out of reach.
+  const drawerOpen = useSidebarFocus({
+    open: sidebar,
+    setOpen: setSidebar,
+    sidebar: sidebarPanel,
+    trigger: sidebarTrigger,
+    memory: workspace.sidebarFocus,
+    editorTakesFocus: () => !!id && files.focusesEditor(id),
+  });
   const accessQuery = sharedToken
     ? `?token=${encodeURIComponent(sharedToken)}`
     : "";
@@ -197,7 +210,8 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
     const onKey = (e: KeyboardEvent) => {
       if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setSidebar(true);
+        // A closed sidebar is inert: it opens before its search takes focus.
+        flushSync(() => setSidebar(true));
         searchInput.current?.focus();
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
@@ -333,6 +347,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           workspace={workspace}
           doc={doc}
           filename={filename}
+          panel={sidebarPanel}
           searchInput={searchInput}
           choose={choose}
           prepare={prepareNavigation}
@@ -340,7 +355,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
           onShareFolder={shareFolder}
           onSettings={() => setPanel("settings")}
         />
-        <main className="workspace">
+        <main className="workspace" inert={drawerOpen}>
           <DocumentTopbar
             doc={doc}
             path={path}
@@ -348,6 +363,7 @@ export function DocumentWorkspace({ workspace }: { workspace: Workspace }) {
             people={people}
             sidebar={sidebar}
             openSidebar={() => setSidebar(true)}
+            sidebarTrigger={sidebarTrigger}
             commentsOpen={thread.commentsOpen}
             toggleComments={thread.toggle}
             share={trashed ? undefined : () => setPanel("share")}

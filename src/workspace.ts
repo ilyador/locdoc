@@ -6,6 +6,7 @@ import { protectTouchViewport } from "./touch-viewport";
 import { api, ownerSession, send } from "./api";
 import { normalizePresence } from "./presence";
 import { useFileActions } from "./file-actions";
+import type { SidebarFocus } from "./sidebar-focus";
 import {
   sharedToken,
   directDocumentId,
@@ -151,6 +152,8 @@ export function useWorkspace() {
     folders: 0,
     search: 0,
   }).current;
+  // Keyboard focus follows the sidebar into the next document's workspace.
+  const sidebarFocus = useRef<SidebarFocus>({ returning: false }).current;
   const current = useRef(id);
   const folderView = useRef(false);
   current.current = id;
@@ -347,6 +350,7 @@ export function useWorkspace() {
     sidebarView,
     setSidebarView,
     sidebarScroll,
+    sidebarFocus,
     loadTree,
     patchEntries,
     files,

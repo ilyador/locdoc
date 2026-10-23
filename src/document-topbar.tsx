@@ -6,6 +6,7 @@ import {
   ShareNetwork,
   SidebarSimple,
 } from "@phosphor-icons/react";
+import type { RefObject } from "react";
 import { documentExtension } from "./document-format";
 import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document } from "./model";
@@ -17,6 +18,7 @@ export function DocumentTopbar({
   people,
   sidebar,
   openSidebar,
+  sidebarTrigger,
   commentsOpen,
   toggleComments,
   share,
@@ -28,6 +30,8 @@ export function DocumentTopbar({
   people: { name: string; color: string }[];
   sidebar: boolean;
   openSidebar: () => void;
+  // Open sidebar, which takes focus back as the sidebar closes.
+  sidebarTrigger?: RefObject<HTMLButtonElement | null>;
   commentsOpen: boolean;
   toggleComments: () => void;
   // Absent while the document is in the trash: its links are suspended.
@@ -37,7 +41,11 @@ export function DocumentTopbar({
     <header className="topbar">
       <div className="breadcrumbs">
         {!sidebar && (
-          <IconButton label="Open sidebar" onClick={openSidebar}>
+          <IconButton
+            ref={sidebarTrigger}
+            label="Open sidebar"
+            onClick={openSidebar}
+          >
             <SidebarSimple />
           </IconButton>
         )}

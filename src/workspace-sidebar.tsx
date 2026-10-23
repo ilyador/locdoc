@@ -19,6 +19,7 @@ export function WorkspaceSidebar({
   workspace,
   doc,
   filename,
+  panel,
   searchInput,
   choose,
   prepare,
@@ -29,6 +30,7 @@ export function WorkspaceSidebar({
   workspace: Workspace;
   doc: Document | null;
   filename: string;
+  panel?: RefObject<HTMLElement | null>;
   searchInput: RefObject<HTMLInputElement | null>;
   choose: (entry: Entry) => void;
   prepare: () => Promise<void>;
@@ -61,6 +63,7 @@ export function WorkspaceSidebar({
     });
   return (
     <aside
+      ref={panel}
       id="workspace-sidebar"
       className={`sidebar ${sidebar ? "is-open" : ""}`}
       inert={!sidebar}
@@ -77,7 +80,11 @@ export function WorkspaceSidebar({
           </span>
           locdoc<span className="brand-dot">.</span>
         </a>
-        <IconButton label="Close sidebar" onClick={() => setSidebar(false)}>
+        <IconButton
+          label="Close sidebar"
+          data-sidebar-close=""
+          onClick={() => setSidebar(false)}
+        >
           <SidebarSimple />
         </IconButton>
       </div>
