@@ -1044,3 +1044,155 @@ test("joining the empty line that a record's own line shows removes that line an
     }
   }
 });
+
+test("Delete before hidden records, or Backspace after them, deletes what a reader sees past them and keeps them whole", () => {
+  for (const [path, source, side, key, expected, rows] of [
+    // Delete on the leading side deletes the next character a reader sees.
+    [
+      "Notes/past.md",
+      `Some ${record}words`,
+      "from",
+      "Delete",
+      `Some ${record}ords`,
+      ["md-block-end: Some ords"],
+    ],
+    [
+      "Notes/past.fountain",
+      `She waits${record} here.`,
+      "from",
+      "Delete",
+      `She waits${record}here.`,
+      ["fountain-action fountain-block-end fountain-line: She waitshere."],
+    ],
+    [
+      "Notes/past.txt",
+      `Buy milk${record} today`,
+      "from",
+      "Delete",
+      `Buy milk${record}today`,
+      ["text-block-end: Buy milktoday"],
+    ],
+    // ...and the line break after records that end a line joins the next
+    // line, as the line break's own deletion does.
+    [
+      "Notes/past.md",
+      `Buy milk${record}\nBuy eggs`,
+      "from",
+      "Delete",
+      `Buy milkBuy eggs${record}`,
+      ["md-block-end: Buy milkBuy eggs"],
+    ],
+    // A record's own line shows the next line: Delete there deletes that
+    // line's first character.
+    [
+      "Notes/past.md",
+      `Paragraph.\n${record}\n# Heading`,
+      "from",
+      "Delete",
+      `Paragraph.\n${record}\n Heading`,
+      ["md-block-end: Paragraph.", "md-block-end:  Heading"],
+    ],
+    // Backspace on the trailing side deletes the character before them.
+    [
+      "Notes/past.md",
+      `Buy milk${record}\nBuy eggs`,
+      "to",
+      "Backspace",
+      `Buy mil${record}\nBuy eggs`,
+      ["md-block-end: Buy mil", "md-block-end: Buy eggs"],
+    ],
+    [
+      "Notes/past.txt",
+      `Buy milk${record}\nBuy eggs`,
+      "to",
+      "Backspace",
+      `Buy mil${record}\nBuy eggs`,
+      ["text-block-end: Buy mil", "text-block-end: Buy eggs"],
+    ],
+    // ...and at the start of the line a record's own line shows, it joins
+    // that line onto the line above.
+    [
+      "Notes/past.md",
+      `Paragraph.\n${record}\n# Heading`,
+      "to",
+      "Backspace",
+      `Paragraph.# Heading${record}`,
+      ["md-block-end: Paragraph.# Heading"],
+    ],
+    [
+      "Notes/past.fountain",
+      `She waits.\n${record}\nHe leaves.`,
+      "to",
+      "Backspace",
+      `She waits.He leaves.${record}`,
+      [
+        "fountain-action fountain-block-end fountain-line: She waits.He leaves.",
+      ],
+    ],
+  ] as const) {
+    const label = `${path}: ${JSON.stringify(source)}, ${key}`;
+    const editor = mount(path, source, { editable: true });
+    try {
+      const [hidden] = sourceCommentRanges(editor.view.state);
+      press(editor, hidden[side], key);
+      assert.equal(editor.text.toString(), expected, label);
+      assert.equal(
+        sourceComments(editor.text.toString(), path.endsWith(".txt")).length,
+        1,
+        `${label}: the conversation stays`,
+      );
+      act(() =>
+        editor.view.dispatch({
+          selection: { anchor: 0 },
+          userEvent: "select",
+        }),
+      );
+      assert.deepEqual(shown(editor.view), rows, label);
+    } finally {
+      editor.close();
+    }
+  }
+});
+
+test("each Delete before hidden records deletes the next character, and word deletion the next word", () => {
+  const source = `Some ${record}words here`;
+  const editor = mount("Notes/words.md", source, { editable: true });
+  try {
+    const [hidden] = sourceCommentRanges(editor.view.state);
+    press(editor, hidden.from, "Delete");
+    press(editor, hidden.from, "Delete");
+    assert.equal(editor.text.toString(), `Some ${record}rds here`);
+    act(() => {
+      editor.view.dispatch({
+        selection: { anchor: hidden.from },
+        userEvent: "select",
+      });
+      editor.view.contentDOM.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Delete",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    assert.equal(editor.text.toString(), `Some ${record} here`);
+    act(() => {
+      editor.view.dispatch({
+        selection: { anchor: hidden.to },
+        userEvent: "select",
+      });
+      editor.view.contentDOM.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Backspace",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    assert.equal(editor.text.toString(), `${record} here`);
+  } finally {
+    editor.close();
+  }
+});

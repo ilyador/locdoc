@@ -1,6 +1,7 @@
 import { Prec, type Extension, type Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { ySyncAnnotation } from "y-codemirror.next";
+import { pastRecords } from "./editor-comments";
 
 // Mobile contenteditable can report deleting the preceding line's first letter
 // instead of its break. Capture the caret intent from beforeinput and apply it
@@ -13,6 +14,8 @@ export function lineBackspaceIntent(): Extension {
         beforeinput(event, view) {
           const { state } = view;
           const caret = state.selection.main;
+          // A caret after hidden records deletes what shows before them.
+          const head = pastRecords(state, caret.head, false);
           lineBackspace =
             event.inputType === "deleteContentBackward" &&
             !event.isComposing &&
@@ -20,9 +23,9 @@ export function lineBackspaceIntent(): Extension {
             !state.readOnly &&
             state.selection.ranges.length === 1 &&
             caret.empty &&
-            caret.head > 0 &&
-            state.doc.lineAt(caret.head).from === caret.head
-              ? { doc: state.doc, head: caret.head }
+            head > 0 &&
+            state.doc.lineAt(head).from === head
+              ? { doc: state.doc, head }
               : null;
           return false;
         },

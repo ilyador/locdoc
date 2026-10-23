@@ -15,8 +15,18 @@ import {
   Decoration,
   EditorView,
   WidgetType,
+  type Command,
   type DecorationSet,
+  type KeyBinding,
 } from "@codemirror/view";
+import {
+  deleteCharBackward,
+  deleteCharBackwardStrict,
+  deleteCharForward,
+  deleteGroupBackward,
+  deleteGroupForward,
+  deleteGroupForwardWin,
+} from "@codemirror/commands";
 import { syntaxTree } from "@codemirror/language";
 import type { Anchor } from "./editor-types";
 import type { SyntaxNode, Tree } from "@lezer/common";
@@ -883,6 +893,64 @@ function hiddenRangeAfter(state: EditorState, pos: number): Range | undefined {
     else high = middle;
   }
   return hidden[low];
+}
+
+// Both sides of hidden records show at one position. A deletion from there
+// toward them deletes what a reader sees past them: from `pos`, the side of
+// records that the deletion leaves them on, it starts at their other side.
+export function pastRecords(state: EditorState, pos: number, forward: boolean) {
+  const range = hiddenRangeAfter(state, forward ? pos : pos - 1);
+  if (forward) return range?.from === pos ? range.to : pos;
+  return range?.to === pos ? range.from : pos;
+}
+
+// Bindings that delete a character or a word, run from past the records
+// beside the caret. CodeMirror takes hidden records as one atomic character
+// to delete, which the change filter keeps, so the key did nothing there.
+// Put before the keymap they come from, whose bindings run otherwise.
+export function deletionPastRecords(
+  bindings: readonly KeyBinding[],
+): KeyBinding[] {
+  const forward = new Set<Command>([
+    deleteCharForward,
+    deleteGroupForward,
+    deleteGroupForwardWin,
+  ]);
+  const backward = new Set<Command>([
+    deleteCharBackward,
+    deleteCharBackwardStrict,
+    deleteGroupBackward,
+  ]);
+  const wrap = (command?: Command): Command | undefined =>
+    command && (forward.has(command) || backward.has(command))
+      ? (view) => {
+          const { state } = view;
+          if (state.readOnly) return false;
+          let moved = false;
+          const ranges = state.selection.ranges.map((range) => {
+            const pos = range.empty
+              ? pastRecords(state, range.head, forward.has(command))
+              : range.head;
+            if (pos === range.head) return range;
+            moved = true;
+            return EditorSelection.cursor(pos);
+          });
+          if (!moved) return false;
+          view.dispatch({
+            selection: EditorSelection.create(
+              ranges,
+              state.selection.mainIndex,
+            ),
+          });
+          command(view);
+          return true;
+        }
+      : undefined;
+  return bindings.flatMap((binding) => {
+    const run = wrap(binding.run),
+      shift = wrap(binding.shift);
+    return run || shift ? [{ ...binding, run, shift }] : [];
+  });
 }
 
 // Records hidden right after a table or figure, with the line break before
