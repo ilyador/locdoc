@@ -2368,9 +2368,10 @@ button:hover {
 .comment-thread .comment-composer {
   margin-top: 4px;
 }
+/* iOS zooms in on a field whose text is under 16px as it takes focus. */
 @media (max-width: 760px), (pointer: coarse) {
   .text-input,
-  .search-field input {
+  .search-control input {
     font-size: 1rem;
   }
 }

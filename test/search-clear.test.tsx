@@ -34,6 +34,10 @@ const stylesheet = source.replace(
   /var\((--[\w-]+)\)/g,
   (token, name) => tokens.get(name) ?? token,
 );
+// As a phone or a tablet has it, with the rules for a coarse pointer.
+const coarse = stylesheet.replace(/@media ([^{]+)\{/g, (rule, query) =>
+  /pointer: coarse/.test(query) ? "@media screen {" : rule,
+);
 
 before(async () => {
   const dom = new JSDOM(
@@ -156,13 +160,24 @@ const files = [
   ),
 ];
 const idOf = (path: string) => path.replace(/\W+/g, "-").toLowerCase();
+// The Google Fonts catalog that Appearance searches.
+const catalog = {
+  fonts: [
+    { family: "Space Grotesk", category: "Sans Serif" },
+    { family: "Space Mono", category: "Monospace" },
+    { family: "Lora", category: "Serif" },
+  ],
+};
 // The server lists each document with its link, which the link chooser
-// offers: a private document's is its /d/ address.
+// offers: a private document's is its /d/ address. Appearance asks it for
+// the fonts it has installed, and for the catalog.
 function linkedApi() {
   const api = fileApi(files);
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const response = await api.fetch(input, init);
     const path = new URL(String(input), "http://localhost").pathname;
+    if (path === "/api/fonts") return Response.json({ fonts: [] });
+    if (path === "/font-catalog.json") return Response.json(catalog);
+    const response = await api.fetch(input, init);
     if (path !== "/api/tree" || response.status !== 200) return response;
     const body = await response.json();
     for (const entry of body.entries)
@@ -217,6 +232,29 @@ async function styled(css: string, check: () => Promise<void>) {
   } finally {
     style.remove();
   }
+}
+// Opens each of the three search fields in turn and runs `check` on it while
+// it is on screen.
+async function eachSearchField(
+  check: (field: HTMLInputElement, name: string) => void,
+) {
+  await open("Doc 47.md", { narrow: false });
+  check(search() as HTMLInputElement, "The sidebar search");
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Insert link (Ctrl K on selected text)",
+    }),
+  );
+  const chooser = screen.getByRole("combobox", {
+    name: "Document title or URL",
+  }) as HTMLInputElement;
+  check(chooser, "The link chooser's search");
+  fireEvent.keyDown(chooser, { key: "Escape" });
+  fireEvent.click(screen.getByRole("button", { name: "Fonts and appearance" }));
+  check(
+    (await screen.findByLabelText("Search Google Fonts")) as HTMLInputElement,
+    "The Google Fonts search",
+  );
 }
 
 test("Clear search shows only while the sidebar search holds text, and clearing it returns the list to its place", async () => {
@@ -414,14 +452,7 @@ test("Clear search empties the Google Fonts search and its results without closi
     });
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const path = new URL(String(input), location.href).pathname;
-    if (path === "/font-catalog.json")
-      return response({
-        fonts: [
-          { family: "Space Grotesk", category: "Sans Serif" },
-          { family: "Space Mono", category: "Monospace" },
-          { family: "Lora", category: "Serif" },
-        ],
-      });
+    if (path === "/font-catalog.json") return response(catalog);
     return response({ fonts: [] });
   }) as typeof fetch;
   const saved = new Map(Object.entries(localStorage));
@@ -525,4 +556,13 @@ test("the sidebar search's box takes the accent outline while the search has foc
     search().blur();
     assert.equal(outline(box), "");
   });
+});
+
+test("on a touch screen every search's text is at least 16px, so iOS does not zoom in on it", async () => {
+  await styled(coarse, () =>
+    eachSearchField((field, name) => {
+      const size = getComputedStyle(field).fontSize;
+      assert.ok(parseFloat(size) >= 16, `${name}'s text is ${size}`);
+    }),
+  );
 });
