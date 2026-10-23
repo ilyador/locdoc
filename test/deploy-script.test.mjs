@@ -15,12 +15,12 @@ import {
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { createServer } from "node:net";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { freePort } from "./fixtures/free-port.mjs";
 
 const script = resolve("scripts/deploy.sh");
 const binary = resolve("target/debug/locdoc");
@@ -347,15 +347,6 @@ test("--no-restart refuses the default release and systemd folders", async () =>
     await rm(root, { recursive: true, force: true });
   }
 });
-
-async function freePort() {
-  const server = createServer().listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address();
-  server.close();
-  await once(server, "close");
-  return port;
-}
 
 // The real server on a free loopback port, over the given folders.
 async function serve(state, docs) {

@@ -6,11 +6,13 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { freePort } from "./fixtures/free-port.mjs";
 
 test("HTTP shells and static files use the configured web build without a dist directory", async () => {
   const directory = await mkdtemp(join(tmpdir(), "locdoc-web-assets-"));
   const web = join(directory, "staged frontend");
-  const base = "http://127.0.0.1:3569";
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
   let server;
   let logs = "";
   try {
@@ -27,7 +29,7 @@ test("HTTP shells and static files use the configured web build without a dist d
       env: {
         ...process.env,
         LOCDOC_WEB: web,
-        LOCDOC_BIND: "127.0.0.1:3569",
+        LOCDOC_BIND: `127.0.0.1:${port}`,
         LOCDOC_DOCS: join(directory, "docs"),
         LOCDOC_STATE: join(directory, "state"),
         LOCDOC_PUBLIC_URL: base,

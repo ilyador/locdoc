@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { freePort } from "./fixtures/free-port.mjs";
 
 test("user service installation handles another checkout and refuses accidental replacement", async () => {
   const root = await mkdtemp(join(tmpdir(), "locdoc-install-"));
@@ -68,9 +69,10 @@ test("npm start forwards .env configuration to Rust and respects exported overri
       resolve("scripts/start.mjs"),
       join(root, "scripts/start.mjs"),
     );
+    const bind = `127.0.0.1:${await freePort()}`;
     await writeFile(
       join(root, ".env"),
-      "LOCDOC_DOCS=notes\nLOCDOC_BIND=127.0.0.1:3599\n",
+      `LOCDOC_DOCS=notes\nLOCDOC_BIND=${bind}\n`,
     );
     await writeFile(
       join(root, "target/release/locdoc"),
@@ -89,7 +91,7 @@ test("npm start forwards .env configuration to Rust and respects exported overri
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), {
       docs: "exported-notes",
-      bind: "127.0.0.1:3599",
+      bind,
     });
   } finally {
     await rm(root, { recursive: true, force: true });

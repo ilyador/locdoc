@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
+import { freePort } from "./fixtures/free-port.mjs";
 
 test("link previews enforce source and target permissions, revocation, and network isolation", async () => {
   const dir = await mkdtemp(join(tmpdir(), "locdoc-links-"));
@@ -17,12 +18,13 @@ test("link previews enforce source and target permissions, revocation, and netwo
     join(dir, "docs/target.md"),
     "# Target notes\nA private sentence.\n",
   );
-  const base = "http://127.0.0.1:3486";
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
   const server = spawn(resolve("target/debug/locdoc"), [], {
     cwd: dir,
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3486",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: base,

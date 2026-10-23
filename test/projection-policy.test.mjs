@@ -23,8 +23,10 @@ import {
   toUint8Array,
 } from "lib0/encoding";
 import { readVarString } from "lib0/decoding";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3568";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const key = "projection-policy-test-owner";
 let directory, server;
 let logs = "";
@@ -111,7 +113,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3568",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_PUBLIC_URL: base,
       LOCDOC_DOCS: join(directory, "docs"),
       LOCDOC_STATE: join(directory, "state"),

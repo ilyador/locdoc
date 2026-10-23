@@ -5,10 +5,10 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { sourceComments } from "../src/comment-syntax.ts";
+import { freePort } from "./fixtures/free-port.mjs";
 
 // The fixture server takes a free port: a fixed one can belong to another
 // local server.
@@ -59,15 +59,6 @@ const serverMessages = (comments) =>
     { name: c.name, body: c.body },
     ...c.replies.map(({ name, body }) => ({ name, body })),
   ]);
-
-async function freePort() {
-  const listener = createServer().listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const { port } = listener.address();
-  listener.close();
-  await once(listener, "close");
-  return port;
-}
 
 before(async () => {
   const port = await freePort();

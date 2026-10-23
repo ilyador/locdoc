@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 
 test("local owner authentication is kept in origin storage and survives unrelated cookies", async () => {
-  const dom = new JSDOM("", { url: "http://127.0.0.1:3561/" });
+  const dom = new JSDOM("", { url: "http://127.0.0.1/" });
   Object.defineProperties(globalThis, {
     location: { value: dom.window.location, configurable: true },
     localStorage: { value: dom.window.localStorage, configurable: true },
@@ -69,7 +69,7 @@ test("public HTTPS requests use HttpOnly cookies instead of readable local owner
 });
 
 test("a kept response is offered only for its own path, and only a 304 keeps it", async () => {
-  const dom = new JSDOM("", { url: "http://127.0.0.1:3561/" });
+  const dom = new JSDOM("", { url: "http://127.0.0.1/" });
   Object.defineProperties(globalThis, {
     location: { value: dom.window.location, configurable: true },
     localStorage: { value: dom.window.localStorage, configurable: true },

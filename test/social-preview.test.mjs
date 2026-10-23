@@ -7,8 +7,10 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { JSDOM } from "jsdom";
 import { setTimeout as delay } from "node:timers/promises";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3528";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const publicUrl = "https://notes.example";
 const owner = { Authorization: "Bearer social-test-owner-key" };
 let dir, server;
@@ -73,7 +75,7 @@ before(async () => {
     cwd: dir,
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3528",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: publicUrl + "/",

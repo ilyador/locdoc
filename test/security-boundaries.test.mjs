@@ -10,8 +10,10 @@ import * as Y from "yjs";
 import WebSocket from "ws";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3532";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const key = "security-boundaries-fixture-owner";
 let dir,
   server,
@@ -113,7 +115,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3532",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: "https://notes.example.test",

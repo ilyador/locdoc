@@ -12,8 +12,10 @@ import {
   commentReadingText,
   sourceComments,
 } from "../src/comment-syntax.ts";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3522";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const key = "comment-integrity-fixture-owner";
 let dir, server, cookie;
 
@@ -81,7 +83,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3522",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: base,

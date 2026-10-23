@@ -20,8 +20,10 @@ import WebSocket from "ws";
 import { readVarString, createDecoder, readVarUint } from "lib0/decoding";
 import { publishPresence } from "../src/presence.ts";
 import { commentParser } from "../src/comment-syntax.ts";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3501",
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`,
   key = "file-comments-owner";
 let dir, server, cookie;
 const peers = [];
@@ -37,7 +39,7 @@ async function start() {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3501",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: base,

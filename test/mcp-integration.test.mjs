@@ -7,8 +7,10 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { freePort } from './fixtures/free-port.mjs';
 
-const base = 'http://127.0.0.1:3558';
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const resource = `${base}/mcp`;
 const callback = 'https://chatgpt.example.test/oauth/callback';
 const protocol = '2025-06-18';
@@ -167,7 +169,7 @@ before(async () => {
   await writeFile(join(directory, 'docs', 'Seed.md'), '# Seed\n\nA private fixture note.\n');
   server = spawn('./target/debug/locdoc', [], {
     env: {
-      ...process.env, LOCDOC_BIND: '127.0.0.1:3558',
+      ...process.env, LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_STATE: join(directory, 'state'), LOCDOC_DOCS: join(directory, 'docs'),
       LOCDOC_PUBLIC_URL: base, LOCDOC_OWNER_NAME: 'Fixture owner',
     },
@@ -215,7 +217,8 @@ test('MCP discovery advertises OAuth and unauthenticated requests receive its ch
   assert.deepEqual(oauth.body.code_challenge_methods_supported, ['S256']);
   const denied = await rpc(null, 'tools/list', {});
   assert.equal(denied.status, 401);
-  assert.match(denied.headers.get('www-authenticate'), /Bearer resource_metadata="http:\/\/127\.0\.0\.1:3558\/\.well-known\/oauth-protected-resource\/mcp"/);
+  const challenge = denied.headers.get('www-authenticate');
+  assert.ok(challenge.includes(`Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"`), challenge);
   const keyAttempt = await rpc({ access_token: ownerKey }, 'tools/list', {});
   assert.equal(keyAttempt.status, 401, 'The local owner key is never a connector token');
   const sessionAttempt = await rpc({ access_token: ownerSession }, 'tools/list', {});

@@ -26,15 +26,12 @@ import {
 } from "lib0/encoding";
 import { readVarString } from "lib0/decoding";
 import { DraftJournal } from "../src/drafts.ts";
+import { freePort } from "./fixtures/free-port.mjs";
 
 // The ordinary suite runs every disruption once. An explicit soak runs the same
 // deterministic scenario for minutes, retaining assertions throughout the run.
 const duration = Number(process.env.LOCDOC_SOAK_MS || 8000);
-const port = Number(process.env.LOCDOC_SOAK_PORT || 3510);
-assert.ok(
-  Number.isInteger(port) && port >= 3500 && port <= 3999,
-  "Use an isolated test port between 3500 and 3999",
-);
+const port = await freePort();
 const base = `http://127.0.0.1:${port}`,
   key = "isolated-soak-owner";
 async function until(check, message, timeout = 10000) {
