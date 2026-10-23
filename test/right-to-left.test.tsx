@@ -528,9 +528,11 @@ test("quotes, tasks, transitions and edge controls mirror on right-to-left lines
     new URL("../src/style.css", import.meta.url),
     "utf8",
   );
-  // jsdom has no layout, so read the declarations each part of a line gets.
+  // jsdom has no layout, so read the declarations each part of a line gets:
+  // the rule whose selectors start with `selector`.
   const rule = (selector: string) => {
-    const start = stylesheet.indexOf(`\n${selector} {`);
+    let start = stylesheet.indexOf(`\n${selector} {`);
+    if (start < 0) start = stylesheet.indexOf(`\n${selector},\n`);
     assert.ok(start >= 0, selector);
     return stylesheet.slice(start, stylesheet.indexOf("}", start));
   };

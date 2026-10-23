@@ -1396,10 +1396,22 @@ button:hover {
   padding: 0 !important;
   min-height: calc(var(--doc-line-height) * 1em);
 }
-/* Keep block spacing in CodeMirror's measured line box, never a margin. */
+/* Keep block spacing in CodeMirror's measured line box, never a margin.
+   A conversation that opens inside a line splits it in two, and CodeMirror
+   keeps the line's classes on the part before the conversation. The part
+   after it, :where(line + .inline-comment-host[data-splits-line]) + .cm-line,
+   takes the line's styles with no more weight than the line's own selector.
+   It ends the line: the space after the line is its, while the space above
+   stays with the part before. */
 .cm-line.md-block-end,
 .cm-line.fountain-block-end,
-.cm-line.text-block-end {
+.cm-line.text-block-end,
+:where(.cm-line.md-block-end + .inline-comment-host[data-splits-line])
+  + .cm-line,
+:where(.cm-line.fountain-block-end + .inline-comment-host[data-splits-line])
+  + .cm-line,
+:where(.cm-line.text-block-end + .inline-comment-host[data-splits-line])
+  + .cm-line {
   padding-block-end: calc(
     var(--doc-paragraph-spacing, 0.15) * var(--doc-line-height) * 1em
   ) !important;
@@ -1779,7 +1791,8 @@ button:hover {
   box-shadow: none;
 }
 /* CodeMirror measures these boxes for hit testing: use padding, never vertical margins. */
-.md-h1 {
+.md-h1,
+:where(.md-h1 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-size: 1.953125em;
   font-weight: var(--weight-bold);
   line-height: 1.25;
@@ -1787,33 +1800,45 @@ button:hover {
   margin: 0;
   padding-bottom: 0.35em !important;
 }
-.md-h2 {
+.md-h2,
+:where(.md-h2 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-size: 1.5625em;
   font-weight: var(--weight-semibold);
   line-height: 1.3;
   margin: 0;
-  padding-top: 0.45em !important;
   padding-bottom: 0.25em !important;
   letter-spacing: -0.02em;
 }
-.md-h3 {
+.md-h3,
+:where(.md-h3 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-size: 1.25em;
   font-weight: var(--weight-semibold);
   margin: 0;
-  padding-top: 0.5em !important;
   padding-bottom: 0.15em !important;
   line-height: 1.4;
 }
+/* Space above a heading stays above the part before a conversation. */
+.md-h2 {
+  padding-top: 0.45em !important;
+}
+.md-h3 {
+  padding-top: 0.5em !important;
+}
 .md-h4,
 .md-h5,
-.md-h6 {
+.md-h6,
+:where(.md-h4 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h5 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h6 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-weight: var(--weight-semibold);
   line-height: 1.5;
 }
-.md-h4 {
+.md-h4,
+:where(.md-h4 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-size: 1.125em;
 }
-.md-h6 {
+.md-h6,
+:where(.md-h6 + .inline-comment-host[data-splits-line]) + .cm-line {
   font-style: italic;
 }
 .md-h1,
@@ -1821,11 +1846,19 @@ button:hover {
 .md-h3,
 .md-h4,
 .md-h5,
-.md-h6 {
+.md-h6,
+:where(.md-h1 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h2 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h3 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h4 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h5 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h6 + .inline-comment-host[data-splits-line]) + .cm-line {
   color: var(--syntax-heading);
 }
 .md-h1,
-.md-h2 {
+.md-h2,
+:where(.md-h1 + .inline-comment-host[data-splits-line]) + .cm-line,
+:where(.md-h2 + .inline-comment-host[data-splits-line]) + .cm-line {
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 0.16em;
@@ -1848,21 +1881,26 @@ button:hover {
   padding: 2px 4px;
   color: var(--syntax-code);
 }
-.md-code-line {
+.md-code-line,
+:where(.md-code-line + .inline-comment-host[data-splits-line]) + .cm-line {
   font: 0.9em/1.65 var(--code-font);
   background: var(--subtle);
   color: var(--syntax-code);
   padding: 0 13px !important;
   min-height: 1.65em;
 }
-.md-quote {
+.md-quote,
+:where(.md-quote + .inline-comment-host[data-splits-line]) + .cm-line {
   color: var(--syntax-teal);
   font-style: italic;
   background: color-mix(in srgb, var(--syntax-teal) 5%, var(--surface));
   padding-inline-start: 14px !important;
   border-inline-start: 1px solid var(--syntax-teal);
 }
-.md-list > .cm-line.md-quote {
+.md-list > .cm-line.md-quote,
+.md-list
+  > :where(.cm-line.md-quote + .inline-comment-host[data-splits-line])
+  + .cm-line {
   padding-inline-start: calc(14px + var(--list-indent)) !important;
 }
 .md-link {
@@ -1889,10 +1927,12 @@ button:hover {
   right: 0;
   border-bottom: 1px solid var(--line);
 }
-.md-task {
+.md-task,
+:where(.md-task + .inline-comment-host[data-splits-line]) + .cm-line {
   color: var(--secondary);
 }
-.md-task.done {
+.md-task.done,
+:where(.md-task.done + .inline-comment-host[data-splits-line]) + .cm-line {
   color: var(--muted);
   text-decoration: line-through;
 }
@@ -2068,7 +2108,8 @@ button:hover {
   padding: 2px 0;
 }
 /* A conversation that opens inside a line splits it. The line's dir stays on
-   the part before the conversation; the part after it reads the same way. */
+   the part before the conversation; the part after it reads the same way,
+   and takes the line's styles too (see .cm-line.md-block-end). */
 .cm-line[dir="rtl"] + .inline-comment-host[data-splits-line] + .cm-line {
   direction: rtl;
 }
@@ -3106,13 +3147,16 @@ button:hover {
 .document-canvas {
   flex: 1 0 auto;
 }
-.md-h1 {
+.md-h1,
+:where(.md-h1 + .inline-comment-host[data-splits-line]) + .cm-line {
   min-height: 1.35em;
 }
-.md-h2 {
+.md-h2,
+:where(.md-h2 + .inline-comment-host[data-splits-line]) + .cm-line {
   min-height: 1.5em;
 }
-.md-h3 {
+.md-h3,
+:where(.md-h3 + .inline-comment-host[data-splits-line]) + .cm-line {
   min-height: 1.6em;
 }
 .version-preview {
@@ -3257,7 +3301,8 @@ button:hover {
   vertical-align: -5px;
   cursor: pointer;
 }
-.cm-line.md-task {
+.cm-line.md-task,
+:where(.cm-line.md-task + .inline-comment-host[data-splits-line]) + .cm-line {
   min-height: 26px;
 }
 .md-task-checkbox {
