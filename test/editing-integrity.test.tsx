@@ -712,7 +712,9 @@ test("sustained typing counts words every few seconds, not on every keystroke", 
 });
 
 test("a document's words are counted once as it opens, and again once its text changes", async (t) => {
-  const { DocumentWordMetrics } = await import("../src/document-footer");
+  const { DocumentWordMetrics, WORDS_QUIET } = await import(
+    "../src/document-footer"
+  );
   const segment = t.mock.method(Intl.Segmenter.prototype, "segment");
   const doc = new Y.Doc();
   const text = doc.getText("content");
@@ -724,8 +726,9 @@ test("a document's words are counted once as it opens, and again once its text c
     assert.ok(page.container.textContent!.includes("7 words"));
     assert.equal(segment.mock.callCount(), 1, "one count as it opens");
     act(() => text.insert(text.length, " Here."));
+    // A change is counted once typing pauses, on the next idle moment.
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 130));
+      await new Promise((resolve) => setTimeout(resolve, WORDS_QUIET + 50));
     });
     assert.ok(page.container.textContent!.includes("8 words"));
     assert.equal(segment.mock.callCount(), 2);
