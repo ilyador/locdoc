@@ -303,6 +303,13 @@ button:hover {
   background: none;
   outline: 0;
 }
+/* The box is the field: while the search has focus it takes the accent
+   outline over its border, as the find field's box does, and the text inside
+   draws none of its own. */
+.search-box:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
 .search-box kbd {
   font:
     0.75rem "JetBrains Mono",

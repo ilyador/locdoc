@@ -1,5 +1,6 @@
 import { before, after, afterEach, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import "fake-indexeddb/auto";
 import React from "react";
@@ -12,6 +13,27 @@ import { fileApi } from "./fixtures/file-api.ts";
 let render, fireEvent, screen, waitFor, cleanup, within;
 let WorkspaceView, useWorkspace, AppearancePanel, useAppearance;
 let workspace;
+
+// jsdom matches only screen media and substitutes no custom properties, so
+// the tests that read styles add the app stylesheet with its tokens written
+// in.
+const source = readFileSync(
+  new URL("../src/style.css", import.meta.url),
+  "utf8",
+);
+const root = source.indexOf(":root {");
+const tokens = new Map(
+  Array.from(
+    source
+      .slice(root, source.indexOf("\n}", root))
+      .matchAll(/(--[\w-]+):\s*([^;]+);/g),
+    ([, name, value]) => [name, value.trim()],
+  ),
+);
+const stylesheet = source.replace(
+  /var\((--[\w-]+)\)/g,
+  (token, name) => tokens.get(name) ?? token,
+);
 
 before(async () => {
   const dom = new JSDOM(
@@ -185,6 +207,16 @@ function press(button: HTMLElement) {
   if (fireEvent.mouseDown(button)) button.focus();
   fireEvent.mouseUp(button);
   fireEvent.click(button);
+}
+// Runs `check` while the document has `css`.
+async function styled(css: string, check: () => Promise<void>) {
+  const style = document.head.appendChild(document.createElement("style"));
+  style.textContent = css;
+  try {
+    await check();
+  } finally {
+    style.remove();
+  }
 }
 
 test("Clear search shows only while the sidebar search holds text, and clearing it returns the list to its place", async () => {
@@ -469,4 +501,28 @@ test("Insert link puts the caret in the link chooser's field, so typing goes the
   type(document.activeElement as HTMLElement, "doc 1");
   assert.equal(field.value, "doc 1", "What is typed goes into the field");
   assert.equal(screen.queryAllByRole("option").length, 10);
+});
+
+test("the sidebar search's box takes the accent outline while the search has focus", async () => {
+  await open("Doc 47.md", { narrow: false });
+  await styled(stylesheet, async () => {
+    const box = search().closest<HTMLElement>(".search-box")!;
+    // jsdom gives an outline as it is written, without its longhands.
+    const outline = (element: Element) =>
+      getComputedStyle(element).getPropertyValue("outline");
+    assert.equal(outline(box), "", "No outline while the search has no focus");
+    search().focus();
+    assert.equal(
+      outline(box),
+      `2px solid ${tokens.get("--accent")}`,
+      "The box shows focus as the find field's box does",
+    );
+    assert.doesNotMatch(
+      outline(search()),
+      /solid/,
+      "The text inside draws no outline of its own",
+    );
+    search().blur();
+    assert.equal(outline(box), "");
+  });
 });
