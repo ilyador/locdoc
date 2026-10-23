@@ -7,6 +7,7 @@ import * as Y from "yjs";
 import { EditorState, type TransactionSpec } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
+import { yUndoManagerKeymap } from "y-codemirror.next";
 import {
   documentExtension,
   documentFormat,
@@ -277,6 +278,86 @@ test("typing at the end of a plain-text line with conversations writes on that l
         source.replace(/\nBuy eggs$/, "\\\nBuy eggs"),
         label,
       );
+    }
+  }
+});
+
+// Every conversation of a source, each as its messages, in any order.
+const conversations = (source: string) =>
+  sourceComments(source, true)
+    .map((thread) => JSON.stringify(thread.messages))
+    .sort();
+
+test("joining the next line onto a plain-text line that conversations end keeps them at the end of its text", () => {
+  const alex = "[[comment(alex): Which brand?]]";
+  const ben = "[[comment(ben): Oat]]";
+  const ana = "[[comment(ana): A note]]";
+  const cy = "[[comment(cy): Free range?]]";
+  for (const [source, joined, expected] of [
+    [
+      `Buy milk${alex}\nBuy eggs\nBuy bread`,
+      "Buy eggs",
+      `Buy milkBuy eggs${alex}\nBuy bread`,
+    ],
+    // A reply stays on the line after its conversation.
+    [
+      `Buy milk${alex}\n${ben}\nBuy eggs`,
+      "Buy eggs",
+      `Buy milkBuy eggs${alex}\n${ben}`,
+    ],
+    // Another conversation stays apart behind a blank line.
+    [
+      `Buy milk${alex}\n\n${ana}\nBuy eggs`,
+      "Buy eggs",
+      `Buy milkBuy eggs${alex}\n\n${ana}`,
+    ],
+    // The joined line's own conversation still ends its text; the records
+    // follow it after a blank line, as another comment there would.
+    [
+      `Buy milk${alex}\nBuy eggs${cy}\nBuy bread`,
+      "Buy eggs",
+      `Buy milkBuy eggs${cy}\n\n${alex}\nBuy bread`,
+    ],
+    // A conversation on the line after stays its own, never a reply.
+    [
+      `Buy milk${alex}\nBuy eggs\n${cy}\nBuy bread`,
+      "Buy eggs",
+      `Buy milkBuy eggs\n${cy}\n\n${alex}\nBuy bread`,
+    ],
+    // Spaces a reader sees stay where they are.
+    [`Buy milk${alex}  \nBuy eggs`, "Buy eggs", `Buy milk  Buy eggs${alex}`],
+    // A backslash ending the joined text cannot escape the record.
+    [`Buy milk${alex}\nC:\\Users\\`, "C:", `Buy milkC:\\Users${alex}\\`],
+    // An empty line joins as before: nothing follows the records.
+    [`Buy milk${alex}\n\nBuy eggs`, "\nBuy eggs", `Buy milk${alex}\nBuy eggs`],
+  ] as const) {
+    const at = source.indexOf(joined);
+    // What the line break's deletion alone would show.
+    const removed = source.slice(0, at - 1) + source.slice(at);
+    for (const [userEvent, head] of [
+      ["delete.backward", at],
+      ["delete.forward", at - 1],
+    ] as const) {
+      const label = `${JSON.stringify(source)}, ${userEvent}`;
+      const state = plainState(source)
+        .update({ selection: { anchor: head } })
+        .state.update({
+          changes: { from: at - 1, to: at },
+          selection: { anchor: at - 1 },
+          userEvent,
+        }).state;
+      assert.equal(state.doc.toString(), expected, label);
+      assert.deepEqual(
+        displayedLines(state),
+        displayedLines(plainState(removed)),
+        `${label}: the joined line shows as the deletion alone would`,
+      );
+      assert.equal(
+        state.selection.main.head,
+        expected.indexOf(joined),
+        `${label}: the caret is where the lines join`,
+      );
+      assert.deepEqual(conversations(expected), conversations(source), label);
     }
   }
 });
@@ -604,6 +685,52 @@ test("plain text ignores Markdown commands and keeps hidden comment records atom
     assert.ok(
       fixture.text.toString().includes("[[comment(ana): Keep this record]]"),
       "Backspace after a hidden record never deletes it",
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
+test("Backspace joins a line onto one that conversations end in the file's layout, in one step to undo", () => {
+  const records = "[[comment(alex): Which brand?]]\n[[comment(ben): Oat]]";
+  const source = `Buy milk${records}\nBuy eggs\nBuy bread`;
+  const fixture = mountEditor("Notes/list.txt", true, source);
+  try {
+    act(() =>
+      fixture.view.dispatch({
+        selection: { anchor: source.indexOf("Buy eggs") },
+      }),
+    );
+    act(() => {
+      fixture.view.contentDOM.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Backspace",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    assert.equal(
+      fixture.text.toString(),
+      `Buy milkBuy eggs${records}\nBuy bread`,
+      "the conversation ends the joined line's text",
+    );
+    assert.equal(fixture.view.state.selection.main.head, "Buy milk".length);
+    assert.deepEqual(
+      [...fixture.view.contentDOM.querySelectorAll(".cm-line")].map(
+        (line) => line.textContent,
+      ),
+      ["Buy milkBuy eggs", "Buy bread"],
+    );
+    act(() => {
+      yUndoManagerKeymap.find((binding) => binding.key === "Mod-z")!.run!(
+        fixture.view,
+      );
+    });
+    assert.equal(
+      fixture.text.toString(),
+      source,
+      "one undo restores both lines",
     );
   } finally {
     fixture.close();

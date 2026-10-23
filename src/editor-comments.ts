@@ -137,6 +137,7 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
           },
         ];
       }),
+      EditorState.transactionFilter.of(joinAfterRecords),
       EditorState.changeFilter.of((tr) => {
         if (
           !tr.docChanged ||
@@ -157,6 +158,135 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
       }),
     ],
   });
+
+// Deleting the line break after records that end a line's text joins the
+// next line onto that text, as a reader sees it. The records then end the
+// joined line's text, where a new comment there would be written, instead
+// of sitting inside it, where a desktop editor would show them.
+function joinAfterRecords(tr: Transaction) {
+  if (
+    !tr.docChanged ||
+    !(tr.isUserEvent("delete.backward") || tr.isUserEvent("delete.forward")) ||
+    !tr.startState.selection.ranges.every((r) => r.empty)
+  )
+    return tr;
+  const state = tr.startState;
+  const joins: Join[] = [];
+  tr.changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+    if (inserted.length || to !== from + 1 || state.sliceDoc(from, to) !== "\n")
+      return;
+    const join = recordsAfterJoin(state, from);
+    if (join) joins.push(join);
+  });
+  if (joins.length !== 1) return tr;
+  const [join] = joins;
+  const correction = ChangeSet.of(
+    [
+      ...join.remove.map((range) => ({
+        from: tr.changes.mapPos(range.from, 1),
+        to: tr.changes.mapPos(range.to, -1),
+      })),
+      { from: tr.changes.mapPos(join.at, 1), insert: join.insert },
+    ],
+    tr.newDoc.length,
+  );
+  // Every conversation stays whole, and none takes another as replies.
+  const plain = state.facet(plainCommentRecords);
+  const threads = (source: string) =>
+    sourceCommentTree(source, plain)
+      .threads.map((thread) => JSON.stringify(thread.messages))
+      .sort()
+      .join("\n");
+  if (
+    threads(correction.apply(tr.newDoc).toString()) !==
+    threads(state.doc.toString())
+  )
+    return tr;
+  return [tr, { changes: correction, sequential: true }];
+}
+
+// Records to take out of their place and what to write where.
+type Join = { remove: Range[]; at: number; insert: string };
+
+// Where the records that the line break at `at` follows go, when they end
+// the text of its line and the next line joins that text: after the joined
+// line's text and the conversations that end it, as plain-text placement
+// (server/comments.rs) writes them.
+function recordsAfterJoin(state: EditorState, at: number): Join | null {
+  const doc = state.doc;
+  if (at + 1 >= doc.length || !state.facet(plainCommentRecords)) return null;
+  const hidden = sourceCommentRanges(state);
+  let index = hidden.length - 1;
+  while (index >= 0 && hidden[index].to > at) index--;
+  const records = hidden[index];
+  if (
+    !records ||
+    /[^ \t]/.test(doc.sliceString(records.to, at)) ||
+    !shownText(state, doc.lineAt(records.from).from, records.from).trim()
+  )
+    return null;
+  // The line that joins, as a reader sees it: up to the first line break
+  // that no record hides.
+  const next = doc.lineAt(at + 1);
+  let end = next.to;
+  for (let i = index + 1; i < hidden.length && hidden[i].from <= end; i++)
+    if (hidden[i].to > end) end = doc.lineAt(hidden[i].to).to;
+  const shown = visibleTextRanges(state, next.from, end).filter((range) =>
+    doc.sliceString(range.from, range.to).trim(),
+  );
+  if (!shown.length) return null;
+  const last = shown[shown.length - 1];
+  const lastShown =
+    last.from + doc.sliceString(last.from, last.to).trimEnd().length;
+  // Conversations that end the joined line's text, or follow it with nothing
+  // else between, would take records right after the text as replies: the
+  // records go after them, behind a blank line.
+  let point = end;
+  let prefix = "";
+  for (let i = index + 1; i < hidden.length; i++) {
+    const range = hidden[i];
+    if (range.to <= lastShown) continue;
+    const ends =
+      range.from < point
+        ? range.to >= point || !doc.sliceString(range.to, point).trim()
+        : !doc.sliceString(point, range.from).trim();
+    if (ends) {
+      point =
+        range.from + doc.sliceString(range.from, range.to).trimEnd().length;
+      prefix = "\n\n";
+    } else if (range.from >= point) break;
+  }
+  // A record right after an odd run of backslashes would be escaped. Before
+  // the last one it is not, unless only space separates it from other
+  // records, which would take it as a reply: then it gets a line.
+  if (
+    !prefix &&
+    /\\*$/.exec(doc.sliceString(next.from, point))![0].length % 2
+  ) {
+    if (
+      hidden.some(
+        (range) =>
+          range.to > next.from &&
+          range.to <= point - 1 &&
+          !doc.sliceString(range.to, point - 1).trim(),
+      )
+    )
+      prefix = "\n";
+    else point--;
+  }
+  return {
+    remove: [records],
+    at: point,
+    insert: prefix + doc.sliceString(records.from, records.to).trim(),
+  };
+}
+
+// The text a reader sees from `from` to `to`.
+function shownText(state: EditorState, from: number, to: number) {
+  return visibleTextRanges(state, from, to)
+    .map((range) => state.sliceDoc(range.from, range.to))
+    .join("");
+}
 const markdownSources = new WeakMap<EditorState["doc"], Range[]>();
 const plainSources = new WeakMap<EditorState["doc"], Range[]>();
 const hiddenSources = (state: EditorState) =>

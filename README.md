@@ -178,10 +178,13 @@ record in backticks, a fence, an indented line, HTML or a link is a comment too,
 and only an escaped `\[[` stays text. Every line is a paragraph, so a new
 comment goes at the end of the line where its passage ends; another one on that
 line starts after a blank line the editor hides with the records. Adding a
-comment never shows an empty line. A rename can change a document between `.md`,
-`.fountain` and `.txt`; it keeps its links, comments and history. A plain text
-document renamed to Markdown shows its image syntax as images to you, and to
-link visitors only once you approve them.
+comment never shows an empty line. Joining the next line onto a line that
+comments end, with Backspace at its start or Delete at the end of the line,
+moves their records to the end of the joined text, where a new comment would go.
+A rename can change a document between `.md`, `.fountain` and `.txt`; it keeps
+its links, comments and history. A plain text document renamed to Markdown shows
+its image syntax as images to you, and to link visitors only once you approve
+them.
 
 ## ChatGPT and MCP
 
