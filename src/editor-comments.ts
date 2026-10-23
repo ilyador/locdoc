@@ -451,15 +451,27 @@ class CommentMarker extends WidgetType {
     return true;
   }
 }
+// A conversation that opens inside a line splits it in two. CodeMirror keeps
+// the line's attributes, such as its direction, on the part before it; the
+// stylesheet gives the part after it that line's direction.
 class ConversationWidget extends WidgetType {
-  constructor(readonly host: HTMLElement) {
+  constructor(
+    readonly host: HTMLElement,
+    readonly splitsLine: boolean,
+  ) {
     super();
   }
   eq(other: ConversationWidget) {
-    return this.host === other.host;
+    return this.host === other.host && this.splitsLine === other.splitsLine;
   }
   toDOM() {
+    this.host.toggleAttribute("data-splits-line", this.splitsLine);
     return this.host;
+  }
+  updateDOM(dom: HTMLElement) {
+    if (dom !== this.host) return false;
+    this.host.toggleAttribute("data-splits-line", this.splitsLine);
+    return true;
   }
   ignoreEvent() {
     return true;
@@ -557,11 +569,15 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
           hidden.some((range) => range.from === start && range.to >= position)
         )
           position = start;
+        const line = tr.state.doc.lineAt(position);
         ranges.push(
           Decoration.widget({
             block: true,
-            side: position === tr.state.doc.lineAt(position).from ? -1 : 2,
-            widget: new ConversationWidget(host),
+            side: position === line.from ? -1 : 2,
+            widget: new ConversationWidget(
+              host,
+              position > line.from && position < line.to,
+            ),
           }).range(position),
         );
       }
