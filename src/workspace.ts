@@ -26,6 +26,29 @@ declare global {
   }
 }
 
+// The tree is listed again every few seconds and usually has not changed.
+// A listing equal to the one shown keeps it, and each entry that is the same
+// keeps its object, so the sidebar and editor render again only for what
+// changed, such as the time of a document just saved.
+export function keepUnchanged(shown: Entry[], listed: Entry[]) {
+  const known = new Map(shown.map((entry) => [entry.path, entry]));
+  let changed = shown.length !== listed.length;
+  const kept = listed.map((entry, index) => {
+    const before = known.get(entry.path);
+    const same = before && sameEntry(before, entry) ? before : entry;
+    if (same !== shown[index]) changed = true;
+    return same;
+  });
+  return changed ? kept : shown;
+}
+function sameEntry(a: Entry, b: Entry) {
+  const keys = Object.keys(a) as (keyof Entry)[];
+  return (
+    keys.length === Object.keys(b).length &&
+    keys.every((key) => a[key] === b[key])
+  );
+}
+
 // Workspace state survives document navigation. No document content, sharing
 // state, comments or asynchronous document mutations live at this level.
 export function useWorkspace() {
@@ -144,8 +167,8 @@ export function useWorkspace() {
       // Both views remain available without storage.
     }
   }, [sidebarView]);
-  // The sidebar mounts again with each document's workspace, and its list
-  // takes its scroll position back from here.
+  // How far the sidebar's list is scrolled in each view; a list that mounts
+  // again takes its position back from here.
   const sidebarScroll = useRef<SidebarScroll>({
     date: 0,
     folders: 0,
@@ -190,7 +213,7 @@ export function useWorkspace() {
       if (request < treeApplied.current || changed !== treeChanged.current)
         return;
       treeApplied.current = request;
-      setEntries(entries);
+      setEntries((shown) => keepUnchanged(shown, entries));
       setError("");
       if (!current.current)
         setId(entries.find((e) => e.kind === "file")?.id || null);

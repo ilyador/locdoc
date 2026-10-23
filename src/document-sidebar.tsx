@@ -11,12 +11,86 @@ import { documentTitle } from "./document-links";
 import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
 import { parentPath } from "./file-names";
-import { recentDocuments } from "./recent-documents";
+import {
+  compareNames,
+  comparePaths,
+  recentDocuments,
+} from "./recent-documents";
 
 const views = [
   { value: "date", label: "By date" },
   { value: "folders", label: "Folders" },
 ] as const;
+
+// What the sidebar lists for a tree and a search: the matching documents,
+// and every entry a match makes visible, by folder. The tree stays the same
+// object until it changes, so this is worked out once for it, however often
+// the sidebar renders.
+type Listing = {
+  entries: Entry[];
+  needle: string;
+  documents: Entry[];
+  visible: Set<string> | null;
+  recent?: Entry[];
+  children?: Map<string, Entry[]>;
+};
+const listings = new WeakMap<Entry[], Listing>();
+function listingOf(entries: Entry[], needle: string): Listing {
+  const known = listings.get(entries);
+  if (known?.needle === needle) return known;
+  const matches = (entry: Entry) =>
+    !needle ||
+    `${documentTitle(entry)} ${entry.path}`
+      .toLocaleLowerCase()
+      .includes(needle);
+  const documents: Entry[] = [];
+  // Without a search every entry is visible.
+  let visible: Set<string> | null = null;
+  if (needle) visible = new Set();
+  for (const entry of entries) {
+    if (!matches(entry)) continue;
+    if (entry.kind === "file") documents.push(entry);
+    // A path already visible has its folders visible too.
+    for (
+      let path = entry.path;
+      visible && path && !visible.has(path);
+      path = parentPath(path)
+    )
+      visible.add(path);
+  }
+  const listing = { entries, needle, documents, visible };
+  listings.set(entries, listing);
+  return listing;
+}
+// The visible entries of each folder, folders first, then by title.
+function folders(listing: Listing) {
+  if (listing.children) return listing.children;
+  const children = new Map<string, Entry[]>();
+  for (const entry of listing.entries) {
+    if (listing.visible && !listing.visible.has(entry.path)) continue;
+    const parent = parentPath(entry.path);
+    const siblings = children.get(parent) || [];
+    siblings.push(entry);
+    children.set(parent, siblings);
+  }
+  for (const siblings of children.values()) {
+    // Each title is worked out once.
+    const sorted = siblings
+      .map((entry) => ({
+        entry,
+        folder: entry.kind === "folder",
+        title: documentTitle(entry),
+      }))
+      .sort(
+        (a, b) =>
+          Number(b.folder) - Number(a.folder) ||
+          compareNames(a.title, b.title) ||
+          comparePaths(a.entry.path, b.entry.path),
+      );
+    sorted.forEach((item, index) => (siblings[index] = item.entry));
+  }
+  return (listing.children = children);
+}
 
 export function DocumentSidebar({
   entries,
@@ -39,8 +113,8 @@ export function DocumentSidebar({
   query: string;
   view: SidebarView;
   setView: (value: SidebarView) => void;
-  // Where the list was scrolled, kept by the workspace while this sidebar
-  // mounts again for each document.
+  // Where the list was scrolled, kept by the workspace for a sidebar that
+  // mounts again.
   scroll?: SidebarScroll;
   expanded: Set<string>;
   toggleFolder: (path: string) => void;
@@ -80,9 +154,8 @@ export function DocumentSidebar({
     if (focused && focused !== list && list.contains(focused))
       focused.scrollIntoView?.({ block: "nearest" });
   }, [showing]);
-  // Each document's workspace mounts this sidebar again. The list takes its
-  // position back before it paints and keeps it as it goes, so opening a
-  // document leaves the list where it was.
+  // A list that mounts again takes its position back before it paints and
+  // keeps it as it goes.
   useLayoutEffect(() => {
     const list = panel.current!;
     list.scrollTop = places[shown.current.slot];
@@ -99,38 +172,7 @@ export function DocumentSidebar({
     else next.add(path);
     setSearch({ query, collapsed: next });
   };
-  const matches = (entry: Entry) =>
-    `${documentTitle(entry)} ${entry.path}`
-      .toLocaleLowerCase()
-      .includes(needle);
-  const documents = entries.filter((e) => e.kind === "file" && matches(e));
-  const visible = new Set<string>();
-  for (const entry of entries) {
-    if (!matches(entry)) continue;
-    let path = entry.path;
-    while (path) {
-      visible.add(path);
-      path = parentPath(path);
-    }
-  }
-  const children = new Map<string, Entry[]>();
-  for (const entry of entries) {
-    if (!visible.has(entry.path)) continue;
-    const parent = parentPath(entry.path);
-    const siblings = children.get(parent) || [];
-    siblings.push(entry);
-    children.set(parent, siblings);
-  }
-  for (const siblings of children.values())
-    siblings.sort(
-      (a, b) =>
-        Number(b.kind === "folder") - Number(a.kind === "folder") ||
-        documentTitle(a).localeCompare(documentTitle(b), undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }) ||
-        a.path.localeCompare(b.path),
-    );
+  const listing = listingOf(entries, needle);
   // A new entry's name field opens first inside its folder, or at the top of
   // By date, where new documents appear once they exist.
   const edit = fileActions?.edit;
@@ -139,7 +181,7 @@ export function DocumentSidebar({
   const rows: TreeRow[] = [];
   if (view === "date") {
     if (creating !== null) rows.push({ type: "create", depth: 0, parent: "" });
-    const recent = recentDocuments(documents);
+    const recent = (listing.recent ??= recentDocuments(listing.documents));
     recent.forEach((entry, index) =>
       rows.push({
         type: "entry",
@@ -150,6 +192,7 @@ export function DocumentSidebar({
       }),
     );
   } else {
+    const children = folders(listing);
     const walk = (parent: string, depth: number) => {
       if (creating === parent) rows.push({ type: "create", depth, parent });
       const list = children.get(parent) || [];
@@ -167,7 +210,8 @@ export function DocumentSidebar({
     };
     walk("", 0);
   }
-  const empty = view === "date" ? !documents.length : !children.size;
+  const empty =
+    view === "date" ? !listing.documents.length : !folders(listing).size;
   return (
     <>
       <div className="sidebar-views">

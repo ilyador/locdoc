@@ -1,5 +1,9 @@
 import {
+  memo,
+  useCallback,
+  useEffect,
   useId,
+  useInsertionEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -7,6 +11,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
+  type RefObject,
 } from "react";
 import {
   ArrowElbowDownRight,
@@ -34,7 +39,11 @@ import type { FileActions } from "./file-actions";
 import { baseName, parentPath, within } from "./file-names";
 import { InlineName } from "./inline-name";
 import type { Entry } from "./model";
-import { sidebarTimestamp } from "./recent-documents";
+import {
+  compareNames,
+  sidebarTimestamp,
+  sidebarTimestampChange,
+} from "./recent-documents";
 import { mac, shortcuts } from "./shortcuts";
 import { isolateName } from "./bidi";
 import { PathText } from "./ui";
@@ -63,6 +72,235 @@ type Menu = {
   focusFirst: boolean;
   fromButton: boolean;
 };
+
+// What a row does with its events, handled by the tree.
+type RowHandlers = {
+  focus: (path: string) => void;
+  click: (entry: Entry) => void;
+  contextMenu: (entry: Entry, event: MouseEvent) => void;
+  more: (entry: Entry, event: MouseEvent<HTMLButtonElement>) => void;
+  dragStart: (entry: Entry, event: DragEvent) => void;
+  over: (event: DragEvent, folder: string, expandable?: string) => void;
+  drop: (event: DragEvent, folder: string) => void;
+  finishDrag: () => void;
+  share: (path: string) => void;
+  element: (path: string, element: HTMLLIElement | null) => void;
+};
+
+// One row of the tree. A workspace lists a thousand of them and the tree
+// renders again for each change to the workspace, so a row renders again
+// only when something it shows changes.
+const TreeEntry = memo(function TreeEntry({
+  entry: e,
+  depth,
+  setsize,
+  posinset,
+  nested,
+  open,
+  active,
+  editing,
+  busy,
+  focusable,
+  labelId,
+  time,
+  dateTime,
+  timeTitle,
+  drop,
+  dragging,
+  menuOpen,
+  menuButton,
+  owner,
+  share,
+  draggable,
+  handlers,
+  field,
+}: {
+  entry: Entry;
+  depth: number;
+  setsize: number;
+  posinset: number;
+  // Folders lists rows in their folders; By date lists them flat.
+  nested: boolean;
+  open: boolean;
+  active: boolean;
+  editing: boolean;
+  busy: boolean;
+  focusable: boolean;
+  labelId: string;
+  time?: string;
+  dateTime?: string;
+  timeTitle?: string;
+  drop: "" | "drop-target" | "in-drop-target";
+  dragging: boolean;
+  menuOpen: boolean;
+  menuButton: boolean;
+  owner: boolean;
+  share: boolean;
+  draggable: boolean;
+  handlers: RefObject<RowHandlers>;
+  // The rename field, while this row is renamed.
+  field: ReactNode;
+}) {
+  const folder = e.kind === "folder";
+  const detailId = `${labelId}-detail`;
+  const parent = parentPath(e.path);
+  const indent = nested ? indentOf(depth, folder) : 12;
+  const name = baseName(e.path);
+  const path = e.path;
+  const ref = useCallback(
+    (element: HTMLLIElement | null) => handlers.current.element(path, element),
+    [handlers, path],
+  );
+  return (
+    <li
+      ref={ref}
+      role="treeitem"
+      className={[
+        "tree-item",
+        e.kind,
+        active ? "active" : "",
+        editing ? "editing" : "",
+        drop,
+        dragging ? "dragging" : "",
+        menuOpen ? "menu-open" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      title={editing ? undefined : e.path}
+      data-path={e.path}
+      aria-level={depth + 1}
+      aria-setsize={setsize}
+      aria-posinset={posinset}
+      aria-expanded={folder ? open : undefined}
+      aria-selected={active || undefined}
+      aria-current={active ? "page" : undefined}
+      aria-busy={busy || undefined}
+      aria-labelledby={labelId}
+      aria-describedby={!nested && (parent || time) ? detailId : undefined}
+      tabIndex={focusable ? 0 : -1}
+      draggable={draggable && !editing && !busy}
+      style={editing || !nested ? undefined : { paddingLeft: indent }}
+      onFocus={(event) => {
+        if (event.target === event.currentTarget) handlers.current.focus(path);
+      }}
+      onClick={(event: MouseEvent) => {
+        if (editing || event.defaultPrevented) return;
+        handlers.current.click(e);
+      }}
+      onContextMenu={(event) => {
+        if (!owner || editing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        handlers.current.contextMenu(e, event);
+      }}
+      onDragStart={(event) => {
+        if (!draggable || editing || busy) {
+          event.preventDefault();
+          return;
+        }
+        handlers.current.dragStart(e, event);
+      }}
+      onDragOver={(event) =>
+        handlers.current.over(
+          event,
+          folder ? path : parent,
+          folder && !open ? path : undefined,
+        )
+      }
+      onDrop={(event) => handlers.current.drop(event, folder ? path : parent)}
+      onDragEnd={() => handlers.current.finishDrag()}
+    >
+      {editing && field ? (
+        field
+      ) : (
+        <>
+          {folder ? (
+            <>
+              {open ? <CaretDown size={12} /> : <CaretRight size={12} />}
+              {open ? <FolderOpen size={17} /> : <Folder size={17} />}
+            </>
+          ) : (
+            <FileText size={16} />
+          )}
+          <span className="doc-name">
+            <span className="doc-label" id={labelId}>
+              <span className="doc-title" dir="auto">
+                {documentTitle(e)}
+              </span>{" "}
+              {!folder && (
+                <span className="doc-extension">
+                  {documentExtension(e.path)}
+                </span>
+              )}
+            </span>
+            {!nested && parent && (
+              <small>
+                <PathText path={parent} />
+              </small>
+            )}
+          </span>
+          {!folder && (
+            <span className="doc-meta" id={nested ? undefined : detailId}>
+              {!nested && parent && (
+                <span className="visually-hidden">in {parent}, </span>
+              )}
+              {e.shared && (
+                <LinkSimple size={12} className="shared-indicator" />
+              )}
+              {time && (
+                <time
+                  className="doc-time"
+                  dateTime={dateTime}
+                  title={timeTitle}
+                >
+                  {time}
+                </time>
+              )}
+            </span>
+          )}
+          {(owner || share) && (
+            <span className="tree-actions">
+              {share && (
+                <button
+                  type="button"
+                  className="icon-button tree-action"
+                  tabIndex={-1}
+                  aria-label={`Share folder ${e.path}`}
+                  title={`Share folder ${e.path}`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    handlers.current.share(path);
+                  }}
+                >
+                  <ShareNetwork size={16} />
+                </button>
+              )}
+              {owner && (
+                <button
+                  type="button"
+                  className="icon-button tree-action tree-more"
+                  tabIndex={-1}
+                  aria-label={`More actions for ${name}`}
+                  title="More actions"
+                  aria-haspopup="menu"
+                  aria-expanded={menuButton}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    handlers.current.more(e, event);
+                  }}
+                >
+                  <DotsThree size={18} weight="bold" />
+                </button>
+              )}
+            </span>
+          )}
+        </>
+      )}
+    </li>
+  );
+});
 
 // A VS Code-style ARIA tree: one row takes Tab focus, arrows move between
 // visible rows, Right and Left open, close and climb folders, Enter opens,
@@ -122,6 +360,15 @@ export function FileTree({
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const expandTimer = useRef<{ path: string; timer: number } | null>(null);
   const handled = useRef(files?.request.seq ?? 0);
+  const handlers = useRef<RowHandlers>(null!);
+  // Each path keeps its label id while the tree lists it, wherever it moves.
+  const labels = useRef({ ids: new Map<string, string>(), next: 0 }).current;
+  const labelOf = (path: string) => {
+    let label = labels.ids.get(path);
+    if (!label) labels.ids.set(path, (label = `${treeId}-${labels.next++}`));
+    return label;
+  };
+  const [clock, setClock] = useState(0);
 
   const focusRow = (path: string | null, scroll = true) => {
     const element = path ? elements.current.get(path) : undefined;
@@ -205,10 +452,7 @@ export function FileTree({
       .map((item) => item.path.split("/"))
       .sort((a, b) => {
         for (let index = 0; index < Math.min(a.length, b.length); index++) {
-          const order = a[index].localeCompare(b[index], undefined, {
-            numeric: true,
-            sensitivity: "base",
-          });
+          const order = compareNames(a[index], b[index]);
           if (order) return order;
         }
         return a.length - b.length;
@@ -510,204 +754,121 @@ export function FileTree({
     clearExpand();
   };
 
+  // Rows render again only when what they show changes. Their handlers act
+  // through `handlers`, which holds those of the latest render.
+  const latest: RowHandlers = {
+    focus: (path) => setCursor(path),
+    click: (entry) => {
+      focusRow(entry.path, false);
+      if (entry.kind === "folder") toggle(entry.path);
+      else choose(entry);
+    },
+    contextMenu: (entry, event) => {
+      // A keyboard menu key may also send this event.
+      if (Date.now() - keyMenu.current < 400) return;
+      const keyboard = event.clientX === 0 && event.clientY === 0;
+      openMenu(
+        entry.path,
+        keyboard
+          ? menuAtRow(entry.path)
+          : { x: event.clientX, y: event.clientY },
+        keyboard,
+      );
+    },
+    more: (entry, event) => {
+      const box = event.currentTarget.getBoundingClientRect();
+      openMenu(
+        entry.path,
+        { x: box.right, y: box.bottom + 4, align: "end" },
+        event.detail === 0,
+        true,
+      );
+    },
+    dragStart: (entry, event) => {
+      dragged.current = entry;
+      setDragging(entry.path);
+      event.dataTransfer.effectAllowed = "move";
+      try {
+        event.dataTransfer.setData(MOVE_TYPE, entry.path);
+      } catch {
+        // Some engines refuse custom types; the drag still works here.
+      }
+    },
+    over,
+    drop,
+    finishDrag,
+    share: (path) => shareFolder?.(path),
+    element: (path, element) => {
+      if (element) elements.current.set(path, element);
+      else elements.current.delete(path);
+    },
+  };
+  // Before any layout effect, which may move focus into a row.
+  useInsertionEffect(() => {
+    handlers.current = latest;
+  });
+  // Relative times change as time passes: the tree renders again when the
+  // next of its labels changes.
+  const now = new Date();
+  let nextLabel = Infinity;
   const rowFor = (row: Extract<TreeRow, { type: "entry" }>) => {
     const e = row.entry;
     const folder = e.kind === "folder";
-    const open = folder && isOpen(e.path);
-    const active = !folder && e.id === id;
     // A rename shows wherever its row is listed.
     const editing =
       files?.edit?.mode === "rename" && files.edit.path === e.path;
-    const busy = !!files?.isBusy(e.path);
     const nested = view === "folders";
-    const stamp = !folder ? sidebarTimestamp(e.modified) : null;
-    const labelId = `${treeId}-${paths.indexOf(e.path)}`;
-    const detailId = `${labelId}-detail`;
-    const parent = parentPath(e.path);
-    const indent = nested ? indentOf(row.depth, folder) : 12;
-    const name = baseName(e.path);
+    const stamp = !folder ? sidebarTimestamp(e.modified, now) : null;
+    if (stamp)
+      nextLabel = Math.min(
+        nextLabel,
+        sidebarTimestampChange(e.modified, +now) ?? Infinity,
+      );
     const highlighted =
       dropTarget !== null &&
       dropTarget !== "" &&
       (dropTarget === e.path || within(e.path, dropTarget));
     return (
-      <li
+      <TreeEntry
         key={e.path}
-        ref={(element) => {
-          if (element) elements.current.set(e.path, element);
-          else elements.current.delete(e.path);
-        }}
-        role="treeitem"
-        className={[
-          "tree-item",
-          e.kind,
-          active ? "active" : "",
-          editing ? "editing" : "",
-          dropTarget === e.path ? "drop-target" : highlighted ? "in-drop-target" : "",
-          dragging === e.path ? "dragging" : "",
-          menu?.path === e.path ? "menu-open" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        title={editing ? undefined : e.path}
-        data-path={e.path}
-        aria-level={row.depth + 1}
-        aria-setsize={row.setsize}
-        aria-posinset={row.posinset}
-        aria-expanded={folder ? open : undefined}
-        aria-selected={active || undefined}
-        aria-current={active ? "page" : undefined}
-        aria-busy={busy || undefined}
-        aria-labelledby={labelId}
-        aria-describedby={!nested && (parent || stamp) ? detailId : undefined}
-        tabIndex={!editing && e.path === roving ? 0 : -1}
-        draggable={canDrag && !editing && !busy}
-        style={editing || !nested ? undefined : { paddingLeft: indent }}
-        onFocus={(event) => {
-          if (event.target === event.currentTarget) setCursor(e.path);
-        }}
-        onClick={(event: MouseEvent) => {
-          if (editing || event.defaultPrevented) return;
-          focusRow(e.path, false);
-          if (folder) toggle(e.path);
-          else choose(e);
-        }}
-        onContextMenu={(event) => {
-          if (!owner || editing) return;
-          event.preventDefault();
-          event.stopPropagation();
-          // A keyboard menu key may also send this event.
-          if (Date.now() - keyMenu.current < 400) return;
-          const keyboard = event.clientX === 0 && event.clientY === 0;
-          openMenu(
-            e.path,
-            keyboard ? menuAtRow(e.path) : { x: event.clientX, y: event.clientY },
-            keyboard,
-          );
-        }}
-        onDragStart={(event) => {
-          if (!canDrag || editing || busy) {
-            event.preventDefault();
-            return;
-          }
-          dragged.current = e;
-          setDragging(e.path);
-          event.dataTransfer.effectAllowed = "move";
-          try {
-            event.dataTransfer.setData(MOVE_TYPE, e.path);
-          } catch {
-            // Some engines refuse custom types; the drag still works here.
-          }
-        }}
-        onDragOver={(event) =>
-          over(
-            event,
-            folder ? e.path : parent,
-            folder && !open ? e.path : undefined,
-          )
+        entry={e}
+        depth={row.depth}
+        setsize={row.setsize}
+        posinset={row.posinset}
+        nested={nested}
+        open={folder && isOpen(e.path)}
+        active={!folder && e.id === id}
+        editing={editing}
+        busy={!!files?.isBusy(e.path)}
+        focusable={!editing && e.path === roving}
+        labelId={labelOf(e.path)}
+        time={stamp?.label}
+        dateTime={stamp?.dateTime}
+        timeTitle={stamp?.title}
+        drop={
+          dropTarget === e.path
+            ? "drop-target"
+            : highlighted
+              ? "in-drop-target"
+              : ""
         }
-        onDrop={(event) => drop(event, folder ? e.path : parent)}
-        onDragEnd={finishDrag}
-      >
-        {editing && files ? (
-          <InlineName
-            files={files}
-            indent={nested ? fieldIndent(row.depth) : 12}
-            prepare={prepare}
-          />
-        ) : (
-          <>
-            {folder ? (
-              <>
-                {open ? <CaretDown size={12} /> : <CaretRight size={12} />}
-                {open ? <FolderOpen size={17} /> : <Folder size={17} />}
-              </>
-            ) : (
-              <FileText size={16} />
-            )}
-            <span className="doc-name">
-              <span className="doc-label" id={labelId}>
-                <span className="doc-title" dir="auto">
-                  {documentTitle(e)}
-                </span>{" "}
-                {!folder && (
-                  <span className="doc-extension">
-                    {documentExtension(e.path)}
-                  </span>
-                )}
-              </span>
-              {!nested && parent && (
-                <small>
-                  <PathText path={parent} />
-                </small>
-              )}
-            </span>
-            {!folder && (
-              <span className="doc-meta" id={nested ? undefined : detailId}>
-                {!nested && parent && (
-                  <span className="visually-hidden">in {parent}, </span>
-                )}
-                {e.shared && (
-                  <LinkSimple size={12} className="shared-indicator" />
-                )}
-                {stamp && (
-                  <time
-                    className="doc-time"
-                    dateTime={stamp.dateTime}
-                    title={stamp.title}
-                  >
-                    {stamp.label}
-                  </time>
-                )}
-              </span>
-            )}
-            {(owner || (folder && shareFolder)) && (
-              <span className="tree-actions">
-                {folder && shareFolder && (
-                  <button
-                    type="button"
-                    className="icon-button tree-action"
-                    tabIndex={-1}
-                    aria-label={`Share folder ${e.path}`}
-                    title={`Share folder ${e.path}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      shareFolder(e.path);
-                    }}
-                  >
-                    <ShareNetwork size={16} />
-                  </button>
-                )}
-                {owner && (
-                  <button
-                    type="button"
-                    className="icon-button tree-action tree-more"
-                    tabIndex={-1}
-                    aria-label={`More actions for ${name}`}
-                    title="More actions"
-                    aria-haspopup="menu"
-                    aria-expanded={menu?.path === e.path && menu.fromButton}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      const box = event.currentTarget.getBoundingClientRect();
-                      openMenu(
-                        e.path,
-                        { x: box.right, y: box.bottom + 4, align: "end" },
-                        event.detail === 0,
-                        true,
-                      );
-                    }}
-                  >
-                    <DotsThree size={18} weight="bold" />
-                  </button>
-                )}
-              </span>
-            )}
-          </>
-        )}
-      </li>
+        dragging={dragging === e.path}
+        menuOpen={menu?.path === e.path}
+        menuButton={menu?.path === e.path && menu.fromButton}
+        owner={owner}
+        share={folder && !!shareFolder}
+        draggable={canDrag}
+        handlers={handlers}
+        field={
+          editing && files ? (
+            <InlineName
+              files={files}
+              indent={nested ? fieldIndent(row.depth) : 12}
+              prepare={prepare}
+            />
+          ) : null
+        }
+      />
     );
   };
   const createRow = (row: Extract<TreeRow, { type: "create" }>) =>
@@ -727,6 +888,19 @@ export function FileTree({
       </li>
     );
 
+  const rendered = rows.map((row) =>
+    row.type === "entry" ? rowFor(row) : createRow(row),
+  );
+  useEffect(() => {
+    if (nextLabel === Infinity) return;
+    // A day at most, which also keeps the delay in range for setTimeout.
+    const delay = Math.min(
+      Math.max(0, nextLabel - Date.now()) + 50,
+      86_400_000,
+    );
+    const timer = setTimeout(() => setClock((value) => value + 1), delay);
+    return () => clearTimeout(timer);
+  }, [nextLabel, clock]);
   return (
     <div
       ref={container}
@@ -758,9 +932,7 @@ export function FileTree({
           className="tree"
           onKeyDown={onKeyDown}
         >
-          {rows.map((row) =>
-            row.type === "entry" ? rowFor(row) : createRow(row),
-          )}
+          {rendered}
         </ul>
       )}
       {!entryRows.length && empty}

@@ -6,9 +6,9 @@ import React from "react";
 import { fileApi } from "./fixtures/file-api.ts";
 
 // The owner's whole workspace, as the browser mounts it: every document gets a
-// fresh DocumentWorkspace, and the sidebar mounts again inside it. jsdom keeps
-// each element's scrollTop without layout, so a list that mounts again starts
-// at 0 unless it takes its position back.
+// fresh DocumentWorkspace, inside a frame whose sidebar stays mounted. jsdom
+// keeps each element's scrollTop without layout, so a list that mounted again
+// would start at 0 unless it took its position back.
 let render, fireEvent, screen, waitFor, cleanup;
 let WorkspaceView, useWorkspace;
 let workspace;
@@ -134,7 +134,7 @@ test("By date stays where it was when a document opens by click or from the keyb
   first.scrollTop = 840;
   fireEvent.click(row("Doc 30.md"));
   await opened("Doc 30.md");
-  assert.ok(list() !== first, "Each document's workspace mounts the sidebar again");
+  assert.ok(list() === first, "The sidebar stays mounted as a document opens");
   assert.equal(list().scrollTop, 840, "A click leaves the list where it was");
   assert.equal(focused(), "Doc 30.md");
 

@@ -51,6 +51,7 @@ import {
 import { documentPreview } from "./markdown-preview";
 import { explainMedia, retryUnavailableMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
+import { sameLinkTargets } from "./document-links";
 import { perLineDirection } from "./text-direction";
 import type { Comment, Entry } from "./model";
 
@@ -346,8 +347,15 @@ export const MarkdownEditor = forwardRef<
     observer.observe(commentHost);
     return () => observer.disconnect();
   }, [commentHost]);
-  const previewEntries =
-    documentFormat(path) === "markdown" ? entries : undefined;
+  // The tree is listed again as documents are saved; a listing whose links
+  // resolve as before keeps the preview as it is.
+  const linked = documentFormat(path) === "markdown" ? entries : undefined;
+  const [previewEntries, setPreviewEntries] = useState(linked);
+  if (
+    previewEntries !== linked &&
+    !(previewEntries && linked && sameLinkTargets(previewEntries, linked))
+  )
+    setPreviewEntries(linked);
   useEffect(() => {
     view.current?.dispatch({
       effects: preview.current.reconfigure([

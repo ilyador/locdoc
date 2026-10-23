@@ -471,7 +471,8 @@ test("appearance adjusts the live document without a modal or replacing its edit
     fireEvent.change(screen.getByRole("slider", { name: "Text size" }), {
       target: { value: "22" },
     });
-    const app = page.container.querySelector<HTMLElement>(".app")!;
+    // The document's appearance applies to its part of the workspace.
+    const app = page.container.querySelector<HTMLElement>(".workspace")!;
     assert.equal(app.style.getPropertyValue("--doc-size"), "22px");
     assert.ok(
       app.style.getPropertyValue("--doc-font").includes("Courier Prime"),
