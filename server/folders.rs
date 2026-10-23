@@ -130,9 +130,13 @@ pub(super) fn unmatched(s: &Store) -> Result<Vec<String>> {
         .collect())
 }
 pub(super) fn entries(s: &Store, folder: &Grant) -> Result<Vec<Entry>> {
-    let mut values = vec![];
-    scan(s, &s.safe(&folder.path, false)?, &mut values)?;
-    for entry in &mut values {
+    Ok(walk(s, folder)?.entries)
+}
+/// The folder's tree as its link shows it: paths from the folder, every
+/// entry shared, and documents opened through the link.
+pub(super) fn walk(s: &Store, folder: &Grant) -> Result<Walk> {
+    let mut walk = super::walk(s, &s.safe(&folder.path, false)?)?;
+    for entry in &mut walk.entries {
         entry.path = entry
             .path
             .strip_prefix(&format!("{}/", folder.path))
@@ -147,7 +151,7 @@ pub(super) fn entries(s: &Store, folder: &Grant) -> Result<Vec<Entry>> {
     if !folder.valid(s) {
         return Err(unavailable());
     }
-    Ok(values)
+    Ok(walk)
 }
 pub(super) fn document(
     s: &Store,

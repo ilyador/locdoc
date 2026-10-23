@@ -855,6 +855,12 @@ impl Store {
         self.find_document(input, false)
     }
 
+    /// A listing that stands left out a file no pass has matched yet; its
+    /// walk would have asked for a pass, as this does.
+    pub(super) fn listing_unmatched(&self) {
+        self.reconciliation.unlisted();
+    }
+
     fn find_document(&self, input: &str, discover: bool) -> Result<Document> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;

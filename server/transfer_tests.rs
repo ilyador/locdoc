@@ -144,6 +144,242 @@ async fn an_unchanged_listing_is_answered_without_its_body_in_each_callers_own_v
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+fn entry(body: &[u8], path: &str) -> Option<Value> {
+    let value: Value = serde_json::from_slice(body).unwrap();
+    value["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .cloned()
+}
+
+/// Polls the owner's tree as a tab does, naming the listing it holds,
+/// until that listing shows what `shows` looks for.
+async fn listed_until(
+    base: &str,
+    owner: (&str, &str),
+    held: &mut (String, Vec<u8>),
+    what: &str,
+    shows: impl Fn(&[u8]) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (status, headers, body) =
+            get(base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+        if status == StatusCode::OK {
+            *held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+        } else {
+            assert_eq!(status, StatusCode::NOT_MODIFIED);
+        }
+        if shows(&held.1) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never showed {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_is_walked_again_only_once_something_it_shows_may_have_changed() {
+    use std::time::{Duration, SystemTime};
+    let (_directory, s) = store();
+    let plan = s.create_document("Notes/plan.md").unwrap();
+    s.create_document("Notes/ideas.md").unwrap();
+    s.create_document("todo.md").unwrap();
+    let watching = projection::watch(s.clone()).unwrap();
+    // The watcher's first settled pass.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let walks = || s.listings.walks();
+    let (status, headers, body) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+    let walked = walks();
+    // Nothing changed: answered from the listing held, without a walk.
+    for _ in 0..5 {
+        let (status, _, _) = get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+    }
+    assert_eq!(walks(), walked, "an unchanged tree is not walked again");
+
+    // A desktop save changes only that document's time: its entry is
+    // patched from the file, without a walk.
+    let set_time = |path: &Path, seconds: u64| {
+        fs::File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    };
+    let plan_file = s.root.join("Notes/plan.md");
+    fs::write(&plan_file, "Desktop plan\n").unwrap();
+    set_time(&plan_file, 2_000_000_000);
+    let time = |body: &[u8]| entry(body, "Notes/plan.md").unwrap()["modified"].as_u64();
+    listed_until(&base, owner, &mut held, "the desktop save's time", |body| {
+        time(body) == Some(2_000_000_000)
+    })
+    .await;
+    assert_eq!(walks(), walked, "a save patches its entry's time");
+    // A write through another name of the file, outside what is listed,
+    // still reaches the document's entry.
+    fs::create_dir(s.root.join(".backup")).unwrap();
+    let link = s.root.join(".backup/plan.md");
+    fs::hard_link(&plan_file, &link).unwrap();
+    // The new names' notices, then the walk they call for.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (status, headers, body) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+    let linked = walks();
+    assert!(linked > walked, "new names are walked");
+    fs::write(&link, "Plan saved through its other name\n").unwrap();
+    set_time(&link, 2_100_000_000);
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a write through a hard link",
+        |body| time(body) == Some(2_100_000_000),
+    )
+    .await;
+    assert_eq!(walks(), linked, "a hard link's write patches its document");
+    // So does Locdoc's own save of typed text: rows that only store the
+    // text are no reason to walk.
+    {
+        let room = s.room(&plan).unwrap();
+        let mut room = room.lock().unwrap();
+        let source = room_text(&room);
+        apply_text(room.awareness.doc(), &source, "Typed plan\n");
+        room.engine.edited();
+        s.store_room(&plan, &mut room).unwrap();
+        assert!(s.persist(&plan, &mut room).unwrap());
+    }
+    listed_until(&base, owner, &mut held, "the typed save's time", |body| {
+        time(body) != Some(2_100_000_000)
+    })
+    .await;
+    assert_eq!(walks(), linked, "typing patches its document's time");
+
+    // Names that change show on the next poll after their notice or row.
+    fs::rename(
+        s.root.join("Notes/ideas.md"),
+        s.root.join("Notes/renamed.md"),
+    )
+    .unwrap();
+    listed_until(&base, owner, &mut held, "a desktop rename", |body| {
+        entry(body, "Notes/renamed.md").is_some() && entry(body, "Notes/ideas.md").is_none()
+    })
+    .await;
+    fs::write(s.root.join("desktop.md"), "Made on the desktop\n").unwrap();
+    listed_until(&base, owner, &mut held, "a desktop file", |body| {
+        entry(body, "desktop.md").is_some()
+    })
+    .await;
+    fs::remove_file(s.root.join("todo.md")).unwrap();
+    listed_until(&base, owner, &mut held, "a desktop removal", |body| {
+        entry(body, "todo.md").is_none()
+    })
+    .await;
+    s.create_document("Notes/fresh.md").unwrap();
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a document made in Locdoc",
+        |body| entry(body, "Notes/fresh.md").is_some(),
+    )
+    .await;
+    folder_link(&s, "Notes", "view");
+    listed_until(&base, owner, &mut held, "a folder link", |body| {
+        entry(body, "Notes/plan.md").unwrap()["shared"] == true
+    })
+    .await;
+    let id = entry(&held.1, "Notes/fresh.md").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.trash_document(&id).unwrap();
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a document deleted in Locdoc",
+        |body| entry(body, "Notes/fresh.md").is_none(),
+    )
+    .await;
+    // Once the passes those changes started have settled, the listing
+    // stands again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let before = walks();
+        for _ in 0..5 {
+            let (status, headers, body) =
+                get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+            if status == StatusCode::OK {
+                held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if walks() == before {
+            break before;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never stood"
+        );
+    };
+
+    // Without a watcher no notice says what changed: every poll walks.
+    drop(watching);
+    for _ in 0..3 {
+        get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+    }
+    assert_eq!(walks(), settled + 3);
+    fs::write(s.root.join("unwatched.md"), "Written with no watcher\n").unwrap();
+    let (status, _, body) = get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(entry(&body, "unwatched.md").is_some());
+}
+
+#[tokio::test]
+async fn a_change_made_through_locdoc_shows_in_the_next_listing_before_any_notice() {
+    let (_directory, s) = store();
+    s.create_document("plan.md").unwrap();
+    // A watcher that has not reported anything yet.
+    s.listings.notices.watching(true);
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let (status, headers, _) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+    // Until its notice arrives, a folder made on the desktop is not listed.
+    fs::create_dir(s.root.join("Desktop")).unwrap();
+    let (status, _, _) = get(&base, "/api/tree", &[owner, ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    // One the sidebar makes is listed as soon as the request returns, so
+    // the listing after it never undoes it.
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/files"))
+        .header("authorization", &bearer)
+        .header("content-type", "application/json")
+        .body(json!({"path": "Made", "kind": "folder"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _, body) = get(&base, "/api/tree", &[owner, ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(paths(&body), ["Desktop", "Made", "plan.md"]);
+}
+
 fn comments(body: &[u8]) -> Vec<(String, bool)> {
     let value: Value = serde_json::from_slice(body).unwrap();
     value["comments"]

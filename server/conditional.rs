@@ -39,7 +39,7 @@ pub(super) fn json(h: &HeaderMap, scope: &str, value: &Value) -> Result<Response
 }
 
 /// Whether If-None-Match names `tag`, compared weakly as RFC 9110 requires.
-fn names(h: &HeaderMap, tag: &str) -> bool {
+pub(super) fn names(h: &HeaderMap, tag: &str) -> bool {
     let opaque = |value: &str| value.trim().trim_start_matches("W/").to_owned();
     let wanted = opaque(tag);
     h.get_all(header::IF_NONE_MATCH)

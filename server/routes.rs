@@ -141,7 +141,18 @@ async fn guard(
         mcp_cors(req.headers(), response.headers_mut());
         return response;
     }
-    next.run(req).await
+    // A request that may change files is a notice of its own: the listing
+    // its caller asks for next shows what it did, even before the watcher
+    // reports a folder it made.
+    let changes = !matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    let response = next.run(req).await;
+    if changes {
+        s.listings.notices.changed();
+    }
+    response
 }
 fn mcp_cors(request: &HeaderMap, response: &mut HeaderMap) {
     if let Some(origin) = request.get(header::ORIGIN) {
