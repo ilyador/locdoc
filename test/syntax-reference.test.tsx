@@ -963,3 +963,17 @@ test("on phones and touch screens the format label stays in the footer", () => {
     "attachment usage still makes room",
   );
 });
+
+test("an example shows every character to type, never a ligature", () => {
+  style.textContent = stylesheet;
+  const view = footer(paths.markdown);
+  act(() => view.trigger.click());
+  const code = Array.from(view.panel()!.querySelectorAll("dt code")).find(
+    (example) => example.textContent === "Heading\n===",
+  )!;
+  assert.equal(
+    getComputedStyle(code).getPropertyValue("font-variant-ligatures"),
+    "none",
+    "=== is three signs",
+  );
+});
