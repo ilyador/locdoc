@@ -4,6 +4,7 @@ import {
   webLink,
   markdownLink,
   resolveDocumentLink,
+  sameLinkTargets,
 } from "../src/document-links.ts";
 import { recentDocuments, sidebarTimestamp } from "../src/recent-documents.ts";
 import { markdownLanguage } from "@codemirror/lang-markdown";
@@ -87,4 +88,58 @@ test("sidebar timestamps use relative time, then a compact calendar date", () =>
   );
   assert.equal(sidebarTimestamp(undefined, now), null);
   assert.equal(sidebarTimestamp(NaN, now), null);
+});
+test("listings resolve document links alike while their files keep their paths and addresses", () => {
+  const listing = [
+    { kind: "folder", path: "Ideas", url: null, modified: 0 },
+    {
+      kind: "file",
+      path: "Ideas/Draft.md",
+      url: "https://l.test/d/a",
+      modified: 1,
+    },
+    { kind: "file", path: "Plan.md", url: "https://l.test/d/b", modified: 2 },
+  ];
+  const saved = listing.map((entry) =>
+    entry.path === "Plan.md" ? { ...entry, modified: 3 } : entry,
+  );
+  assert.equal(sameLinkTargets(listing, saved), true, "a newer time");
+  assert.equal(
+    sameLinkTargets(listing, [listing[1], listing[2]]),
+    true,
+    "folders hold no link targets",
+  );
+  const renamed = saved.map((entry) =>
+    entry.path === "Plan.md" ? { ...entry, path: "Plans.md" } : entry,
+  );
+  assert.equal(sameLinkTargets(listing, renamed), false, "a renamed file");
+  const shared = saved.map((entry) =>
+    entry.path === "Plan.md"
+      ? { ...entry, url: "https://l.test/s/token" }
+      : entry,
+  );
+  assert.equal(sameLinkTargets(listing, shared), false, "a new address");
+  assert.equal(
+    sameLinkTargets(listing, listing.slice(0, 2)),
+    false,
+    "a removed file",
+  );
+  const added = [
+    ...listing,
+    { kind: "file", path: "New.md", url: "https://l.test/d/c" },
+  ];
+  assert.equal(sameLinkTargets(listing, added), false, "an added file");
+  for (const [a, b] of [
+    [listing, saved],
+    [listing, renamed],
+  ])
+    assert.equal(
+      sameLinkTargets(a, b),
+      ["../Plan.md", "Draft.md"].every(
+        (link) =>
+          resolveDocumentLink(link, "Ideas/Note.md", a) ===
+          resolveDocumentLink(link, "Ideas/Note.md", b),
+      ),
+      "the same targets resolve the same links",
+    );
 });

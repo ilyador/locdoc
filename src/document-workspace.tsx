@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -98,9 +99,13 @@ export function DocumentWorkspace({
   );
   // The tree follows renames made here, in other tabs and on the desktop, so
   // the open document takes its current path from there.
-  const entry = id
-    ? entries.find((item) => item.kind === "file" && item.id === id)
-    : undefined;
+  const entry = useMemo(
+    () =>
+      id
+        ? entries.find((item) => item.kind === "file" && item.id === id)
+        : undefined,
+    [entries, id],
+  );
   // Visitors see names only; folder links list paths below the shared folder.
   const listed = entry
     ? (doc ? doc.owner : config?.owner)

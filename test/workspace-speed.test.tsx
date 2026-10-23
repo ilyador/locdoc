@@ -192,3 +192,39 @@ test("opening a document keeps the sidebar and the rows it lists", async () => {
     "Ctrl K focuses the search",
   );
 });
+
+test("a listing in which only a document's time changed leaves the editor as it is", async () => {
+  const { EditorView } = await import("@codemirror/view");
+  const api = await open("Doc 47.md");
+  // The document's comments arrive after its editor shows.
+  await waitFor(() =>
+    assert.ok(api.calls.some((call) => call.path.endsWith("/comments"))),
+  );
+  await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+  const view = EditorView.findFromDOM(
+    screen.getByRole("textbox", { name: "Markdown document" }),
+  )!;
+  // Every transaction reaches the view through its own bound dispatch.
+  const native = view.dispatch;
+  let dispatched = 0;
+  view.dispatch = (...specs) => {
+    dispatched++;
+    return native(...specs);
+  };
+  try {
+    // Saving another document changes only its time.
+    api.items.find((item) => item.path === "Doc 12.md")!.modified = 2_000_000;
+    await act(() => workspace.loadTree());
+    assert.equal(
+      workspace.entries.find((entry) => entry.path === "Doc 12.md")!.modified,
+      2_000_000,
+    );
+    assert.equal(dispatched, 0, "the preview's links resolve as before");
+    // A rename moves a link target, so the preview resolves links again.
+    api.rename("Doc 12.md", "Doc twelve.md");
+    await act(() => workspace.loadTree());
+    assert.ok(dispatched > 0, "the preview follows the rename");
+  } finally {
+    view.dispatch = native;
+  }
+});
