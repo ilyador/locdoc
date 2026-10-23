@@ -91,7 +91,7 @@ export function FormattingTools({
                 run: () => onEdit((e) => e.toggleTasks()),
               },
               {
-                label: "Insert link (Ctrl K)",
+                label: "Insert link (Ctrl K on selected text)",
                 icon: LinkSimple,
                 className: "toolbar-primary",
                 run: onLink,

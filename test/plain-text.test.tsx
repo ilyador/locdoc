@@ -712,7 +712,7 @@ test("the workspace offers plain text no formatting, media or link tools", async
       "Bold",
       "Italic",
       "Heading",
-      "Insert link (Ctrl K)",
+      "Insert link (Ctrl K on selected text)",
       "Insert local image or video",
       "Bulleted list",
       "Todo list",
