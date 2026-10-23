@@ -136,6 +136,15 @@ export function relocatePaths(paths: Set<string>, from: string, to: string) {
   );
 }
 
+// The paths left once `folder` and everything inside it are gone; the same
+// set when none of them was there.
+export function removePaths(paths: Set<string>, folder: string) {
+  const left = new Set(
+    Array.from(paths).filter((path) => !within(path, folder)),
+  );
+  return left.size === paths.size ? paths : left;
+}
+
 export function ancestors(path: string) {
   const parts = path.split("/").slice(0, -1);
   return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
