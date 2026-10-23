@@ -518,13 +518,14 @@ test("media the server refuses shows its alt text instead of a broken image", ()
 
 test("the owner's editor says why the server refuses media, a visitor's never asks", async () => {
   const source =
-    "![Chart](big.png)\n\nSee ![](gone.png) and ![clip](huge.mp4)\n\n![odd](odd.png)\n\n![later](fine.png)";
+    "![Chart](big.png)\n\nSee ![](gone.png) and ![clip](huge.mp4)\n\n![odd](odd.png)\n\n![old](.trash/old.png)\n\n![later](fine.png)";
   // The media endpoint's refusals, as it answers the owner.
   const reasons: Record<string, string> = {
     "big.png": "too-large",
     "gone.png": "missing",
     "huge.mp4": "too-large",
     "odd.png": "<b>new</b>",
+    ".trash/old.png": "trash",
   };
   const asked: string[] = [];
   const original = globalThis.fetch;
@@ -585,6 +586,7 @@ test("the owner's editor says why the server refuses media, a visitor's never as
       "Image unavailable|Image unavailable|Image unavailable",
       "clip (video unavailable)|Video unavailable|clip",
       "odd (image unavailable)|Image unavailable|odd",
+      "old (image unavailable)|Image unavailable|old",
       "later (image unavailable)|Image unavailable|later",
     ]);
     assert.deepEqual(asked, [], "a link visitor's view never asks why");
@@ -595,9 +597,12 @@ test("the owner's editor says why the server refuses media, a visitor's never as
       `clip (video unavailable: ${limit})|Video unavailable: ${limit}|clip · ${limit}`,
       // An unknown reason, or none, leaves the plain placeholder.
       "odd (image unavailable)|Image unavailable|odd",
+      // A trash folder serves nobody, unlike another hidden folder.
+      "old (image unavailable: In a trash folder)|Image unavailable: In a trash folder|old · In a trash folder",
       "later (image unavailable)|Image unavailable|later",
     ]);
     assert.deepEqual(asked.sort(), [
+      ".trash/old.png",
       "big.png",
       "fine.png",
       "gone.png",

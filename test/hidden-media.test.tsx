@@ -230,6 +230,8 @@ test("each listed reason reads as it is, and only an unapproved image offers Sho
   const hidden: HiddenMedia[] = [
     { path: "../../outside.png", reason: "outside" },
     { path: ".dot/secret.png", reason: "hidden" },
+    { path: "../.locdoc-trash/item/old.png", reason: "trash" },
+    { path: ".trash/binned.png", reason: "trash" },
     { path: "state/cover.png", reason: "state" },
     { path: "big.png", reason: "too-large" },
     { path: "notes.png", reason: "unsupported" },
@@ -257,6 +259,8 @@ test("each listed reason reads as it is, and only an unapproved image offers Sho
   assert.deepEqual(rows, [
     "../../outside.png|Outside your documents folder||icon",
     ".dot/secret.png|In a hidden file or folder||thumbnail",
+    "../.locdoc-trash/item/old.png|In a trash folder||icon",
+    ".trash/binned.png|In a trash folder||icon",
     "state/cover.png|In Locdoc's state folder||icon",
     "big.png|Over the 5 MB image or 20 MB video limit||icon",
     "notes.png|Not an image or video Locdoc can show||icon",
@@ -265,7 +269,8 @@ test("each listed reason reads as it is, and only an unapproved image offers Sho
     "photo.png|Not approved for link visitors|Show to link visitors|thumbnail",
   ]);
   // Only files the owner can see are requested as thumbnails. Locdoc
-  // serves its state folder to nobody.
+  // serves its state folder and trash folders to nobody: their requests
+  // would only be refused.
   assert.deepEqual(
     Array.from(
       document.querySelectorAll<HTMLImageElement>("img.hidden-media-thumb"),
@@ -283,6 +288,7 @@ test("each refusal the server sends reads as its reason", async () => {
     { path: "pics/odd.png", reason: "unapproved" },
     { path: "pics/.dot.png", reason: "unapproved" },
     { path: "pics/big.png", reason: "unapproved" },
+    { path: "pics/binned.png", reason: "unapproved" },
   ];
   const reasons: Record<string, string> = {
     "pics/gone.png": "unreferenced",
@@ -290,6 +296,8 @@ test("each refusal the server sends reads as its reason", async () => {
     "pics/odd.png": "<b>new code</b>",
     "pics/.dot.png": "hidden",
     "pics/big.png": "too-large",
+    // Moved into a trash folder since the list was loaded.
+    "pics/binned.png": "trash",
   };
   respond = (request) =>
     request.method === "POST"
@@ -309,6 +317,7 @@ test("each refusal the server sends reads as its reason", async () => {
     screen.getByText("Not shown: Not an image or video Locdoc can show"),
   );
   assert.ok(screen.getByText("Not shown: In a hidden file or folder"));
+  assert.ok(screen.getByText("Not shown: In a trash folder"));
   assert.ok(
     screen.getByText("Not shown: Over the 5 MB image or 20 MB video limit"),
   );

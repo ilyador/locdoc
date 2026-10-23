@@ -25,6 +25,26 @@ import { spawn, spawnSync } from "node:child_process";
 const script = resolve("scripts/deploy.sh");
 const binary = resolve("target/debug/locdoc");
 
+// The environment of every script run in this file, with the given folders.
+// HOME, the systemd configuration and TMPDIR are inside the test's root too,
+// so defaults resolve there even if a guard regresses. A run a test kills on
+// purpose never reaches the EXIT trap that removes its mktemp work folder;
+// inside the root, the test's own cleanup removes it.
+async function scriptEnv(root, folders) {
+  const tmp = join(root, "tmp");
+  await mkdir(tmp, { recursive: true });
+  const env = {
+    ...process.env,
+    ...folders,
+    LOCDOC_SERVICE: "locdoc-deploy-script-test",
+    XDG_CONFIG_HOME: join(root, "config"),
+    HOME: root,
+    TMPDIR: tmp,
+  };
+  delete env.LOCDOC_DEPLOY_TEST_FAIL;
+  return env;
+}
+
 // Fake releases need no build: --no-restart checks release files and the
 // state database only, so rollbacks and their failure paths stay cheap.
 async function fixture(root) {
@@ -67,17 +87,11 @@ async function fixture(root) {
     "20260102T000000Z-bbbbbbbbbbbb",
     "20260101T000000Z-aaaaaaaaaaaa",
   );
-  const env = {
-    ...process.env,
+  const env = await scriptEnv(root, {
     LOCDOC_RELEASES: releases,
     LOCDOC_STATE: state,
     LOCDOC_DOCS: docs,
-    LOCDOC_SERVICE: "locdoc-deploy-script-test",
-    XDG_CONFIG_HOME: join(root, "config"),
-    // Defaults then resolve inside the fixture even if a guard regresses.
-    HOME: root,
-  };
-  delete env.LOCDOC_DEPLOY_TEST_FAIL;
+  });
   const run = (args, extra = {}) =>
     spawnSync("bash", [script, ...args, "--no-restart"], {
       env: { ...env, ...extra },
@@ -476,16 +490,11 @@ async function restoreFixture(root) {
     JSON.stringify({ release: name, binary_sha256: sum.stdout.split(" ")[0] }),
   );
   await symlink(name, join(releases, "current"));
-  const env = {
-    ...process.env,
+  const env = await scriptEnv(root, {
     LOCDOC_RELEASES: releases,
     LOCDOC_STATE: state,
     LOCDOC_DOCS: docs,
-    LOCDOC_SERVICE: "locdoc-deploy-script-test",
-    XDG_CONFIG_HOME: join(root, "config"),
-    HOME: root,
-  };
-  delete env.LOCDOC_DEPLOY_TEST_FAIL;
+  });
   const restore = (folder, extra = {}) =>
     spawnSync("bash", [script, "restore", folder, "--no-restart"], {
       env: { ...env, ...extra },
@@ -563,6 +572,16 @@ async function killRestore(fixture, root, extra) {
     if (child.exitCode === null && child.signalCode === null)
       await once(child, "exit");
   }
+  // Its EXIT trap never ran, so its work folder is left. It must be in the
+  // TMPDIR of the test's own folder, which the test removes, never in /tmp.
+  const tmp = fixture.env.TMPDIR;
+  assert.ok(
+    tmp?.startsWith(`${root}/`),
+    `the script's TMPDIR ${tmp} is inside ${root}`,
+  );
+  const left = await readdir(tmp);
+  assert.equal(left.length, 1, `only the killed run's work folder: ${left}`);
+  assert.match(left[0], /^locdoc-deploy\.\w{6}$/);
 }
 
 // Normal startup on the given folders, which must refuse them at once.
