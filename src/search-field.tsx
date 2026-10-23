@@ -1,4 +1,5 @@
 import {
+  useLayoutEffect,
   useRef,
   type ComponentProps,
   type ReactNode,
@@ -22,6 +23,7 @@ export function SearchField({
   start,
   hint,
   onKeyDown,
+  autoFocus,
   ...input
 }: Omit<ComponentProps<"input">, "value" | "onChange" | "ref" | "dir"> & {
   value: string;
@@ -39,6 +41,14 @@ export function SearchField({
 }) {
   const own = useRef<HTMLInputElement>(null);
   const field = inputRef ?? own;
+  // React's autoFocus focuses the field as it mounts, and writes no autofocus
+  // attribute. In a dialog that is not open yet the field cannot take focus,
+  // and showModal() then focuses the dialog's first control with the
+  // attribute, or else its first control, such as Close. So the field has the
+  // attribute too.
+  useLayoutEffect(() => {
+    field.current?.toggleAttribute("autofocus", !!autoFocus);
+  }, [autoFocus, field]);
   return (
     <div
       className={`search-control ${className}`}
@@ -58,6 +68,7 @@ export function SearchField({
         {...input}
         ref={field}
         className={inputClassName}
+        autoFocus={autoFocus}
         dir="auto"
         value={value}
         onChange={(event) => onValueChange(event.target.value)}

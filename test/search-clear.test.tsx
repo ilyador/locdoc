@@ -5,10 +5,10 @@ import "fake-indexeddb/auto";
 import React from "react";
 import { fileApi } from "./fixtures/file-api.ts";
 
-// Clear search in the three search fields: the sidebar's, the link
-// chooser's and the Google Fonts search in Appearance. jsdom moves no focus
-// on a press, so each press does what a browser does when the press is not
-// prevented: the button takes focus.
+// The three search fields, with Clear search in each: the sidebar's, the
+// link chooser's and the Google Fonts search in Appearance. jsdom moves no
+// focus on a press, so each press does what a browser does when the press is
+// not prevented: the button takes focus.
 let render, fireEvent, screen, waitFor, cleanup, within;
 let WorkspaceView, useWorkspace, AppearancePanel, useAppearance;
 let workspace;
@@ -55,13 +55,20 @@ before(async () => {
       addEventListener() {},
       removeEventListener() {},
     }) as any;
-  // Browsers refuse focus inside an inert subtree; jsdom would grant it.
+  // Browsers refuse focus inside an inert subtree, and inside a dialog that
+  // is not open, which they do not render; jsdom would grant it.
   const focus = window.HTMLElement.prototype.focus;
   window.HTMLElement.prototype.focus = function (options) {
-    if (!this.closest("[inert]")) focus.call(this, options);
+    if (!this.closest("[inert], dialog:not([open])")) focus.call(this, options);
   };
+  // As in a browser, opening a dialog focuses its first control with the
+  // autofocus attribute, or else its first control.
   window.HTMLDialogElement.prototype.showModal = function () {
     this.open = true;
+    (
+      this.querySelector("[autofocus]") ??
+      this.querySelector("a[href], button, input, select, textarea, [tabindex]")
+    )?.focus();
   };
   window.HTMLDialogElement.prototype.close = function () {
     this.open = false;
@@ -442,4 +449,24 @@ test("Clear search empties the Google Fonts search and its results without closi
     localStorage.clear();
     for (const [key, value] of saved) localStorage.setItem(key, value);
   }
+});
+
+test("Insert link puts the caret in the link chooser's field, so typing goes there", async () => {
+  await open("Doc 47.md", { narrow: false });
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: "Insert link (Ctrl K on selected text)",
+    }),
+  );
+  assert.ok(document.querySelector("dialog")!.open);
+  const field = screen.getByRole("combobox", {
+    name: "Document title or URL",
+  }) as HTMLInputElement;
+  assert.ok(
+    document.activeElement === field,
+    "The field has focus as the chooser opens, not the chooser's Close button",
+  );
+  type(document.activeElement as HTMLElement, "doc 1");
+  assert.equal(field.value, "doc 1", "What is typed goes into the field");
+  assert.equal(screen.queryAllByRole("option").length, 10);
 });
