@@ -34,7 +34,7 @@ import type { FileActions } from "./file-actions";
 import { baseName, parentPath, within } from "./file-names";
 import { InlineName } from "./inline-name";
 import type { Entry } from "./model";
-import { sidebarTimestamp } from "./recent-documents";
+import { compareNames, sidebarTimestamp } from "./recent-documents";
 import { mac, shortcuts } from "./shortcuts";
 import { isolateName } from "./bidi";
 import { PathText } from "./ui";
@@ -205,10 +205,7 @@ export function FileTree({
       .map((item) => item.path.split("/"))
       .sort((a, b) => {
         for (let index = 0; index < Math.min(a.length, b.length); index++) {
-          const order = a[index].localeCompare(b[index], undefined, {
-            numeric: true,
-            sensitivity: "base",
-          });
+          const order = compareNames(a[index], b[index]);
           if (order) return order;
         }
         return a.length - b.length;

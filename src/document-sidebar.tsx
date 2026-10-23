@@ -11,7 +11,11 @@ import { documentTitle } from "./document-links";
 import type { FileActions } from "./file-actions";
 import { FileTree, type TreeRow } from "./file-tree";
 import { parentPath } from "./file-names";
-import { recentDocuments } from "./recent-documents";
+import {
+  compareNames,
+  comparePaths,
+  recentDocuments,
+} from "./recent-documents";
 
 const views = [
   { value: "date", label: "By date" },
@@ -121,16 +125,22 @@ export function DocumentSidebar({
     siblings.push(entry);
     children.set(parent, siblings);
   }
-  for (const siblings of children.values())
-    siblings.sort(
-      (a, b) =>
-        Number(b.kind === "folder") - Number(a.kind === "folder") ||
-        documentTitle(a).localeCompare(documentTitle(b), undefined, {
-          numeric: true,
-          sensitivity: "base",
-        }) ||
-        a.path.localeCompare(b.path),
-    );
+  for (const siblings of children.values()) {
+    // Folders first, then by title, each title worked out once.
+    const sorted = siblings
+      .map((entry) => ({
+        entry,
+        folder: entry.kind === "folder",
+        title: documentTitle(entry),
+      }))
+      .sort(
+        (a, b) =>
+          Number(b.folder) - Number(a.folder) ||
+          compareNames(a.title, b.title) ||
+          comparePaths(a.entry.path, b.entry.path),
+      );
+    sorted.forEach((item, index) => (siblings[index] = item.entry));
+  }
   // A new entry's name field opens first inside its folder, or at the top of
   // By date, where new documents appear once they exist.
   const edit = fileActions?.edit;
