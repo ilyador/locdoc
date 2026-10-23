@@ -199,5 +199,57 @@
     "rendered": [
       { "path": "shown.png", "alt": "shown", "title": "", "block": true }
     ]
+  },
+  {
+    "name": "a --- block in the middle of a document is a rule and a heading, not metadata",
+    "source": "Intro\n\n---\nNotes\n![mid](mid.png)\n---\n\nAfter",
+    "references": ["mid.png"],
+    "local": ["mid.png"],
+    "rendered": [
+      { "path": "mid.png", "alt": "mid", "title": "", "block": true }
+    ]
+  },
+  {
+    "name": "a --- block that opens the document is a rule and a heading too",
+    "source": "---\ntitle: Plan\ncover: ![cover](cover.png)\n---\n\nText",
+    "references": ["cover.png"],
+    "local": ["cover.png"],
+    "rendered": [
+      { "path": "cover.png", "alt": "cover", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "a +++ block is a paragraph, not metadata",
+    "source": "Intro\n\n+++\n![toml](toml.png)\n+++",
+    "references": ["toml.png"],
+    "local": ["toml.png"],
+    "rendered": [
+      { "path": "toml.png", "alt": "toml", "title": "", "block": true }
+    ]
+  },
+  {
+    "name": "dollar signs are text, not math",
+    "source": "Cost $![chart](chart.png)$ today",
+    "references": ["chart.png"],
+    "local": ["chart.png"],
+    "rendered": [
+      { "path": "chart.png", "alt": "chart", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "double brackets are text, not a wikilink",
+    "source": "[[Plan ![w](wiki.png)]]\n\n![[embed.png]]",
+    "references": ["wiki.png"],
+    "local": ["wiki.png"],
+    "rendered": [
+      { "path": "wiki.png", "alt": "w", "title": "", "block": false }
+    ]
+  },
+  {
+    "name": "a [^1]: line is a link reference definition, not a footnote",
+    "source": "Text[^1]\n\n[^1]: ![f](foot.png)",
+    "references": [],
+    "local": [],
+    "rendered": []
   }
 ]

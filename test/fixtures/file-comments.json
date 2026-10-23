@@ -90,6 +90,42 @@
     "threads": []
   },
   {
+    "name": "a --- block in the middle of a document is a rule and a heading, not metadata: its code keeps a record literal",
+    "source": "Intro\n\n---\n`[[comment(alex): literal]]` and [[comment(ana): live]]\n---\n\nAfter",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "live"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "a --- block that opens the document is Markdown too, and so is a +++ block",
+    "source": "---\ntitle: `[[comment(alex): literal]]`\n---\n\n+++\n`[[comment(alex): literal too]]`\n+++\n\nText[[comment(ana): live]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "live"
+        }
+      ]
+    ]
+  },
+  {
+    "name": "dollar signs are text, not math: code between them keeps a record literal",
+    "source": "Price $`[[comment(alex): literal]]`$ total[[comment(ana): live]]",
+    "threads": [
+      [
+        {
+          "name": "ana",
+          "body": "live"
+        }
+      ]
+    ]
+  },
+  {
     "name": "standalone conversation after a complete table",
     "source": "| Name | Value |\n| - | - |\n| one | two |\n\n[[comment(ana): Table note]]\n[[comment(alex): Table reply]]\n\nAfter the table.",
     "threads": [
@@ -792,6 +828,46 @@
     "comment": {
       "after": "one\n\n",
       "expected": "one\n\n[[comment(ana): A note]]\ntwo"
+    }
+  },
+  {
+    "name": "Markdown: a --- block in the middle of a document is a rule and a heading, and the record ends the heading's text",
+    "path": "notes.md",
+    "source": "Intro\n\n---\nNotes here\n---\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "Notes here",
+      "expected": "Intro\n\n---\nNotes here[[comment(ana): A note]]\n---\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: a --- block that opens the document is a rule and a heading too",
+    "path": "notes.md",
+    "source": "---\ntitle: Plan\n---\n\nText",
+    "threads": [],
+    "comment": {
+      "after": "Plan",
+      "expected": "---\ntitle: Plan[[comment(ana): A note]]\n---\n\nText"
+    }
+  },
+  {
+    "name": "Markdown: a line starting with a colon continues the paragraph above it, which is no definition list",
+    "path": "notes.md",
+    "source": "Term\n: Definition\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "Term",
+      "expected": "Term\n: Definition[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Markdown: braces at the end of a heading are its text, not attributes",
+    "path": "notes.md",
+    "source": "# Title {#intro}\n\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title",
+      "expected": "# Title {#intro}[[comment(ana): A note]]\n\nText"
     }
   },
   {

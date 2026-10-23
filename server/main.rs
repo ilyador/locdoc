@@ -10,6 +10,7 @@ mod engine_failure_tests;
 mod folders;
 mod links;
 mod maintenance;
+mod markdown;
 mod mcp;
 mod mcp_access;
 mod mcp_auth;
@@ -448,18 +449,16 @@ impl Store {
             .ok()?;
         namespace::Identity::of(&fs::metadata(path).ok()?)
     }
+    /// The images of Markdown source, read as the editor reads it.
     fn references(content: &str) -> HashSet<String> {
-        pulldown_cmark::Parser::new_ext(
-            &comments::reading_source(content),
-            pulldown_cmark::Options::all(),
-        )
-        .filter_map(|event| match event {
-            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
-                Some(dest_url.to_string())
-            }
-            _ => None,
-        })
-        .collect()
+        markdown::parser(&comments::reading_source(content))
+            .filter_map(|event| match event {
+                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { dest_url, .. }) => {
+                    Some(dest_url.to_string())
+                }
+                _ => None,
+            })
+            .collect()
     }
     /// The media references `content` holds as `d`'s source. A plain text
     /// document has none: its `![...](...)` is text.

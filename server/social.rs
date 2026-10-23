@@ -73,10 +73,10 @@ impl Preview {
             .nth(32_000)
             .map_or(source.len(), |(i, _)| i);
         let format = documents::format(path);
-        let reading = if format == Some(documents::Format::Fountain) {
-            fountain_excerpt(&source, end, path)
-        } else {
-            source[..end].to_owned()
+        let reading = match format {
+            Some(documents::Format::Fountain) => fountain_excerpt(&source, end, path),
+            Some(documents::Format::Text) => source[..end].to_owned(),
+            _ => source[front_matter(&source[..end])..end].to_owned(),
         };
         let mut title = String::new();
         let mut text = String::new();
@@ -86,8 +86,6 @@ impl Preview {
         let mut depth = 0;
         let mut quotes = 0usize;
         let mut hidden = 0;
-        let options = Options::all()
-            .difference(Options::ENABLE_WIKILINKS | Options::ENABLE_SMART_PUNCTUATION);
         // Plain text has no Markdown: its paragraphs are the excerpt and its
         // filename is the title.
         let events = if format == Some(documents::Format::Text) {
@@ -101,16 +99,12 @@ impl Preview {
             }
             None
         } else {
-            Some(Parser::new_ext(&reading, options))
+            Some(markdown::parser(&reading))
         };
         for event in events.into_iter().flatten() {
             match event {
-                Event::Start(Tag::CodeBlock(_) | Tag::Image { .. } | Tag::MetadataBlock(_)) => {
-                    hidden += 1
-                }
-                Event::End(TagEnd::CodeBlock | TagEnd::Image | TagEnd::MetadataBlock(_)) => {
-                    hidden -= 1
-                }
+                Event::Start(Tag::CodeBlock(_) | Tag::Image { .. }) => hidden += 1,
+                Event::End(TagEnd::CodeBlock | TagEnd::Image) => hidden -= 1,
                 _ if hidden > 0 => {}
                 Event::Start(Tag::Heading { .. }) => {
                     flush(&mut text, &kind, depth, quotes > 0, &mut blocks);
@@ -235,6 +229,23 @@ impl Preview {
             "card-6\0{}\0{}\0{}\0{:?}",
             self.title, self.description, self.filename, self.blocks
         ))
+    }
+}
+
+// Where Markdown source starts after the front matter that opens it: YAML
+// between `---` lines or TOML between `+++` lines, as site generators and
+// note apps write it. A card leaves it out. Such a block further down is no
+// front matter: the card shows it as the editor does, as a rule and a heading
+// or as a paragraph.
+fn front_matter(source: &str) -> usize {
+    if !source.starts_with("---") && !source.starts_with("+++") {
+        return 0;
+    }
+    let fences = Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
+        | Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS;
+    match Parser::new_ext(source, fences).into_offset_iter().next() {
+        Some((Event::Start(Tag::MetadataBlock(_)), range)) if range.start == 0 => range.end,
+        _ => 0,
     }
 }
 
@@ -787,6 +798,23 @@ mod tests {
             assert_eq!(value.title, "Actual title");
             assert_eq!(value.description, "Opening prose for sharing.");
         }
+    }
+
+    #[test]
+    fn fenced_blocks_after_the_opening_read_as_the_editor_shows_them() {
+        // Further down, the editor shows a --- block as a rule and a heading
+        // and a +++ block as a paragraph, hiding only the records it hides.
+        let value = Preview::new(
+            "# Title\n\nOpening.\n\n---\nShown `[[comment(alex): literal]]`[[comment(ana): hidden]]\n---\n\n+++\nAlso shown\n+++",
+            "note.md",
+        );
+        assert_eq!(value.title, "Title");
+        assert_eq!(
+            value.description,
+            "Opening. Shown [[comment(alex): literal]] +++ Also shown +++"
+        );
+        assert!(matches!(value.blocks[1].kind, Kind::Rule));
+        assert!(matches!(value.blocks[2].kind, Kind::Heading));
     }
 
     #[test]
