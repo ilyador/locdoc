@@ -3,6 +3,10 @@ use super::media::{font_css, font_list, install_font, upload};
 use super::sharing::{open_shared, share, shared};
 use super::sockets::websocket;
 use super::*;
+use tower_http::compression::{
+    CompressionLayer,
+    predicate::{Predicate, SizeAbove},
+};
 
 async fn guard(
     State(s): State<App>,
@@ -202,6 +206,46 @@ async fn response_headers(req: axum::extract::Request, next: axum::middleware::N
     }
     response
 }
+/// Text worth compressing: JSON, styles, scripts and SVG. Media keeps its
+/// identity encoding, so byte ranges keep their meaning and videos seek;
+/// event streams and WebSocket upgrades are left as they are. Pages stay
+/// whole for link-preview crawlers (`no-transform`); they are small.
+fn compressible(
+    _: StatusCode,
+    _: axum::http::Version,
+    headers: &HeaderMap,
+    _: &axum::http::Extensions,
+) -> bool {
+    let kind = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let essence = kind
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        essence.as_str(),
+        "application/json"
+            | "application/manifest+json"
+            | "text/css"
+            | "text/javascript"
+            | "application/javascript"
+            | "image/svg+xml"
+    )
+}
+/// Responses smaller than this gain less than the headers compression adds.
+const COMPRESS_FROM: u16 = 1024;
+/// A HEAD answer describes the response as it is: its Content-Length is the
+/// body's own, as crawlers that ask before fetching expect.
+async fn whole_heads(mut req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if req.method() == axum::http::Method::HEAD {
+        req.headers_mut().remove(header::ACCEPT_ENCODING);
+    }
+    next.run(req).await
+}
 pub(super) fn router(s: App) -> Router {
     Router::new()
         .route_service("/mcp", mcp::service(s.clone()))
@@ -307,5 +351,9 @@ pub(super) fn router(s: App) -> Router {
         .layer(axum::middleware::from_fn(response_headers))
         .layer(axum::middleware::from_fn_with_state(s.clone(), guard))
         .layer(axum::middleware::from_fn(web::observe_crawlers))
+        .layer(
+            CompressionLayer::new().compress_when(SizeAbove::new(COMPRESS_FROM).and(compressible)),
+        )
+        .layer(axum::middleware::from_fn(whole_heads))
         .with_state(s)
 }

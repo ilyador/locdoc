@@ -67,3 +67,62 @@ test("public HTTPS requests use HttpOnly cookies instead of readable local owner
     dom.window.close();
   }
 });
+
+test("a kept response is offered only for its own path, and only a 304 keeps it", async () => {
+  const dom = new JSDOM("", { url: "http://127.0.0.1:3561/" });
+  Object.defineProperties(globalThis, {
+    location: { value: dom.window.location, configurable: true },
+    localStorage: { value: dom.window.localStorage, configurable: true },
+  });
+  const originalFetch = globalThis.fetch;
+  const { revalidate, ApiError } = await import("../src/api");
+  const sent: { path: string; held: string | null; cache?: string }[] = [];
+  let answer = (_path: string, _held: string | null) =>
+    new Response(JSON.stringify({ entries: ["a"] }), {
+      headers: { "content-type": "application/json", etag: 'W/"one"' },
+    });
+  globalThis.fetch = async (path, options) => {
+    const held = new Headers(options?.headers).get("If-None-Match");
+    sent.push({ path: String(path), held, cache: options?.cache });
+    return answer(String(path), held);
+  };
+  try {
+    const kept = await revalidate<{ entries: string[] }>("/api/tree", null);
+    assert.deepEqual(kept, {
+      path: "/api/tree",
+      tag: 'W/"one"',
+      body: { entries: ["a"] },
+    });
+    // Another path, such as a folder link's listing, never names it.
+    await revalidate("/api/tree?token=folder", kept);
+    answer = (_path, held) =>
+      held === 'W/"one"'
+        ? new Response(null, { status: 304, headers: { etag: 'W/"one"' } })
+        : new Response("{}", {
+            headers: { "content-type": "application/json" },
+          });
+    const again = await revalidate("/api/tree", kept);
+    assert.ok(again === kept, "a 304 keeps the response it confirms");
+    assert.deepEqual(
+      sent.map(({ path, held, cache }) => [path, held, cache]),
+      [
+        ["/api/tree", null, "no-store"],
+        ["/api/tree?token=folder", null, "no-store"],
+        ["/api/tree", 'W/"one"', "no-store"],
+      ],
+    );
+    // A refusal is never answered from the kept response.
+    answer = () =>
+      new Response(JSON.stringify({ error: "Owner access is required." }), {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    await assert.rejects(
+      revalidate("/api/tree", kept),
+      (error: unknown) => error instanceof ApiError && error.status === 403,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    dom.window.close();
+  }
+});

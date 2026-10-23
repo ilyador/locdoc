@@ -136,6 +136,47 @@ test("an empty shared folder settles and can pick up the first new file", async 
   assert.equal(hook.result.current.id, "new");
 });
 
+test("a folder link's listing is asked again by its own tag and an unchanged one keeps the tree", async () => {
+  const held: (string | null)[] = [];
+  let current = entries;
+  const tag = () => `W/"folder-${current.length}"`;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.startsWith("/api/open/"))
+      return response({
+        owner: false,
+        root: "",
+        guest: "guest",
+        publicUrl: location.origin,
+        folder: { name: "Notes", permission: "view" },
+        entries,
+        document: { id: "b" },
+      });
+    if (url !== "/api/tree?token=folder-token")
+      throw Error("Unexpected request " + url);
+    const named = new Headers(init?.headers).get("If-None-Match");
+    held.push(named);
+    if (named === tag())
+      return new Response(null, { status: 304, headers: { etag: tag() } });
+    return new Response(JSON.stringify({ entries: current }), {
+      headers: { "content-type": "application/json", etag: tag() },
+    });
+  };
+  const hook = renderHook(() => useWorkspace());
+  await waitFor(() => assert.equal(hook.result.current.id, "b"));
+  await act(() => hook.result.current.loadTree());
+  const shown = hook.result.current.entries;
+  await act(() => hook.result.current.loadTree());
+  assert.deepEqual(held, [null, 'W/"folder-3"']);
+  assert.ok(hook.result.current.entries === shown, "the tree stays as shown");
+  assert.equal(hook.result.current.error, "");
+  current = [...entries, { kind: "file", path: "c.md", id: "c", shared: true }];
+  await act(() => hook.result.current.loadTree());
+  await act(() => hook.result.current.loadTree());
+  assert.deepEqual(held.slice(2), ['W/"folder-3"', 'W/"folder-4"']);
+  assert.equal(hook.result.current.entries.length, 4);
+});
+
 test("the selected sidebar view survives navigation and a new workspace mount", async () => {
   globalThis.fetch = async () =>
     response({

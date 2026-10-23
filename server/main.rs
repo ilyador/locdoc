@@ -1,6 +1,7 @@
 mod actions;
 mod browser_auth;
 mod comments;
+mod conditional;
 mod disk;
 mod documents;
 mod engine;
@@ -33,6 +34,8 @@ mod sharing;
 mod social;
 mod sockets;
 mod text;
+#[cfg(test)]
+mod transfer_tests;
 mod validation;
 mod web;
 mod work;
@@ -905,10 +908,18 @@ fn scan_folder(
     s.listed(dir, unreadable);
     Ok(())
 }
-async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Result<Json<Value>> {
+/// The owner's tree, or a folder link's. Browsers ask again every few
+/// seconds with the ETag of the listing they show, and an unchanged one is
+/// answered 304 without a body. Each view has its own tags.
+async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Result<Response> {
     if let Some(token) = a.token.as_deref() {
         let folder = folders::grant(&s, token)?;
-        return Ok(Json(json!({"entries":folders::entries(&s,&folder)?})));
+        let entries = folders::entries(&s, &folder)?;
+        return conditional::json(
+            &h,
+            &format!("folder {}", folder.token),
+            &json!({"entries": entries}),
+        );
     }
     if !s.owner(&h) {
         return Err(denied());
@@ -921,7 +932,7 @@ async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Re
             .iter()
             .any(|folder| folder.path == entry.path || folder.contains(&entry.path));
     }
-    Ok(Json(json!({"entries":entries})))
+    conditional::json(&h, "owner", &json!({"entries": entries}))
 }
 #[derive(Deserialize)]
 struct Create {

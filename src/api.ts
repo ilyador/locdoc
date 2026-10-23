@@ -36,12 +36,9 @@ function rememberSession(value: string) {
   }
 }
 
-export async function api<T = unknown>(
-  path: string,
-  init?: RequestInit,
-): Promise<T> {
+function request(path: string, init?: RequestInit) {
   const session = ownerSession();
-  const response = await fetch(path, {
+  return fetch(path, {
     ...init,
     headers: {
       ...(session ? { Authorization: `Bearer ${session}` } : {}),
@@ -51,6 +48,37 @@ export async function api<T = unknown>(
       ...init?.headers,
     },
   });
+}
+
+export async function api<T = unknown>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return answer<T>(path, await request(path, init));
+}
+
+// A response kept with the tag the server gave it.
+export type Kept<T> = { path: string; tag: string; body: T };
+
+// A GET asked again with the tag of the response kept for it. The server
+// answers 304, without a body, while that response is still current, and the
+// kept one stands. A response kept for another path is never offered.
+export async function revalidate<T>(
+  path: string,
+  kept: Kept<T> | null,
+): Promise<Kept<T>> {
+  const held = kept?.path === path && kept.tag ? kept : null;
+  const response = await request(path, {
+    // The page keeps the copy itself; the HTTP cache stores nothing.
+    cache: "no-store",
+    headers: held ? { "If-None-Match": held.tag } : {},
+  });
+  if (held && response.status === 304) return held;
+  const body = await answer<T>(path, response);
+  return { path, tag: response.headers.get("ETag") || "", body };
+}
+
+async function answer<T>(path: string, response: Response): Promise<T> {
   const body = await response
     .json()
     .catch(() => ({ error: "The server returned an unexpected response." }));

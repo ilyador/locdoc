@@ -1,13 +1,15 @@
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 import React from "react";
 
 // A workspace of hundreds of documents, as the owner's sidebar lists it. The
 // sidebar renders again for every change to the workspace, so its work must
 // not grow with every row it lists on each render.
-let render, cleanup, act;
+let render, cleanup, act, fireEvent;
 let DocumentSidebar, useFileActions;
+let treeChunks, keyedChunks, AVERAGE, LONGEST, NEW_ROW;
 before(async () => {
   const dom = new JSDOM(
     "<!doctype html><html><head></head><body></body></html>",
@@ -49,9 +51,12 @@ before(async () => {
       removeEventListener() {},
     }) as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, cleanup, act } = await import("@testing-library/react"));
+  ({ render, cleanup, act, fireEvent } =
+    await import("@testing-library/react"));
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ useFileActions } = await import("../src/file-actions.ts"));
+  ({ treeChunks, keyedChunks, AVERAGE, LONGEST, NEW_ROW } =
+    await import("../src/tree-chunks.ts"));
 });
 afterEach(() => cleanup());
 after(() => window.close());
@@ -329,4 +334,322 @@ test("a document's time moves on as time passes, without another change", (t) =>
   act(() => t.mock.timers.tick(60_000));
   assert.equal(time("Fresh.md"), "2m ago");
   assert.equal(time("Older.md"), "1h ago");
+});
+
+// The tree lays its rows out in chunks; a chunk away from the screen skips
+// its layout (content-visibility: auto). A browser checks each such chunk on
+// every frame and keeps the height a skipped one last had on screen.
+const rowsOf = (entries: any[], view: "date" | "folders") =>
+  (view === "date"
+    ? entries.filter((entry) => entry.kind === "file")
+    : entries
+  ).map((entry, index, list) => ({
+    type: "entry" as const,
+    entry,
+    depth: 0,
+    setsize: list.length,
+    posinset: index + 1,
+  }));
+
+test("rows are laid out in a few dozen chunks that stay as they were when a row moves", () => {
+  const entries = workspace(1100);
+  const files = entries.filter((entry) => entry.kind === "file");
+  const chunks = treeChunks(rowsOf(entries, "date"), "date");
+  assert.ok(
+    chunks.length >= files.length / (AVERAGE * 2) &&
+      chunks.length <= (files.length / AVERAGE) * 2,
+    `${chunks.length} chunks of ${files.length} rows`,
+  );
+  let next = 0;
+  for (const chunk of chunks) {
+    assert.equal(chunk.start, next, "every row is in one chunk, in order");
+    assert.ok(chunk.size >= 1 && chunk.size <= LONGEST);
+    const listed = files.slice(chunk.start, chunk.start + chunk.size);
+    assert.equal(chunk.folders, 0);
+    assert.equal(
+      chunk.paths,
+      listed.filter((entry) => entry.path.includes("/")).length,
+      "By date counts the rows with a folder line",
+    );
+    assert.equal(chunk.files + chunk.paths, chunk.size);
+    next += chunk.size;
+  }
+  assert.equal(next, files.length);
+  // The document saved last moves from far down to the top: only the chunk
+  // it leaves and the one it joins are new; every other keeps its rows.
+  const moved = files.splice(700, 1)[0];
+  files.unshift(moved);
+  const after = treeChunks(rowsOf(files, "date"), "date");
+  const rowsIn = (list: typeof chunks, list2: any[]) =>
+    new Map(
+      list.map((chunk) => [
+        chunk.key,
+        list2
+          .slice(chunk.start, chunk.start + chunk.size)
+          .map((entry) => entry.path)
+          .join("|"),
+      ]),
+    );
+  const before = rowsIn(
+    chunks,
+    entries.filter((entry) => entry.kind === "file"),
+  );
+  const now = rowsIn(after, files);
+  const changed = [...now.keys()].filter(
+    (key) => before.get(key) !== now.get(key),
+  );
+  assert.ok(changed.length <= 2, `${changed.length} chunks changed`);
+  // Folders counts folders apart from documents, and a view's chunks are its own.
+  const folders = treeChunks(rowsOf(entries, "folders"), "folders");
+  assert.equal(
+    folders.reduce((sum, chunk) => sum + chunk.folders, 0),
+    10,
+  );
+  assert.equal(
+    folders.reduce((sum, chunk) => sum + chunk.paths, 0),
+    0,
+    "Folders shows no folder lines",
+  );
+  const dateKeys = new Set(chunks.map((chunk) => chunk.key));
+  assert.ok(folders.every((chunk) => !dateKeys.has(chunk.key)));
+});
+
+test("a chunk is a new element when its rows' heights change, and stays the one it is while it holds a name field or a drag", () => {
+  const entries = workspace(200).filter((entry) => entry.kind === "file");
+  const rows = rowsOf(entries, "date");
+  const chunks = treeChunks(rows, "date");
+  // A rename holds its chunk, which is laid out while the field is open.
+  const renamed = entries[30].path;
+  const renaming = treeChunks(rows, "date", [renamed]);
+  const holder = renaming.find((chunk) => chunk.holds)!;
+  assert.equal(holder.holds, renamed);
+  assert.equal(renaming.filter((chunk) => chunk.holds).length, 1);
+  assert.ok(holder.start <= 30 && 30 < holder.start + holder.size);
+  assert.deepEqual(
+    renaming.map((chunk) => chunk.key),
+    chunks.map((chunk) => chunk.key),
+    "opening the field changes no element",
+  );
+  // Listings that change the held chunk's rows keep its element, so the
+  // field keeps its caret; a chunk no longer held is keyed by its rows.
+  const kept = new Map<string, string>();
+  const key = keyedChunks(renaming, kept).find((chunk) => chunk.holds)!.key;
+  const shorter = rows.filter((_, index) => index !== holder.start + 1);
+  const later = keyedChunks(treeChunks(shorter, "date", [renamed]), kept);
+  assert.equal(later.find((chunk) => chunk.holds)!.key, key);
+  assert.equal(new Set(later.map((chunk) => chunk.key)).size, later.length);
+  const done = keyedChunks(treeChunks(shorter, "date"), kept);
+  assert.equal(kept.size, 0);
+  assert.notEqual(
+    done.find((chunk) => chunk.start === holder.start)!.key,
+    key,
+    "once the field closes, the chunk's new rows make it new",
+  );
+  // A drag holds the chunk of the row it started from.
+  const dragged = treeChunks(rows, "date", [entries[100].path]);
+  assert.equal(dragged.filter((chunk) => chunk.holds).length, 1);
+  // A new document's field opens at the top of By date, in the chunk that
+  // was there.
+  const creating = treeChunks(
+    [{ type: "create", depth: 0, parent: "" }, ...rows],
+    "date",
+  );
+  assert.equal(creating[0].holds, NEW_ROW);
+  assert.equal(creating[0].key, chunks[0].key);
+  assert.equal(creating[0].size, chunks[0].size + 1);
+  // A document that gains a folder line changes its chunk's height.
+  const nested = entries.map((entry, index) =>
+    index === 1 && !entry.path.includes("/")
+      ? { ...entry, path: `Moved/${entry.path}` }
+      : index === 1
+        ? { ...entry, path: entry.path.split("/").pop() }
+        : entry,
+  );
+  const moved = treeChunks(rowsOf(nested, "date"), "date");
+  assert.notEqual(moved[0].key, chunks[0].key);
+});
+
+test("the tree keeps every row in the page, in chunks that hold their rows' counts", () => {
+  const entries = workspace(300);
+  const page = render(<Sidebar entries={entries} view="date" />);
+  const tree = page.container.querySelector('[role="tree"]')!;
+  const chunks = [...tree.children] as HTMLElement[];
+  assert.ok(chunks.length > 3 && chunks.length < 300);
+  const rows = [...tree.querySelectorAll('[role="treeitem"]')] as HTMLElement[];
+  assert.equal(rows.length, 300, "every document has its row");
+  for (const chunk of chunks) {
+    assert.equal(chunk.getAttribute("role"), "none");
+    assert.equal(chunk.firstElementChild!.getAttribute("role"), "none");
+    const held = [
+      ...chunk.querySelectorAll('[role="treeitem"]'),
+    ] as HTMLElement[];
+    const paths = held.filter((row) => row.dataset.path!.includes("/")).length;
+    assert.equal(chunk.style.getPropertyValue("--paths"), String(paths));
+    assert.equal(
+      chunk.style.getPropertyValue("--files"),
+      String(held.length - paths),
+    );
+  }
+});
+
+test("a focused row that moves into another chunk keeps the focus", () => {
+  const entries = workspace(300);
+  const page = render(<Sidebar entries={entries} view="date" />);
+  const row = (path: string) =>
+    [...page.container.querySelectorAll<HTMLElement>('[role="treeitem"]')].find(
+      (element) => element.dataset.path === path,
+    )!;
+  const files = entries.filter((entry) => entry.kind === "file");
+  const listed = [
+    ...page.container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+  ].map((element) => element.dataset.path!);
+  // The row far down the list, saved again, moves to the top of By date.
+  const path = listed[250];
+  const element = row(path);
+  act(() => element.focus());
+  assert.ok(document.activeElement === element);
+  const saved = files.map((entry) =>
+    entry.path === path ? { ...entry, modified: now + 60 } : entry,
+  );
+  page.rerender(
+    <Sidebar
+      entries={entries.map(
+        (entry) => saved.find((other) => other.path === entry.path) || entry,
+      )}
+      view="date"
+    />,
+  );
+  const moved = row(path);
+  assert.equal(
+    page.container
+      .querySelector('[role="treeitem"]')!
+      .getAttribute("data-path"),
+    path,
+    "the saved document is listed first",
+  );
+  assert.ok(moved !== element, "its row is in another chunk now");
+  assert.ok(document.activeElement === moved, "and it has the focus");
+});
+
+test("a dragged row stays the element the drag started from while listings change around it", () => {
+  const entries = workspace(300);
+  const page = render(<Sidebar entries={entries} view="folders" />);
+  const row = (path: string) =>
+    [...page.container.querySelectorAll<HTMLElement>('[role="treeitem"]')].find(
+      (element) => element.dataset.path === path,
+    )!;
+  const listed = [
+    ...page.container.querySelectorAll<HTMLElement>('[role="treeitem"]'),
+  ].map((element) => element.dataset.path!);
+  const path = listed[120];
+  const element = row(path);
+  const data = {
+    effectAllowed: "",
+    dropEffect: "",
+    setData() {},
+    getData: () => "",
+    types: [],
+  };
+  fireEvent.dragStart(element, { dataTransfer: data });
+  assert.ok(row(path) === element, "the drag keeps its row");
+  assert.ok(element.closest(".tree-chunk")!.classList.contains("live"));
+  // Another document of its chunk goes, which changes the chunk's rows.
+  const siblings = [
+    ...element
+      .closest(".tree-chunk")!
+      .querySelectorAll<HTMLElement>('[role="treeitem"].file'),
+  ].map((other) => other.dataset.path!);
+  const gone = siblings.find((other, index) => index > 0 && other !== path)!;
+  assert.ok(gone, "the chunk holds another document");
+  page.rerender(
+    <Sidebar
+      entries={entries.filter((entry) => entry.path !== gone)}
+      view="folders"
+    />,
+  );
+  assert.equal(row(gone), undefined, "the document is gone");
+  assert.ok(row(path) === element, "and the dragged row is the same element");
+  // Once the drag ends, the chunk is keyed by its rows again.
+  fireEvent.dragEnd(element);
+  assert.equal(row(path).classList.contains("dragging"), false);
+});
+
+test("a skipped chunk is held at the height of its rows, from the sizes the rows use", () => {
+  const css = readFileSync(
+    new URL("../src/style.css", import.meta.url),
+    "utf8",
+  );
+  const rule = (selector: string, within = css) => {
+    const at = within.indexOf(`\n${selector} {`);
+    assert.ok(at >= 0, `${selector} is styled`);
+    return within.slice(at, within.indexOf("}", at));
+  };
+  const value = (block: string, property: string) =>
+    new RegExp(`\\s${property}:\\s*([^;]+);`)
+      .exec(block)?.[1]
+      .replace(/\s+/g, " ")
+      .replace(/\( /g, "(")
+      .replace(/ \)/g, ")")
+      .trim();
+  // The lines a row shows: its name, the folder under it in By date, and the
+  // time under it on phones, each in its own size at the body's line height.
+  const line = value(rule("body"), "line-height");
+  assert.equal(line, "1.5");
+  const name = value(rule(".tree-item"), "font-size");
+  const small = rule(".file-tree .tree-item small");
+  assert.equal(value(small, "line-height"), line);
+  const caption = value(small, "font-size");
+  const time = value(rule(".doc-time"), "font-size");
+  // Rows by date are padded, folder rows have a set height, and phone rows
+  // are padded around their two lines.
+  const dated = rule(".date-list .tree-item.file");
+  assert.equal(value(dated, "padding"), "8px 12px");
+  const least = value(dated, "min-height");
+  const folderRow = value(rule(".folder-tree .tree-item"), "height");
+  const phone = css.slice(
+    css.indexOf(
+      "@media (pointer: coarse), (max-width: 760px) {\n  .tree-item .tree-actions",
+    ),
+  );
+  assert.equal(
+    value(
+      rule("  .file-tree .tree-item.file:not(.editing)", phone),
+      "padding-block",
+    ),
+    "8px",
+  );
+  // A chunk adds up the rows it holds by those heights.
+  const chunk = rule(".tree-chunk");
+  assert.equal(value(chunk, "--title-line"), `calc(${name} * ${line})`);
+  assert.equal(value(chunk, "--folder-row"), folderRow);
+  assert.equal(value(chunk, "--file-row"), folderRow);
+  assert.equal(
+    value(chunk, "--path-row"),
+    `calc(16px + var(--title-line) + ${caption} * ${line})`,
+  );
+  assert.equal(
+    value(rule(".date-list .tree-chunk"), "--file-row"),
+    `max(${least}, calc(16px + var(--title-line)))`,
+  );
+  const phones = css.slice(
+    css.indexOf(
+      "@media (pointer: coarse), (max-width: 760px) {\n  .file-tree .tree-chunk",
+    ),
+  );
+  assert.equal(
+    value(rule("  .file-tree .tree-chunk", phones), "--file-row"),
+    `calc(16px + var(--title-line) + ${time} * ${line})`,
+  );
+  // Only engines with content-visibility skip chunks, and never one holding
+  // a name field, whose height follows its message.
+  const start = css.indexOf(
+    "@supports (content-visibility: auto) {\n  .tree-chunk",
+  );
+  assert.ok(start >= 0, "chunks skip their layout where the engine can");
+  const skipped = rule("  .tree-chunk:not(.live)", css.slice(start));
+  assert.equal(value(skipped, "content-visibility"), "auto");
+  assert.equal(
+    value(skipped, "contain-intrinsic-height"),
+    "calc(var(--folders, 0) * var(--folder-row) + var(--files, 0) * var(--file-row) + var(--paths, 0) * var(--path-row))",
+  );
 });

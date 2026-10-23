@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 
 // An in-memory owner API for the sidebar's file actions, following this
@@ -63,7 +64,14 @@ export function fileApi(
   );
   const texts = new Map<string, string>();
   const trash: Trashed[] = [];
-  const calls: { method: string; path: string; body?: any }[] = [];
+  const calls: {
+    method: string;
+    path: string;
+    body?: any;
+    // A listing's request: the tag it named, and whether it was answered 304.
+    held?: string | null;
+    unchanged?: boolean;
+  }[] = [];
   const holds = new Map<string, () => Promise<void>>();
   const failures = new Map<string, { status: number; error: string }>();
   const exists = (path: string) => items.some((other) => other.path === path);
@@ -94,7 +102,8 @@ export function fileApi(
     const method = (init.method || "GET").toUpperCase();
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     const route = url.pathname;
-    calls.push({ method, path: route, body });
+    const call: (typeof calls)[number] = { method, path: route, body };
+    calls.push(call);
     const key = `${method} ${route}`;
     const listing = structuredClone(items);
     const hold = holds.get(key);
@@ -115,7 +124,19 @@ export function fileApi(
         publicUrl: "http://localhost",
         ownerName: "Owner",
       });
-    if (route === "/api/tree") return json(200, { entries: listing });
+    if (route === "/api/tree") {
+      // As the server does: the listing a request names by its tag is
+      // answered 304, without a body.
+      const tag = `W/"${createHash("sha256").update(JSON.stringify(listing)).digest("hex").slice(0, 32)}"`;
+      call.held = new Headers(init.headers).get("If-None-Match");
+      call.unchanged = call.held === tag;
+      return call.unchanged
+        ? new Response(null, { status: 304, headers: { etag: tag } })
+        : new Response(JSON.stringify({ entries: listing }), {
+            status: 200,
+            headers: { "content-type": "application/json", etag: tag },
+          });
+    }
     if (route === "/api/files" && method === "POST") {
       if (exists(body.path)) return taken();
       if (body.kind === "file" && !/\.(md|fountain|txt)$/i.test(body.path))
