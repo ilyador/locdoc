@@ -147,7 +147,9 @@ A release's `backup/` folder holds only the state from before that deploy. To re
 Choose **Fountain screenplay** when creating a document, or place a `.fountain`
 file in your documents folder. Locdoc formats it as you type, using the
 [Fountain syntax](https://fountain.io/syntax/). The current line reveals its
-formatting markers while you edit; the file on disk stays plain text.
+formatting markers while you edit; the file on disk stays plain text. Moving
+the caret to another line, or typing ordinary text, reads again and lays out
+only the lines it changes, so a long script stays quick to edit.
 Courier Prime is bundled as the default Fountain font. Font, text size, line
 height and page width preferences are saved separately for Markdown and Fountain
 in each browser.
