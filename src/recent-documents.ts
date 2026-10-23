@@ -100,3 +100,21 @@ export function sidebarTimestamp(modified?: number, now = new Date()) {
               : (time.day ??= formats().day.format(date));
   return { label, dateTime: time.dateTime, title: time.title };
 }
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+// When the label sidebarTimestamp gives a time changes next, in milliseconds
+// since the epoch, or null when it stays as it is.
+export function sidebarTimestampChange(modified?: number, now = Date.now()) {
+  if (!modified || !Number.isFinite(modified) || modified <= 0) return null;
+  const at = modified * 1000;
+  if (!Number.isFinite(+new Date(at))) return null;
+  const age = Math.max(0, now - at);
+  const unit =
+    age < HOUR ? MINUTE : age < DAY ? HOUR : age < 30 * DAY ? DAY : 0;
+  if (unit) return at + (Math.floor(age / unit) + 1) * unit;
+  // A date from this year gains its year once the year is over.
+  const year = new Date(now).getFullYear();
+  return new Date(at).getFullYear() === year ? +new Date(year + 1, 0, 1) : null;
+}

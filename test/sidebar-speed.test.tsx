@@ -6,7 +6,7 @@ import React from "react";
 // A workspace of hundreds of documents, as the owner's sidebar lists it. The
 // sidebar renders whenever the open document changes and mounts again for
 // each document, so its work must not grow with every row on each render.
-let render, cleanup;
+let render, cleanup, act;
 let DocumentSidebar, useFileActions;
 before(async () => {
   const dom = new JSDOM(
@@ -49,7 +49,7 @@ before(async () => {
       removeEventListener() {},
     }) as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, cleanup } = await import("@testing-library/react"));
+  ({ render, cleanup, act } = await import("@testing-library/react"));
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ useFileActions } = await import("../src/file-actions.ts"));
 });
@@ -90,9 +90,11 @@ function workspace(count: number) {
 function Sidebar({
   entries,
   view,
+  id = "doc-3",
 }: {
   entries: any[];
   view: "date" | "folders";
+  id?: string;
 }) {
   const files = useFileActions({
     owner: true,
@@ -112,7 +114,7 @@ function Sidebar({
     <aside className="sidebar">
       <DocumentSidebar
         entries={entries}
-        id="doc-3"
+        id={id}
         query=""
         view={view}
         setView={() => {}}
@@ -234,4 +236,97 @@ test("a long workspace lists its rows without building a collator or date format
     }
     cleanup();
   }
+});
+
+// An entry whose row counts how often it renders: only a row reads whether
+// its document is shared. React's development build compares the enumerable
+// fields of changed props, so this one is not enumerable.
+function counted(entry: any, renders: { count: number }) {
+  const { shared, ...rest } = entry;
+  return Object.defineProperty(rest, "shared", {
+    enumerable: false,
+    get() {
+      renders.count++;
+      return shared;
+    },
+  });
+}
+
+test("the sidebar renders again only the rows whose document or place changed", () => {
+  for (const view of ["date", "folders"] as const) {
+    const renders = { count: 0 };
+    const entries = workspace(300).map((entry) => counted(entry, renders));
+    const documents = entries.filter((e) => e.kind === "file");
+    const page = render(<Sidebar entries={entries} view={view} />);
+    assert.equal(renders.count, documents.length, `${view}: each row renders`);
+    renders.count = 0;
+    // The open document's workspace renders as its status or people change.
+    page.rerender(<Sidebar entries={entries} view={view} />);
+    assert.equal(renders.count, 0, `${view}: no row renders for it`);
+    // A listing in which the newest document was saved again keeps the
+    // other entries, as the workspace keeps them.
+    const newest = documents.reduce((a, b) =>
+      b.modified > a.modified ? b : a,
+    );
+    const saved = counted(
+      { ...newest, shared: false, modified: newest.modified + 5 },
+      renders,
+    );
+    renders.count = 0;
+    const next = entries.map((entry) => (entry === newest ? saved : entry));
+    page.rerender(<Sidebar entries={next} view={view} />);
+    assert.equal(renders.count, 1, `${view}: only the saved document's row`);
+    const row = [...page.container.querySelectorAll('[role="treeitem"]')].find(
+      (item) => item.dataset.path === saved.path,
+    );
+    assert.equal(
+      row.querySelector("time").getAttribute("datetime"),
+      new Date(saved.modified * 1000).toISOString(),
+    );
+    renders.count = 0;
+    page.rerender(<Sidebar entries={next} view={view} id="doc-5" />);
+    assert.equal(
+      renders.count,
+      2,
+      `${view}: opening a document renders the row it leaves and the one it opens`,
+    );
+    assert.equal(
+      page.container.querySelector('[aria-current="page"]').dataset.path,
+      documents.find((e) => e.id === "doc-5").path,
+    );
+    cleanup();
+  }
+});
+
+test("a document's time moves on as time passes, without another change", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const second = Math.floor(Date.now() / 1000);
+  const entries = [
+    {
+      kind: "file",
+      path: "Fresh.md",
+      id: "fresh",
+      shared: false,
+      modified: second - 30,
+      title: "Fresh",
+    },
+    {
+      kind: "file",
+      path: "Older.md",
+      id: "older",
+      shared: false,
+      modified: second - 3570,
+      title: "Older",
+    },
+  ];
+  render(<Sidebar entries={entries} view="date" id="fresh" />);
+  const time = (path: string) =>
+    document.querySelector(`[data-path="${path}"] time`)!.textContent;
+  assert.equal(time("Fresh.md"), "now");
+  assert.equal(time("Older.md"), "59m ago");
+  act(() => t.mock.timers.tick(31_000));
+  assert.equal(time("Fresh.md"), "1m ago", "the minute is shown as it passes");
+  act(() => t.mock.timers.tick(60_000));
+  assert.equal(time("Fresh.md"), "2m ago");
+  assert.equal(time("Older.md"), "1h ago");
 });
