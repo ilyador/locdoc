@@ -7,6 +7,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Entry } from "./model";
 import { documentTitle, webLink } from "./document-links";
+import { SearchField } from "./search-field";
 import { PathText } from "./ui";
 
 export function LinkPicker({
@@ -59,14 +60,13 @@ export function LinkPicker({
       <label className="visually-hidden" htmlFor="link-search">
         Document title or URL
       </label>
-      <input
+      <SearchField
         id="link-search"
-        className="text-input"
+        inputClassName="text-input"
         placeholder="Search documents or paste a URL…"
-        dir="auto"
         value={query}
-        onChange={(e) => {
-          setQuery(e.target.value);
+        onValueChange={(value) => {
+          setQuery(value);
           setActive(0);
         }}
         autoFocus

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CaretDown, Desktop, Sun, Moon, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import type { DocumentFormat } from "./document-format";
+import { SearchField } from "./search-field";
 type GoogleFont = { family: string; category: string };
 // The Hebrew face that follows each document family (hebrew-fonts.css). A
 // family from the Google Fonts library gets one for its catalog category;
@@ -490,15 +491,15 @@ export function AppearancePanel({
                     }
                   }}
                 >
-                  <input
+                  <SearchField
                     id="install-font"
-                    className="text-input"
+                    inputClassName="text-input"
                     type="search"
                     placeholder="Search by name or style…"
                     autoComplete="off"
                     aria-controls="font-results"
                     value={newFont}
-                    onChange={(e) => setNewFont(e.target.value)}
+                    onValueChange={setNewFont}
                   />
                 </form>
                 {catalogLoading && (

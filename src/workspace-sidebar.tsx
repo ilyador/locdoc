@@ -10,6 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import { DocumentSidebar } from "./document-sidebar";
 import { SidebarResize } from "./sidebar-resize";
+import { SearchField } from "./search-field";
 import { documentExtension } from "./document-format";
 import { Avatar, IconButton, PathText } from "./ui";
 import { sharedToken, type Document, type Entry } from "./model";
@@ -121,28 +122,28 @@ export function WorkspaceSidebar({
       </div>
       {(config?.folder || (config?.owner && !sharedToken)) && (
         <>
-          <label className="search-box">
-            <MagnifyingGlass size={16} />
-            <input
-              ref={searchInput}
-              placeholder="Find a document…"
-              dir="auto"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(event) => {
-                // Down moves from search into the first visible row.
-                if (event.key !== "ArrowDown") return;
-                const row = event.currentTarget
-                  .closest(".sidebar")
-                  ?.querySelector<HTMLElement>('.file-tree [role="treeitem"][tabindex]');
-                if (!row) return;
-                event.preventDefault();
-                row.focus();
-              }}
-              aria-label="Find a document"
-            />
-            <kbd>Ctrl K</kbd>
-          </label>
+          <SearchField
+            className="search-box"
+            inputRef={searchInput}
+            start={<MagnifyingGlass size={16} />}
+            hint={<kbd>Ctrl K</kbd>}
+            placeholder="Find a document…"
+            value={query}
+            onValueChange={setQuery}
+            onKeyDown={(event) => {
+              // Down moves from search into the first visible row.
+              if (event.key !== "ArrowDown") return;
+              const row = event.currentTarget
+                .closest(".sidebar")
+                ?.querySelector<HTMLElement>(
+                  '.file-tree [role="treeitem"][tabindex]',
+                );
+              if (!row) return;
+              event.preventDefault();
+              row.focus();
+            }}
+            aria-label="Find a document"
+          />
           <DocumentSidebar
             entries={entries}
             id={id}

@@ -290,6 +290,11 @@ button:hover {
   border-radius: 6px;
   color: var(--muted);
 }
+/* The icon keeps its size, so the text starts in one place whether the
+   shortcut or Clear search ends the field. */
+.search-box > svg {
+  flex-shrink: 0;
+}
 .search-box input {
   min-width: 0;
   width: 100%;
@@ -297,6 +302,13 @@ button:hover {
   border: 0;
   background: none;
   outline: 0;
+}
+/* The box is the field: while the search has focus it takes the accent
+   outline over its border, as the find field's box does, and the text inside
+   draws none of its own. */
+.search-box:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 .search-box kbd {
   font:
@@ -307,6 +319,64 @@ button:hover {
   border: 1px solid var(--line);
   padding: 2px 3px;
   border-radius: 3px;
+}
+/* Clear search: the find widget's Close inside a search that holds text, at
+   its inline end. Muted until the pointer is on it; a press leaves the caret
+   in the field. */
+.search-control {
+  position: relative;
+}
+.search-clear {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: var(--muted);
+}
+.search-clear:hover {
+  color: var(--text);
+}
+.search-clear svg {
+  display: block;
+}
+.search-clear:focus-visible {
+  outline-offset: -2px;
+}
+/* In the sidebar's box it takes the shortcut's place, 5px inside the border
+   on three sides. */
+.search-box .search-clear {
+  margin-inline-end: -4px;
+}
+/* A dialog field keeps its own border and focus outline around it. */
+.search-control > .text-input ~ .search-clear {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 8px;
+  margin-block: auto;
+}
+.search-control > .text-input:not(:placeholder-shown) {
+  padding-inline-end: 44px;
+}
+/* The browsers' own clear button would be a second one. */
+.search-control input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+@media (pointer: coarse) {
+  .search-clear {
+    width: 40px;
+    height: 40px;
+  }
+  .search-box .search-clear {
+    margin-inline-end: -9px;
+  }
+  .search-control > .text-input ~ .search-clear {
+    inset-inline-end: 2px;
+  }
 }
 .sidebar-views {
   display: flex;
@@ -2322,9 +2392,10 @@ button:hover {
 .comment-thread .comment-composer {
   margin-top: 4px;
 }
+/* iOS zooms in on a field whose text is under 16px as it takes focus. */
 @media (max-width: 760px), (pointer: coarse) {
   .text-input,
-  .search-field input {
+  .search-control input {
     font-size: 1rem;
   }
 }
