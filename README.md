@@ -252,7 +252,7 @@ Images up to **5 MB**, videos up to **20 MB**, and total embeds up to **50 MB pe
 
 To reclaim retained storage, the owner can delete unwanted files from `.assets/` locally. Uploads reconcile missing files before rejecting a retained storage limit; an upload still within its ten-minute insertion window remains reserved until that window ends.
 
-Useful shortcuts: Ctrl/Cmd K to find a document, or to link the text selected in a Markdown document, Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
+Useful shortcuts: Ctrl/Cmd K to find a document, or to link the text selected in a Markdown document, Escape to clear a search, as the X at the end of the field does (in an empty field, Escape closes the panel, dialog or drawer around it), Ctrl/Cmd F to find and replace (Enter and Shift+Enter step through matches, Escape closes), Alt G to select the word at the cursor and then each next occurrence, Ctrl/Cmd Alt M to comment, and Ctrl/Cmd Z to undo. Saves are automatic.
 
 ## Files, folders and the trash
 
