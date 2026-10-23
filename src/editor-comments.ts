@@ -164,16 +164,18 @@ export const sourceCommentLayer: StateField<SourceCommentState> =
     ],
   });
 
-// Deleting the line break after records that end a line's text joins the
-// next line onto that text, as a reader sees it. The records move to where a
-// new comment about the joined text would be written (server/comments.rs),
-// rather than staying inside that text, where a desktop editor would show
-// them: in plain text, to the end of the joined line's text; in Markdown and
-// Fountain, to the end of the text of the paragraph, heading or list item
-// the joined line is in. Records behind the blank line that a table or HTML
-// block needs go after the block the line joins, where that blank line stays
-// hidden instead of showing. A move that would change a conversation, what a
-// reader sees or how Markdown reads it leaves the plain deletion.
+// Deleting a line break that a reader sees joins the next line onto the text
+// before it. Records hidden where the lines join move to where a new comment
+// about the joined text would be written (server/comments.rs), rather than
+// staying inside that text, where a desktop editor would show them: records
+// that end the text before the line break, or a record that starts the next
+// line and shows the line after it in its place (see shownLines), whose
+// hidden line break goes with it. In plain text they end the joined line's
+// text; in Markdown and Fountain, the text of the paragraph, heading or list
+// item the joined line is in. Records behind the blank line that a table or
+// HTML block needs go after the block the line joins, where that blank line
+// stays hidden instead of showing. A move that would change a conversation,
+// what a reader sees or how Markdown reads it leaves the plain deletion.
 function joinAfterRecords(tr: Transaction) {
   if (
     !tr.docChanged ||
@@ -195,7 +197,21 @@ function joinAfterRecords(tr: Transaction) {
   const shown = visibleTextRanges(state, joint.from, joint.end).filter(
     (range) => doc.sliceString(range.from, range.to).trim(),
   );
-  if (!shown.length) return tr;
+  if (!shown.length) {
+    // Joining a line that shows nothing removes it instead: the record on
+    // the line above keeps that line, and shows the line after it there.
+    if (
+      joint.records.from !== joint.at + 1 ||
+      doc.sliceString(joint.end, joint.end + 1) !== "\n"
+    )
+      return tr;
+    return {
+      changes: { from: joint.end, to: joint.end + 1 },
+      selection: { anchor: joint.at },
+      scrollIntoView: true,
+      userEvent: tr.annotation(Transaction.userEvent),
+    };
+  }
   const candidates = joinsAt(state, joint, shown);
   if (!candidates.length) return tr;
   const plain = state.facet(plainCommentRecords);
@@ -255,20 +271,31 @@ function jointAt(state: EditorState, at: number): Joint | null {
   const hidden = sourceCommentRanges(state);
   let index = hidden.length - 1;
   while (index >= 0 && hidden[index].to > at) index--;
-  const records = hidden[index];
+  const before = hidden[index],
+    after = hidden[index + 1];
+  let from: number;
   if (
-    !records ||
-    /[^ \t]/.test(doc.sliceString(records.to, at)) ||
-    !shownText(state, doc.lineAt(records.from).from, records.from).trim()
+    before &&
+    !/[^ \t]/.test(doc.sliceString(before.to, at)) &&
+    shownText(state, doc.lineAt(before.from).from, before.from).trim()
   )
-    return null;
-  const from = at + 1;
+    // Records that end the text of the line.
+    from = at + 1;
+  else if (
+    after?.from === at + 1 &&
+    doc.lineAt(after.to).number > doc.lineAt(after.from).number &&
+    shownText(state, doc.lineAt(at).from, at).trim()
+  ) {
+    // A record that starts the next line, showing the line after it there.
+    index++;
+    from = after.to;
+  } else return null;
   // The line that joins, as a reader sees it: up to the first line break
   // that no record hides.
   let end = doc.lineAt(from).to;
   for (let i = index + 1; i < hidden.length && hidden[i].from <= end; i++)
     if (hidden[i].to > end) end = doc.lineAt(hidden[i].to).to;
-  return { at, records, index, from, end };
+  return { at, records: hidden[index], index, from, end };
 }
 
 // Records to take out of their place and what to write where. A join that

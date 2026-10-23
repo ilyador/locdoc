@@ -961,3 +961,86 @@ test("Backspace joining a Markdown line onto text that conversations end keeps t
     }
   }
 });
+
+test("Backspace at the start of a line that a record's own line shows joins it onto the line above, as in the shared fixtures", () => {
+  const added = "[[comment(ana): A note]]";
+  for (const c of joins()) {
+    const at = c.source.indexOf(c.comment.after) + c.comment.after.length;
+    // The comment's record has a line of its own, which shows the next line.
+    const source = `${c.source.slice(0, at)}\n${added}\n${c.source.slice(at)}`;
+    for (const [key, caret] of [
+      ["Backspace", at + 1],
+      ["Delete", at],
+    ] as const) {
+      const label = `${c.name}, ${key}`;
+      const editor = mount(`Notes/${c.path}`, source, { editable: true });
+      const joined = mount(`Notes/${c.path}`, c.source, { editable: true });
+      try {
+        const [record] = sourceCommentRanges(editor.view.state);
+        assert.deepEqual(
+          [record.from, record.to],
+          [at + 1, at + added.length + 2],
+          `${label}: the record hides its line and line break`,
+        );
+        press(editor, caret, key);
+        assert.equal(editor.text.toString(), c.comment.expected, label);
+        assert.equal(
+          editor.view.state.selection.main.head,
+          at,
+          `${label}: the caret is where the lines join`,
+        );
+        act(() =>
+          joined.view.dispatch({
+            selection: { anchor: at },
+            userEvent: "select",
+          }),
+        );
+        assert.deepEqual(
+          shown(editor.view),
+          shown(joined.view),
+          `${label}: the lines show joined, as without the comment`,
+        );
+      } finally {
+        editor.close();
+        joined.close();
+      }
+    }
+  }
+});
+
+test("joining the empty line that a record's own line shows removes that line and keeps the record", () => {
+  for (const [path, rows] of [
+    ["Notes/empty.md", ["md-block-end: Para.", "md-block-end: Next"]],
+    [
+      "Notes/empty.fountain",
+      [
+        "fountain-action fountain-block-end fountain-line: Para.",
+        "fountain-action fountain-block-end fountain-line: Next",
+      ],
+    ],
+    ["Notes/empty.txt", ["text-block-end: Para.", "text-block-end: Next"]],
+  ] as const) {
+    const source = `Para.\n${record}\n\nNext`;
+    for (const [key, caret] of [
+      ["Backspace", source.indexOf(record)],
+      ["Delete", "Para.".length],
+    ] as const) {
+      const label = `${path}, ${key}`;
+      const editor = mount(path, source, { editable: true });
+      try {
+        press(editor, caret, key);
+        assert.equal(editor.text.toString(), `Para.\n${record}\nNext`, label);
+        assert.equal(editor.view.state.selection.main.head, "Para.".length);
+        act(() =>
+          editor.view.dispatch({
+            selection: { anchor: 0 },
+            userEvent: "select",
+          }),
+        );
+        assert.deepEqual(shown(editor.view), rows, `${label}: no empty line`);
+      } finally {
+        editor.close();
+      }
+    }
+  }
+});
