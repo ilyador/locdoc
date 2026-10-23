@@ -44,6 +44,12 @@ export function hasSpeakerPrefix(text: string) {
   return /^\p{Lu}{2}/u.test(text);
 }
 
+// A scene heading after a blank line starts with one of Fountain's prefixes,
+// or Hebrew's פנים. (interior) or חוץ. (exterior), alone or combined as
+// פנים/חוץ. Hebrew has no capitals: its character cues are forced with @.
+const scenePrefix = /^(?:INT\.?\/EXT|INT\/EXT|I\/E|INT|EXT|EST)[. ]/i;
+const hebrewScenePrefix = /^(?:פנים|חוץ)(?:\.?\/(?:פנים|חוץ))?\./;
+
 // Layout never rewrites the source. Ranges are UTF-16 offsets, like CodeMirror
 // and Y.Text. Comments/notes are masked in place so their contents cannot become
 // character cues or move collaborative anchors.
@@ -211,7 +217,7 @@ export function parseFountain(
         line.prefix = marker(lead, lead + text.match(/^>\s*/)![0].length);
     } else if (
       /^\.[\p{L}\p{N}]/u.test(text) ||
-      (boundary && /^(?:INT\.?\/EXT|INT\/EXT|I\/E|INT|EXT|EST)[. ]/i.test(text))
+      (boundary && (scenePrefix.test(text) || hebrewScenePrefix.test(text)))
     ) {
       line.kind = "scene";
       if (text.startsWith(".")) line.prefix = marker(lead, lead + 1);

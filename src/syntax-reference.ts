@@ -1,3 +1,4 @@
+import { isolate } from "./bidi";
 import type { DocumentFormat } from "./document-format";
 
 // What each format's editor recognizes, as the footer's syntax reference
@@ -196,6 +197,10 @@ const fountain: SyntaxReference = {
             source: ["INT. ", "HOUSE - DAY"],
             meaning: "Scene heading after a blank line: INT, EXT, EST or I/E",
           },
+          {
+            source: ["פנים. ", "בית - יום"],
+            meaning: `In Hebrew: ${isolate("פנים.")}, ${isolate("חוץ.")} or ${isolate("פנים/חוץ.")}`,
+          },
           { source: [".", "FLASHBACK"], meaning: "Forced scene heading" },
           {
             source: ["", "She waits by the door."],
@@ -217,6 +222,10 @@ const fountain: SyntaxReference = {
           {
             source: ["@", "McKenna"],
             meaning: "Forced character, for a name in mixed case",
+          },
+          {
+            source: ["@", "מאיה", "\n", "איפה היית?"],
+            meaning: "Hebrew has no capitals: every Hebrew character needs @",
           },
           {
             source: ["(", "quietly", ")"],

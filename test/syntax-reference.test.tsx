@@ -448,6 +448,13 @@ const fountainChecks: Record<string, (source: string) => void> = {
       assert.ok(!wrapperOf(view, 1, "fountain-scene"), "needs a blank line"),
     );
   },
+  "פנים. בית - יום": (source) => {
+    for (const scene of [source, "חוץ. רחוב - לילה", "פנים/חוץ. מכונית - יום"])
+      element(scene, 0, "scene", scene);
+    rendered(`היא מחכה.\n${source}`, "fountain", (view) =>
+      assert.ok(!wrapperOf(view, 1, "fountain-scene"), "needs a blank line"),
+    );
+  },
   ".FLASHBACK": (source) => element(source, 0, "scene", "FLASHBACK"),
   "She waits by the door.": (source) => element(source, 0, "action"),
   "!THE LIGHTS GO OUT.": (source) =>
@@ -459,6 +466,11 @@ const fountainChecks: Record<string, (source: string) => void> = {
   "@McKenna": (source) => {
     element(source, 0, "character", "McKenna");
     element("McKenna\nHi.", 0, "action");
+  },
+  "@מאיה\nאיפה היית?": (source) => {
+    element(source, 0, "character", "מאיה");
+    element(source, 1, "dialogue", "איפה היית?");
+    element("מאיה\nאיפה היית?", 0, "action");
   },
   "(quietly)": (source) =>
     element(source, 1, "parenthetical", "(quietly)", (line) => {
@@ -656,10 +668,13 @@ test("the format label names its syntax reference and shows the document's forma
       ),
       `${format} lists ${group}`,
     );
-    const shown = Array.from(panel.querySelectorAll("dt code")).map(
-      (code) => code.textContent,
-    );
+    const codes = Array.from(panel.querySelectorAll("dt code"));
+    const shown = codes.map((code) => code.textContent);
     assert.deepEqual(shown, examples(format).map(exampleSource));
+    assert.ok(
+      codes.every((code) => code.getAttribute("dir") === "auto"),
+      "a Hebrew example reads right to left",
+    );
     // Examples are text, never markup or media.
     assert.equal(
       panel.querySelectorAll("a, img, video, strong, em, input").length,

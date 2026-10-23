@@ -156,7 +156,10 @@ below the last line. Markdown also has a **Paragraph spacing** slider, initially
 15% of line height, for paragraphs and list items.
 
 Type `INT.`, `EXT.`, uppercase character names, dialogue and parentheticals
-naturally. The **Element** menu can force a scene heading, action, character,
+naturally. In Hebrew, `פנים.`, `חוץ.` and `פנים/חוץ.` start scene headings
+too. Hebrew has no capitals, so a Hebrew character cue starts with `@`, as the
+Fountain syntax suggests for non-Roman languages; without it a name is action.
+The **Element** menu can force a scene heading, action, character,
 transition, centered text or lyrics. `_underscores_` underline text. A
 `[[note]]` ends at a blank line, unless that line holds two spaces; a
 `/* boneyard */` spans any number of lines to its `*/`, and an `/*` without

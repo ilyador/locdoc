@@ -264,6 +264,7 @@ export function FormatReference({ format }: { format: DocumentFormat }) {
 }
 
 // Each example is text: typed syntax in ink, the writer's own words muted.
+// A Hebrew example reads right to left, as its line does in the editor.
 function SyntaxGroupList({ id, group }: { id: string; group: SyntaxGroup }) {
   return (
     <section className="syntax-group" aria-labelledby={id}>
@@ -272,7 +273,7 @@ function SyntaxGroupList({ id, group }: { id: string; group: SyntaxGroup }) {
         {group.examples.map((example) => (
           <div className="syntax-entry" key={exampleSource(example)}>
             <dt>
-              <code>
+              <code dir="auto">
                 {example.source.map((run, i) =>
                   !run ? null : i % 2 ? (
                     <var key={i}>{run}</var>

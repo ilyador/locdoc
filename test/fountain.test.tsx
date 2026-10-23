@@ -141,6 +141,41 @@ test("a note ends at a blank line, and a boneyard needs its */", () => {
   ]);
 });
 
+test("Hebrew scene headings start with פנים. or חוץ., and a Hebrew cue needs @", () => {
+  for (const heading of [
+    "פנים. בית - יום",
+    "חוץ. רחוב - לילה",
+    "פנים/חוץ. מכונית - יום",
+    "חוץ/פנים. מרפסת - ערב",
+    "פנים./חוץ. רכב - לילה",
+  ])
+    assert.equal(
+      parseFountain(`היא מחכה.\n\n${heading}\n\nהדלת נפתחת.`).lines[2].kind,
+      "scene",
+      heading,
+    );
+  // Without the period these are ordinary words, and a heading needs the
+  // blank line before it.
+  for (const action of [
+    "פנים רבות בקהל.",
+    "חוץ מזה, הכול שקט.",
+    "פנימה.",
+    "חוצה את הכביש.",
+  ])
+    assert.equal(parseFountain(action).lines[0].kind, "action", action);
+  assert.equal(
+    parseFountain("היא מחכה.\nפנים. בית - יום").lines[1].kind,
+    "action",
+  );
+  // Hebrew has no capitals: only @ makes a cue, and a name alone is action.
+  const script = parseFountain("@מאיה\nאיפה היית?\n\nמאיה\nאיפה היית?");
+  assert.deepEqual(
+    script.lines.map((line) => line.kind),
+    ["character", "dialogue", "blank", "action", "action"],
+  );
+  assert.equal(script.lines[0].text, "מאיה");
+});
+
 test("dual dialogue preserves its source marker and both speakers", () => {
   const script = parseFountain(
     "MORGAN\nHello.\n\nLEE ^\n(softly)\nHello too.\n\nANA ^\nAnother line.",
