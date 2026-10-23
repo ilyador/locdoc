@@ -5,11 +5,14 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { sourceComments } from "../src/comment-syntax.ts";
 
-const base = "http://127.0.0.1:3512";
+// The fixture server takes a free port: a fixed one can belong to another
+// local server.
+let base;
 const key = "adversarial-comment-fixture-owner";
 let dir, server, cookie;
 async function request(path, method = "GET", body) {
@@ -57,7 +60,18 @@ const serverMessages = (comments) =>
     ...c.replies.map(({ name, body }) => ({ name, body })),
   ]);
 
+async function freePort() {
+  const listener = createServer().listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  const { port } = listener.address();
+  listener.close();
+  await once(listener, "close");
+  return port;
+}
+
 before(async () => {
+  const port = await freePort();
+  base = `http://127.0.0.1:${port}`;
   dir = await mkdtemp(join(tmpdir(), "locdoc-adversarial-comments-"));
   await mkdir(join(dir, "docs"));
   await mkdir(join(dir, "state"));
@@ -65,7 +79,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3512",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: base,
