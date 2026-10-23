@@ -144,6 +144,536 @@ async fn an_unchanged_listing_is_answered_without_its_body_in_each_callers_own_v
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// The listing `edits` make of `held`, as a client applies a splice.
+fn spliced(held: &[u8], splice: &[u8]) -> Value {
+    let held: Value = serde_json::from_slice(held).unwrap();
+    let splice: Value = serde_json::from_slice(splice).unwrap();
+    let listed = held["entries"].as_array().unwrap();
+    let (mut entries, mut next) = (Vec::new(), 0);
+    for edit in splice["edits"].as_array().unwrap() {
+        let at = edit[0].as_u64().unwrap() as usize;
+        let removed = edit[1].as_u64().unwrap() as usize;
+        assert!(at >= next && at + removed <= listed.len(), "{edit}");
+        entries.extend_from_slice(&listed[next..at]);
+        entries.extend(edit[2].as_array().unwrap().iter().cloned());
+        next = at + removed;
+    }
+    entries.extend_from_slice(&listed[next..]);
+    json!({ "entries": entries })
+}
+
+#[tokio::test]
+async fn a_changed_listing_is_sent_as_what_changed_since_the_one_its_caller_holds() {
+    use std::time::{Duration, SystemTime};
+    let (_directory, s) = store();
+    for n in 0..120 {
+        s.create_document(&format!("Notes/Draft {n:03}.md"))
+            .unwrap();
+    }
+    s.create_document("plan.md").unwrap();
+    let token = folder_link(&s, "Notes", "view");
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let splice = ("a-im", "splice");
+    let (status, headers, held) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+
+    // A save changes one document's time: only that entry is sent.
+    fs::File::options()
+        .append(true)
+        .open(s.root.join("Notes/Draft 007.md"))
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000))
+        .unwrap();
+    let (_, _, whole) = get(&base, "/api/tree", &[owner]).await;
+    let (status, headers, body) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::IM_USED);
+    assert_eq!(header(&headers, "im".parse().unwrap()), Some("splice"));
+    assert_eq!(
+        header(&headers, "delta-base".parse().unwrap()),
+        Some(tag.as_str())
+    );
+    assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-store"));
+    let next = header(&headers, header::ETAG).unwrap().to_owned();
+    assert_ne!(next, tag);
+    let edits: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(edits["edits"].as_array().unwrap().len(), 1, "{edits}");
+    assert_eq!(edits["edits"][0][1], 1, "one entry replaced: {edits}");
+    assert_eq!(edits["edits"][0][2][0]["modified"], 2_000_000_000u64);
+    assert!(
+        body.len() * 50 < whole.len(),
+        "{} bytes of {}",
+        body.len(),
+        whole.len()
+    );
+    assert!(
+        spliced(&held, &body) == serde_json::from_slice::<Value>(&whole).unwrap(),
+        "the splice makes the whole listing"
+    );
+    // Asked again by the new tag, it is unchanged.
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &next), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+
+    // Names made, moved and removed, from the first listing held.
+    s.create_document("Notes/Draft 050b.md").unwrap();
+    fs::rename(s.root.join("plan.md"), s.root.join("Notes/plan.md")).unwrap();
+    s.discover_file_moves().unwrap();
+    fs::remove_file(s.root.join("Notes/Draft 100.md")).unwrap();
+    let (_, _, whole) = get(&base, "/api/tree", &[owner]).await;
+    let (status, _, body) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::IM_USED);
+    assert!(
+        spliced(&held, &body) == serde_json::from_slice::<Value>(&whole).unwrap(),
+        "the splice makes the whole listing"
+    );
+
+    // A page that does not ask for splices, as one loaded before them, is
+    // sent the whole listing, as is a caller whose listing is unknown.
+    for headers in [
+        vec![owner, ("if-none-match", tag.as_str())],
+        vec![owner, ("if-none-match", "W/\"unknown\""), splice],
+        vec![
+            owner,
+            ("if-none-match", tag.as_str()),
+            ("a-im", "splice;q=0"),
+        ],
+    ] {
+        let (status, _, body) = get(&base, "/api/tree", &headers).await;
+        assert_eq!(status, StatusCode::OK, "{headers:?}");
+        assert!(body == whole, "{headers:?}");
+    }
+    // A listing that changed in more than half its entries comes whole.
+    for n in 0..120 {
+        if let Ok(file) = fs::File::options()
+            .append(true)
+            .open(s.root.join(format!("Notes/Draft {n:03}.md")))
+        {
+            file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2_100_000_000))
+                .unwrap();
+        }
+    }
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &tag), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Each view splices only from listings it sent itself: the owner's tag
+    // is no base for the folder link's view, nor its tag for the owner's.
+    let folder = format!("/api/tree?token={token}");
+    let (status, headers, _) = get(&base, &folder, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let visitor = header(&headers, header::ETAG).unwrap().to_owned();
+    s.create_document("Notes/after.md").unwrap();
+    let (status, _, _) = get(&base, &folder, &[("if-none-match", &tag), splice]).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = get(
+        &base,
+        "/api/tree",
+        &[owner, ("if-none-match", &visitor), splice],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = get(&base, &folder, &[("if-none-match", &visitor), splice]).await;
+    assert_eq!(status, StatusCode::IM_USED);
+    let edits: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(edits["edits"][0][2][0]["path"], "after.md", "{edits}");
+    // A tag is no credential, with or without a splice.
+    let (status, _, _) = get(&base, "/api/tree", &[("if-none-match", &tag), splice]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+fn entry(body: &[u8], path: &str) -> Option<Value> {
+    let value: Value = serde_json::from_slice(body).unwrap();
+    value["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .cloned()
+}
+
+/// Polls the owner's tree as a tab does, naming the listing it holds,
+/// until that listing shows what `shows` looks for.
+async fn listed_until(
+    base: &str,
+    owner: (&str, &str),
+    held: &mut (String, Vec<u8>),
+    what: &str,
+    shows: impl Fn(&[u8]) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (status, headers, body) =
+            get(base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+        if status == StatusCode::OK {
+            *held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+        } else {
+            assert_eq!(status, StatusCode::NOT_MODIFIED);
+        }
+        if shows(&held.1) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never showed {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_is_walked_again_only_once_something_it_shows_may_have_changed() {
+    use std::time::{Duration, SystemTime};
+    let (_directory, s) = store();
+    let plan = s.create_document("Notes/plan.md").unwrap();
+    s.create_document("Notes/ideas.md").unwrap();
+    s.create_document("todo.md").unwrap();
+    let watching = projection::watch(s.clone()).unwrap();
+    // The watcher's first settled pass.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let walks = || s.listings.walks();
+    let (status, headers, body) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+    let walked = walks();
+    // Nothing changed: answered from the listing held, without a walk.
+    for _ in 0..5 {
+        let (status, _, _) = get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+        assert_eq!(status, StatusCode::NOT_MODIFIED);
+    }
+    assert_eq!(walks(), walked, "an unchanged tree is not walked again");
+
+    // A desktop save changes only that document's time: its entry is
+    // patched from the file, without a walk.
+    let set_time = |path: &Path, seconds: u64| {
+        fs::File::options()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+            .unwrap();
+    };
+    let plan_file = s.root.join("Notes/plan.md");
+    fs::write(&plan_file, "Desktop plan\n").unwrap();
+    set_time(&plan_file, 2_000_000_000);
+    let time = |body: &[u8]| entry(body, "Notes/plan.md").unwrap()["modified"].as_u64();
+    listed_until(&base, owner, &mut held, "the desktop save's time", |body| {
+        time(body) == Some(2_000_000_000)
+    })
+    .await;
+    assert_eq!(walks(), walked, "a save patches its entry's time");
+    // A write through another name of the file, outside what is listed,
+    // still reaches the document's entry.
+    fs::create_dir(s.root.join(".backup")).unwrap();
+    let link = s.root.join(".backup/plan.md");
+    fs::hard_link(&plan_file, &link).unwrap();
+    // The new names' notices, then the walk they call for.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (status, headers, body) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+    let linked = walks();
+    assert!(linked > walked, "new names are walked");
+    fs::write(&link, "Plan saved through its other name\n").unwrap();
+    set_time(&link, 2_100_000_000);
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a write through a hard link",
+        |body| time(body) == Some(2_100_000_000),
+    )
+    .await;
+    assert_eq!(walks(), linked, "a hard link's write patches its document");
+    // So does Locdoc's own save of typed text: rows that only store the
+    // text are no reason to walk.
+    {
+        let room = s.room(&plan).unwrap();
+        let mut room = room.lock().unwrap();
+        let source = room_text(&room);
+        apply_text(room.awareness.doc(), &source, "Typed plan\n");
+        room.engine.edited();
+        s.store_room(&plan, &mut room).unwrap();
+        assert!(s.persist(&plan, &mut room).unwrap());
+    }
+    listed_until(&base, owner, &mut held, "the typed save's time", |body| {
+        time(body) != Some(2_100_000_000)
+    })
+    .await;
+    assert_eq!(walks(), linked, "typing patches its document's time");
+
+    // Names that change show on the next poll after their notice or row.
+    fs::rename(
+        s.root.join("Notes/ideas.md"),
+        s.root.join("Notes/renamed.md"),
+    )
+    .unwrap();
+    listed_until(&base, owner, &mut held, "a desktop rename", |body| {
+        entry(body, "Notes/renamed.md").is_some() && entry(body, "Notes/ideas.md").is_none()
+    })
+    .await;
+    fs::write(s.root.join("desktop.md"), "Made on the desktop\n").unwrap();
+    listed_until(&base, owner, &mut held, "a desktop file", |body| {
+        entry(body, "desktop.md").is_some()
+    })
+    .await;
+    fs::remove_file(s.root.join("todo.md")).unwrap();
+    listed_until(&base, owner, &mut held, "a desktop removal", |body| {
+        entry(body, "todo.md").is_none()
+    })
+    .await;
+    s.create_document("Notes/fresh.md").unwrap();
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a document made in Locdoc",
+        |body| entry(body, "Notes/fresh.md").is_some(),
+    )
+    .await;
+    folder_link(&s, "Notes", "view");
+    listed_until(&base, owner, &mut held, "a folder link", |body| {
+        entry(body, "Notes/plan.md").unwrap()["shared"] == true
+    })
+    .await;
+    let id = entry(&held.1, "Notes/fresh.md").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    s.trash_document(&id).unwrap();
+    listed_until(
+        &base,
+        owner,
+        &mut held,
+        "a document deleted in Locdoc",
+        |body| entry(body, "Notes/fresh.md").is_none(),
+    )
+    .await;
+    // Once the passes those changes started have settled, the listing
+    // stands again.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let before = walks();
+        for _ in 0..5 {
+            let (status, headers, body) =
+                get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+            if status == StatusCode::OK {
+                held = (header(&headers, header::ETAG).unwrap().to_owned(), body);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if walks() == before {
+            break before;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the listing never stood"
+        );
+    };
+
+    // Without a watcher no notice says what changed: every poll walks.
+    drop(watching);
+    for _ in 0..3 {
+        get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+    }
+    assert_eq!(walks(), settled + 3);
+    fs::write(s.root.join("unwatched.md"), "Written with no watcher\n").unwrap();
+    let (status, _, body) = get(&base, "/api/tree", &[owner, ("if-none-match", &held.0)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(entry(&body, "unwatched.md").is_some());
+}
+
+#[tokio::test]
+async fn a_change_made_through_locdoc_shows_in_the_next_listing_before_any_notice() {
+    let (_directory, s) = store();
+    s.create_document("plan.md").unwrap();
+    // A watcher that has not reported anything yet.
+    s.listings.notices.watching(true);
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let owner = ("authorization", bearer.as_str());
+    let (status, headers, _) = get(&base, "/api/tree", &[owner]).await;
+    assert_eq!(status, StatusCode::OK);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+    // Until its notice arrives, a folder made on the desktop is not listed.
+    fs::create_dir(s.root.join("Desktop")).unwrap();
+    let (status, _, _) = get(&base, "/api/tree", &[owner, ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    // One the sidebar makes is listed as soon as the request returns, so
+    // the listing after it never undoes it.
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/files"))
+        .header("authorization", &bearer)
+        .header("content-type", "application/json")
+        .body(json!({"path": "Made", "kind": "folder"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _, body) = get(&base, "/api/tree", &[owner, ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(paths(&body), ["Desktop", "Made", "plan.md"]);
+}
+
+fn comments(body: &[u8]) -> Vec<(String, bool)> {
+    let value: Value = serde_json::from_slice(body).unwrap();
+    value["comments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|thread| {
+            (
+                thread["body"].as_str().unwrap().to_owned(),
+                thread["canResolve"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unchanged_comment_list_is_answered_without_its_body_in_each_callers_own_view() {
+    let (_directory, s) = store();
+    let page = s.create_document("Notes/page.md").unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='view',token='page-link' WHERE id=?",
+            [&page.id],
+        )
+        .unwrap();
+    let base = serve(&s).await;
+    let bearer = format!("Bearer {}", s.key);
+    let browser = |guest: char| format!("locdoc_guest={}", guest.to_string().repeat(64));
+    let (alex, visitor, other) = (browser('a'), browser('b'), browser('c'));
+    let owner = [
+        ("authorization", bearer.as_str()),
+        ("cookie", alex.as_str()),
+    ];
+    let list = format!("/api/docs/{}/comments", page.id);
+    let linked = format!("{list}?token=page-link");
+    let post = |body: &'static str| {
+        let url = format!("{base}{list}");
+        let (bearer, alex) = (bearer.clone(), alex.clone());
+        async move {
+            let response = reqwest::Client::new()
+                .post(url)
+                .header("authorization", bearer)
+                .header("cookie", alex)
+                .header("content-type", "application/json")
+                .body(json!({"body": body, "name": "alex"}).to_string())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    };
+    post("First thought").await;
+
+    let (status, headers, body) = get(&base, &list, &owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body), [("First thought".to_owned(), true)]);
+    let tag = header(&headers, header::ETAG).unwrap().to_owned();
+    assert!(tag.starts_with("W/\"") && tag.ends_with('"'), "{tag}");
+    // The list the owner holds: no body, the same tag.
+    let (status, headers, body) =
+        get(&base, &list, &[owner[0], owner[1], ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
+    assert_eq!(header(&headers, header::ETAG), Some(tag.as_str()));
+    assert_eq!(header(&headers, header::CACHE_CONTROL), Some("no-store"));
+
+    // A link visitor sees the same thread without the owner's rights, under
+    // its own tags: neither view's tag answers for the other.
+    let guest = |cookie: &str, held: Option<&str>| {
+        let mut headers = vec![("cookie", cookie.to_owned())];
+        headers.extend(held.map(|tag| ("if-none-match", tag.to_owned())));
+        headers
+    };
+    let ask = |headers: Vec<(&'static str, String)>| {
+        let url = linked.clone();
+        let base = base.clone();
+        async move {
+            let headers: Vec<(&str, &str)> =
+                headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            get(&base, &url, &headers).await
+        }
+    };
+    let (status, headers, body) = ask(guest(&visitor, Some(&tag))).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the owner's tag is not the visitor's"
+    );
+    assert_eq!(comments(&body), [("First thought".to_owned(), false)]);
+    let visiting = header(&headers, header::ETAG).unwrap().to_owned();
+    assert_ne!(visiting, tag);
+    let (status, _, body) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(body.is_empty());
+    let (status, _, _) = get(
+        &base,
+        &list,
+        &[owner[0], owner[1], ("if-none-match", &visiting)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the visitor's tag is not the owner's"
+    );
+    // Another browser on the same link is sent the same list, under its own
+    // tag: whose threads a guest may resolve is part of the view.
+    let (status, headers, body) = ask(guest(&other, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body), [("First thought".to_owned(), false)]);
+    assert_ne!(header(&headers, header::ETAG), Some(visiting.as_str()));
+
+    // A new thread answers in full, with a new tag.
+    post("Second thought").await;
+    let (status, headers, body) =
+        get(&base, &list, &[owner[0], owner[1], ("if-none-match", &tag)]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body).len(), 2);
+    assert_ne!(header(&headers, header::ETAG), Some(tag.as_str()));
+    let (status, _, body) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(comments(&body).len(), 2);
+
+    // A tag is no credential: a link turned off is refused, never confirmed.
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE docs SET permission='private' WHERE id=?",
+            [&page.id],
+        )
+        .unwrap();
+    let (status, _, _) = ask(guest(&visitor, Some(&visiting))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
 fn gunzip(bytes: &[u8]) -> Vec<u8> {
     let mut plain = Vec::new();
     flate2::read::GzDecoder::new(bytes)

@@ -127,6 +127,88 @@ test("a kept response is offered only for its own path, and only a 304 keeps it"
   }
 });
 
+test("a kept response takes in only what changed, and is asked for again whole when that does not apply", async () => {
+  const dom = new JSDOM("", { url: "http://127.0.0.1:3561/" });
+  Object.defineProperties(globalThis, {
+    location: { value: dom.window.location, configurable: true },
+    localStorage: { value: dom.window.localStorage, configurable: true },
+  });
+  const originalFetch = globalThis.fetch;
+  const { revalidate } = await import("../src/api");
+  const sent: [string | null, string | null][] = [];
+  const whole = (list: number[], tag: string) =>
+    new Response(JSON.stringify({ list }), {
+      headers: { "content-type": "application/json", etag: tag },
+    });
+  const splice = (body: unknown, base: string | null, tag: string) =>
+    new Response(JSON.stringify(body), {
+      status: 226,
+      headers: {
+        "content-type": "application/json",
+        etag: tag,
+        im: "splice",
+        "delta-base": base || "",
+      },
+    });
+  let answer = (_held: string | null) => whole([1, 2, 3], 'W/"one"');
+  globalThis.fetch = async (_path, options) => {
+    const headers = new Headers(options?.headers);
+    sent.push([headers.get("If-None-Match"), headers.get("A-IM")]);
+    return answer(headers.get("If-None-Match"));
+  };
+  type List = { list: number[] };
+  const changes = {
+    manipulation: "splice",
+    apply: (kept: List, changes: any) =>
+      typeof changes?.add === "number"
+        ? { list: [...kept.list, changes.add] }
+        : null,
+  };
+  try {
+    const kept = await revalidate<List>("/api/list", null, { changes });
+    assert.deepEqual(sent.pop(), [null, null], "nothing held, nothing named");
+    // What changed since the response held, by its tag.
+    answer = (held) => splice({ add: 4 }, held, 'W/"two"');
+    const next = await revalidate<List>("/api/list", kept, { changes });
+    assert.deepEqual(sent.pop(), ['W/"one"', "splice"]);
+    assert.deepEqual(next, {
+      path: "/api/list",
+      tag: 'W/"two"',
+      body: { list: [1, 2, 3, 4] },
+    });
+    assert.deepEqual(
+      kept.body.list,
+      [1, 2, 3],
+      "the kept response is not changed",
+    );
+    // A splice of another listing than the one held, or one that does not
+    // apply, is never applied: the listing is asked for again whole.
+    for (const unfit of [
+      (held: string | null) => splice({ add: 5 }, 'W/"elsewhere"', 'W/"three"'),
+      (held: string | null) => splice({ nothing: true }, held, 'W/"three"'),
+    ]) {
+      answer = (held) => (held ? unfit(held) : whole([9], 'W/"three"'));
+      const asked = await revalidate<List>("/api/list", next, { changes });
+      assert.deepEqual(asked, {
+        path: "/api/list",
+        tag: 'W/"three"',
+        body: { list: [9] },
+      });
+      assert.deepEqual(sent.splice(0), [
+        ['W/"two"', "splice"],
+        [null, null],
+      ]);
+    }
+    // Without a way to apply them, splices are never asked for.
+    answer = () => whole([1], 'W/"four"');
+    await revalidate<List>("/api/list", next);
+    assert.deepEqual(sent.pop(), ['W/"two"', null]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    dom.window.close();
+  }
+});
+
 test("a document's collaboration state decodes byte for byte", async () => {
   const { decodeState } = await import("../src/api");
   const bytes = new Uint8Array(70_000).map((_, i) => (i * 7919 + 13) % 256);

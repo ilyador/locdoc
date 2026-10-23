@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type * as Y from "yjs";
-import { api, send } from "./api";
+import { api, revalidate, send, type Kept } from "./api";
 import { sourceComments } from "./comment-syntax";
 import type { Comment } from "./model";
 
@@ -18,6 +18,10 @@ export function useComments(
   const retry = useRef(false);
   const requests = useRef(new Map<string, { body: string; id: string }>());
   const sourceKey = useRef<string | null>(null);
+  // The threads the server last sent in full, with their tag. While they
+  // are still what it would send, it answers 304 without a body and they
+  // stand, exactly as if they had been sent again.
+  const listed = useRef<Kept<{ comments: Comment[] }> | null>(null);
   const refresh = useCallback(async () => {
     if (!ready || !alive.current) return;
     read.current?.abort();
@@ -26,11 +30,14 @@ export function useComments(
     const timeout = setTimeout(() => request.abort(), 8000);
     retry.current = true;
     try {
-      const result = await api<{ comments: Comment[] }>(endpoint("/comments"), {
-        signal: request.signal,
-      });
+      const kept = await revalidate<{ comments: Comment[] }>(
+        endpoint("/comments"),
+        listed.current,
+        { signal: request.signal },
+      );
       if (!request.signal.aborted) {
-        setComments(result.comments);
+        listed.current = kept;
+        setComments(kept.body.comments);
         retry.current = false;
       }
     } catch {

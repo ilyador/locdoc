@@ -71,20 +71,48 @@ export async function api<T = unknown>(
 // A response kept with the tag the server gave it.
 export type Kept<T> = { path: string; tag: string; body: T };
 
+// How a kept response takes in an answer that holds only what changed since
+// it (RFC 3229 delta encoding): the instance manipulation asked for, and how
+// such an answer applies to the kept body, or null when it does not.
+export type Changes<T> = {
+  manipulation: string;
+  apply: (kept: T, changes: unknown) => T | null;
+};
+
 // A GET asked again with the tag of the response kept for it. The server
 // answers 304, without a body, while that response is still current, and the
-// kept one stands. A response kept for another path is never offered.
+// kept one stands. A response kept for another path is never offered. With
+// `changes`, a server that still has the kept response may answer 226 with
+// only what changed since; one that does not apply is asked for again whole.
 export async function revalidate<T>(
   path: string,
   kept: Kept<T> | null,
+  { signal, changes }: { signal?: AbortSignal; changes?: Changes<T> } = {},
 ): Promise<Kept<T>> {
   const held = kept?.path === path && kept.tag ? kept : null;
   const response = await request(path, {
     // The page keeps the copy itself; the HTTP cache stores nothing.
     cache: "no-store",
-    headers: held ? { "If-None-Match": held.tag } : {},
+    signal,
+    headers: held
+      ? {
+          "If-None-Match": held.tag,
+          ...(changes ? { "A-IM": changes.manipulation } : {}),
+        }
+      : {},
   });
   if (held && response.status === 304) return held;
+  if (response.status === 226) {
+    const body =
+      held &&
+      changes &&
+      response.headers.get("IM")?.trim() === changes.manipulation &&
+      response.headers.get("Delta-Base") === held.tag
+        ? changes.apply(held.body, await response.json().catch(() => null))
+        : null;
+    if (body === null) return revalidate(path, null, { signal });
+    return { path, tag: response.headers.get("ETag") || "", body };
+  }
   const body = await answer<T>(path, response);
   return { path, tag: response.headers.get("ETag") || "", body };
 }

@@ -66,7 +66,18 @@ fn invalidates_permissions(s: &Store, event: &notify::Event) -> Result<bool> {
     Ok(false)
 }
 
-pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
+/// A running watcher. Listings trust its notices until it stops.
+pub(super) struct Watching {
+    _watcher: notify::RecommendedWatcher,
+    notices: Arc<listings::Notices>,
+}
+impl Drop for Watching {
+    fn drop(&mut self) {
+        self.notices.watching(false);
+    }
+}
+
+pub(super) fn watch(s: App) -> notify::Result<Watching> {
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         mpsc,
@@ -75,12 +86,17 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
     let (tx, rx) = mpsc::sync_channel(1024);
     let overflow = Arc::new(AtomicBool::new(false));
     let invalidated = overflow.clone();
+    let notices = s.listings.notices.clone();
+    let listed = notices.clone();
     let mut watcher = notify::recommended_watcher(move |event| {
+        // Listings learn of a change as it happens, before any queue.
+        listed.notice(&event);
         if tx.try_send(event).is_err() {
             invalidated.store(true, Ordering::Relaxed);
         }
     })?;
     watcher.watch(&s.root, notify::RecursiveMode::Recursive)?;
+    notices.watching(true);
     // A dedicated blocking coordinator owns projection work. A bounded event
     // queue plus invalidation fallback handles bulk checkouts without a backlog
     // proportional to filesystem traffic or blocking network runtime threads.
@@ -163,7 +179,10 @@ pub(super) fn watch(s: App) -> notify::Result<notify::RecommendedWatcher> {
             }
         }
     });
-    Ok(watcher)
+    Ok(Watching {
+        _watcher: watcher,
+        notices,
+    })
 }
 
 #[cfg(test)]

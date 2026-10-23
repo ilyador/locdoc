@@ -565,3 +565,62 @@ test("deleting the last raw-file comment retries a failed metadata refresh", asy
     { timeout: 2600 },
   );
 });
+
+test("the comments poll names the threads it holds, and a 304 keeps them as they are", async () => {
+  const held: (string | null)[] = [];
+  let current = { tag: 'W/"one"', comments: [thread] };
+  globalThis.fetch = async (_input, init = {}) => {
+    const named = new Headers(init.headers).get("If-None-Match");
+    held.push(named);
+    if (named === current.tag)
+      return new Response(null, {
+        status: 304,
+        headers: { etag: current.tag },
+      });
+    return new Response(JSON.stringify({ comments: current.comments }), {
+      headers: { "content-type": "application/json", etag: current.tag },
+    });
+  };
+  const hook = renderHook(() =>
+    useComments(
+      endpoint,
+      true,
+      "Visible text.\n[[comment(alex): Original comment]]",
+    ),
+  );
+  await waitFor(() => assert.equal(hook.result.current.comments.length, 1));
+  assert.equal(held[0], null, "the first read names no tag");
+  const shown = hook.result.current.comments;
+  // A tab coming back into view reads the threads again, as the poll does.
+  const read = async () => {
+    const count = held.length;
+    await act(async () => {
+      document.dispatchEvent(new window.Event("visibilitychange"));
+    });
+    await waitFor(() => assert.equal(held.length, count + 1));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 10)));
+  };
+  await read();
+  assert.equal(
+    held.at(-1),
+    'W/"one"',
+    "the next read names the threads it holds",
+  );
+  assert.ok(
+    hook.result.current.comments === shown,
+    "a 304 keeps the threads it confirms, without a render",
+  );
+  current = {
+    tag: 'W/"two"',
+    comments: [thread, { ...thread, id: "two", body: "Another thread" }],
+  };
+  await read();
+  assert.equal(
+    hook.result.current.comments.length,
+    2,
+    "a changed list comes whole",
+  );
+  await read();
+  assert.equal(held.at(-1), 'W/"two"', "and is asked for again by its own tag");
+  assert.equal(hook.result.current.comments.length, 2);
+});

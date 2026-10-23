@@ -9,6 +9,7 @@ mod engine;
 mod engine_failure_tests;
 mod folders;
 mod links;
+mod listings;
 mod maintenance;
 mod markdown;
 mod mcp;
@@ -69,6 +70,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -200,6 +202,8 @@ struct Store {
     reconciliation: namespace::Requests,
     /// Folders the last listing could not read in full, already logged.
     unlisted: Mutex<HashSet<PathBuf>>,
+    /// The listings tabs poll, and the notices that decide when they stand.
+    listings: listings::Listings,
 }
 // Blocking filesystem, SQLite and diff work never occupies Tokio's network
 // workers. Four bounded jobs prevent rewrite storms from exhausting resources.
@@ -343,6 +347,8 @@ impl Store {
         mcp_access::migrate(&db)?;
         mcp_auth::migrate(&db)?;
         profile::migrate(&db)?;
+        let notices = Arc::new(listings::Notices::default());
+        listings::watch_rows(&db, notices.clone())?;
         let sessions = browser_auth::Sessions::load(&db)?;
         let owner_name = profile::OwnerName::load(&db, std::env::var("LOCDOC_OWNER_NAME").ok())?;
         let mcp_credentials = mcp_auth::Credentials::load(&db)?;
@@ -372,6 +378,7 @@ impl Store {
             document_files: Mutex::new(()),
             reconciliation: namespace::Requests::default(),
             unlisted: Mutex::new(HashSet::new()),
+            listings: listings::Listings::new(notices),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(25))
                 .build()
@@ -772,7 +779,7 @@ async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
     }
     Ok(browser_auth::logout_response())
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone, PartialEq, Eq, Hash)]
 struct Entry {
     path: String,
     kind: &'static str,
@@ -784,6 +791,20 @@ struct Entry {
     /// A document's format; folders have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<&'static str>,
+    /// A document's file, by device and inode, for the notices that name it.
+    #[serde(skip)]
+    file: Option<(u64, u64)>,
+}
+/// A walk's entries, and what it saw that decides whether they may stand
+/// until a notice says otherwise.
+#[derive(Default)]
+struct Walk {
+    entries: Vec<Entry>,
+    /// Whether it left out a document still being matched to its file.
+    unmatched: bool,
+    /// Whether a folder lies on a filesystem whose other clients change
+    /// files without a notice here.
+    unwatched: bool,
 }
 /// Folders of this name hold a document's images, like `.assets`. One with
 /// no document at any depth is left out of listings; it is still walked.
@@ -792,14 +813,25 @@ const ATTACHMENTS: &str = "_attachments";
 /// read is left out, logged once until it can be read again, rather than
 /// failing every poll of the whole listing.
 fn scan(s: &Store, dir: &Path, entries: &mut Vec<Entry>) -> Result<()> {
+    entries.extend(walk(s, dir)?.entries);
+    Ok(())
+}
+fn walk(s: &Store, dir: &Path) -> Result<Walk> {
     let listing = fs::read_dir(dir)?;
-    scan_folder(s, dir, listing, entries)
+    let mut walk = Walk {
+        unwatched: listings::unwatched(dir),
+        ..Walk::default()
+    };
+    let device = fs::metadata(dir)?.dev();
+    scan_folder(s, dir, device, listing, &mut walk)?;
+    Ok(walk)
 }
 fn scan_folder(
     s: &Store,
     dir: &Path,
+    device: u64,
     listing: fs::ReadDir,
-    entries: &mut Vec<Entry>,
+    walk: &mut Walk,
 ) -> Result<()> {
     let mut unreadable = None;
     let mut children = Vec::new();
@@ -840,8 +872,8 @@ fn scan_folder(
             .to_string_lossy()
             .to_string();
         if metadata.is_dir() {
-            let at = entries.len();
-            entries.push(Entry {
+            let at = walk.entries.len();
+            walk.entries.push(Entry {
                 path: rel,
                 kind: "folder",
                 id: None,
@@ -850,14 +882,19 @@ fn scan_folder(
                 title: name.to_string_lossy().into_owned(),
                 url: None,
                 format: None,
+                file: None,
             });
+            // Another filesystem mounted here.
+            if metadata.dev() != device && listings::unwatched(&p) {
+                walk.unwatched = true;
+            }
             match fs::read_dir(&p) {
-                Ok(listing) => scan_folder(s, &p, listing, entries)?,
+                Ok(listing) => scan_folder(s, &p, metadata.dev(), listing, walk)?,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => s.listed(&p, Some(error)),
             }
-            if name == ATTACHMENTS && !entries[at..].iter().any(|entry| entry.id.is_some()) {
-                entries.truncate(at);
+            if name == ATTACHMENTS && !walk.entries[at..].iter().any(|entry| entry.id.is_some()) {
+                walk.entries.truncate(at);
             }
         } else if metadata.is_file()
             && let Some(format) = documents::format(&rel)
@@ -875,21 +912,17 @@ fn scan_folder(
                             StatusCode::NOT_FOUND | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST
                         ) =>
                 {
+                    walk.unmatched |= error.0 == StatusCode::SERVICE_UNAVAILABLE;
                     continue;
                 }
                 result => result?,
             };
-            entries.push(Entry {
+            walk.entries.push(Entry {
                 path: rel,
                 kind: "file",
                 id: Some(d.id.clone()),
                 shared: d.permission != "private",
-                modified: metadata
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
+                modified: listings::modified(&metadata),
                 title: p.file_stem().unwrap().to_string_lossy().into_owned(),
                 url: Some(if d.permission != "private" {
                     format!(
@@ -901,6 +934,7 @@ fn scan_folder(
                     format!("{}/d/{}", s.public_url, d.id)
                 }),
                 format: Some(format.name()),
+                file: Some((metadata.dev(), metadata.ino())),
             });
         }
     }
@@ -909,29 +943,34 @@ fn scan_folder(
 }
 /// The owner's tree, or a folder link's. Browsers ask again every few
 /// seconds with the ETag of the listing they show, and an unchanged one is
-/// answered 304 without a body. Each view has its own tags.
+/// answered 304 without a body. Each view has its own tags, and its own
+/// listing, walked again only when something it shows may have changed.
 async fn tree(State(s): State<App>, h: HeaderMap, Query(a): Query<Access>) -> Result<Response> {
     if let Some(token) = a.token.as_deref() {
         let folder = folders::grant(&s, token)?;
-        let entries = folders::entries(&s, &folder)?;
-        return conditional::json(
-            &h,
-            &format!("folder {}", folder.token),
-            &json!({"entries": entries}),
-        );
+        let base = s.safe(&folder.path, false)?;
+        let scope = format!("folder {}", folder.token);
+        let listing =
+            listings::listing(&s, &scope, base, move |s| folders::walk(s, &folder)).await?;
+        return s.listings.answer(&h, &scope, &listing);
     }
     if !s.owner(&h) {
         return Err(denied());
     }
-    let mut entries = vec![];
-    scan(&s, &s.root, &mut entries)?;
-    let folders = folders::active(&s)?;
-    for entry in &mut entries {
+    let root = s.root.clone();
+    let listing = listings::listing(&s, "owner", root, owner_walk).await?;
+    s.listings.answer(&h, "owner", &listing)
+}
+/// The owner's whole tree, every entry inside a folder link marked shared.
+fn owner_walk(s: &Store) -> Result<Walk> {
+    let mut walk = walk(s, &s.root)?;
+    let folders = folders::active(s)?;
+    for entry in &mut walk.entries {
         entry.shared |= folders
             .iter()
             .any(|folder| folder.path == entry.path || folder.contains(&entry.path));
     }
-    conditional::json(&h, "owner", &json!({"entries": entries}))
+    Ok(walk)
 }
 #[derive(Deserialize)]
 struct Create {
