@@ -26,8 +26,10 @@ import {
 } from "lib0/encoding";
 import { readVarString } from "lib0/decoding";
 import { DraftJournal } from "../src/drafts.ts";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3487";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 let dir, server;
 const peers = [];
 async function until(check) {
@@ -57,7 +59,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3487",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_PUBLIC_URL: base,

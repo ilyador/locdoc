@@ -289,10 +289,7 @@ pub(super) fn previewed(content: &str) -> HashSet<String> {
     // Whether each open table, link or image keeps the images inside it from
     // previewing, as a table, an inline link and a previewed image do.
     let mut open: Vec<bool> = Vec::new();
-    for event in pulldown_cmark::Parser::new_ext(
-        &comments::reading_source(content),
-        pulldown_cmark::Options::all(),
-    ) {
+    for event in markdown::parser(&comments::reading_source(content)) {
         match event {
             Event::Start(Tag::Table(_)) => open.push(true),
             Event::Start(Tag::Link { link_type, .. }) => open.push(link_type == LinkType::Inline),

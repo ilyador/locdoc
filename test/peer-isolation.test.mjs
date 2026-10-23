@@ -6,7 +6,6 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { createServer } from "node:net";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
@@ -17,6 +16,7 @@ import {
   writeVarString,
   toUint8Array,
 } from "lib0/encoding";
+import { freePort } from "./fixtures/free-port.mjs";
 
 let directory, server, base, document, token;
 const sockets = new Set();
@@ -107,10 +107,7 @@ before(async () => {
   await mkdir(join(directory, "state"));
   await mkdir(join(directory, "docs"));
   await writeFile(join(directory, "state/owner.key"), ownerKey);
-  const listener = createServer().listen(0, "127.0.0.1");
-  await once(listener, "listening");
-  const port = listener.address().port;
-  await new Promise((resolve) => listener.close(resolve));
+  const port = await freePort();
   base = `http://127.0.0.1:${port}`;
   server = spawn("./target/debug/locdoc", [], {
     env: {

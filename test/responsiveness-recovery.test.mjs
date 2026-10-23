@@ -18,8 +18,10 @@ import {
   writeVarUint8Array,
   toUint8Array,
 } from "lib0/encoding";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3553";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 const key = "isolated-responsiveness-recovery-test";
 let directory, server;
 let serverLog = "";
@@ -57,7 +59,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3553",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_STATE: join(directory, "state"),
       LOCDOC_DOCS: join(directory, "docs"),
       LOCDOC_PUBLIC_URL: base,

@@ -1,6 +1,7 @@
 //! Markdown is the canonical comment body/thread store. SQLite retains only
 //! stable identity, selected-passage anchors, timestamps and resolution state.
 //! Every source edit uses the same CRDT + durable projection as normal writing.
+use super::markdown::parser;
 use super::*;
 use std::{ops::Range, sync::LazyLock};
 use yrs::{Assoc, IndexedSequence, StickyIndex};
@@ -374,13 +375,6 @@ async fn await_anchor(s: App, id: &str, room: &Arc<Mutex<Room>>, anchor: &Value)
         .await
         .unwrap_or_else(|_| Err(anchor_pending()))
 }
-fn parser(source: &str) -> pulldown_cmark::Parser<'_> {
-    pulldown_cmark::Parser::new_ext(
-        source,
-        pulldown_cmark::Options::all().difference(pulldown_cmark::Options::ENABLE_WIKILINKS),
-    )
-}
-
 // The passage anchor and the location of its raw-file records serve different
 // purposes. Keep the original anchor, but store records after the containing
 // top-level block so a selection cannot cut a paragraph, list, table or tag.
@@ -548,10 +542,7 @@ fn markdown_blocks(source: &str) -> (Vec<TopBlock>, Vec<TextBlock>) {
                 if open.is_empty() {
                     tops.push(TopBlock {
                         range: range.clone(),
-                        line: matches!(
-                            tag,
-                            Tag::CodeBlock(_) | Tag::Heading { .. } | Tag::MetadataBlock(_)
-                        ),
+                        line: matches!(tag, Tag::CodeBlock(_) | Tag::Heading { .. }),
                     });
                 }
                 let holds_text = matches!(tag, Tag::Paragraph | Tag::Heading { .. } | Tag::Item);

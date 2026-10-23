@@ -8,8 +8,12 @@ import { once } from "node:events";
 import { request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3561";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
+// Another local server's origin: the same host on another port.
+const otherOrigin = `http://127.0.0.1:${port === 65535 ? port - 1 : port + 1}`;
 const key = "browser-auth-synthetic-owner";
 let dir,
   server,
@@ -64,7 +68,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3561",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: "https://notes.example.test",
@@ -115,7 +119,11 @@ test("browser responses prohibit inline and dynamically evaluated scripts", asyn
 });
 
 test("local owner sessions survive planted cookies and are never themselves cookies", async () => {
-  for (const Host of ["127.0.0.1:3561", "localhost:3561", "[::1]:3561"]) {
+  for (const Host of [
+    `127.0.0.1:${port}`,
+    `localhost:${port}`,
+    `[::1]:${port}`,
+  ]) {
     const config = await request("/api/config", { headers: { Host } });
     assert.equal(config.response.status, 200);
     const guest = config.response.headers
@@ -156,7 +164,7 @@ test("local owner sessions survive planted cookies and are never themselves cook
       await request("/api/logout", {
         headers: {
           ...bearer(login.data.session),
-          Origin: "http://127.0.0.1:3562",
+          Origin: otherOrigin,
         },
         body: {},
       })

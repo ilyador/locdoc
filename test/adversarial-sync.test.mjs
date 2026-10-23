@@ -24,8 +24,10 @@ import {
   toUint8Array,
 } from "lib0/encoding";
 import { readVarString } from "lib0/decoding";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3497";
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`;
 let dir, server;
 const providers = [];
 async function until(check, timeout = 7000) {
@@ -58,7 +60,7 @@ async function startServer() {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3497",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_PUBLIC_URL: base,

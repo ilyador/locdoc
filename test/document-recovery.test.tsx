@@ -8,7 +8,7 @@ import { createEncoder, writeVarString, toUint8Array } from "lib0/encoding";
 import type { Document } from "../src/model";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
-  url: "http://localhost:3594/",
+  url: "http://localhost/",
 });
 Object.assign(globalThis, {
   window: dom.window,

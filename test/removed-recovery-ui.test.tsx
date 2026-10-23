@@ -6,7 +6,7 @@ import * as Y from "yjs";
 import React from "react";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
-  url: "http://localhost:3591/",
+  url: "http://localhost/",
 });
 Object.assign(globalThis, {
   window: dom.window,

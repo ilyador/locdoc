@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -11,14 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
-
-async function freePort() {
-  const probe = createServer();
-  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const { port } = probe.address();
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-}
+import { freePort } from "./fixtures/free-port.mjs";
 
 test("an open document follows a folder move, closes when deleted and returns whole", async () => {
   const dir = await mkdtemp(join(tmpdir(), "locdoc-trash-"));

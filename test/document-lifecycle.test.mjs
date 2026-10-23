@@ -17,16 +17,18 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
+import { freePort } from "./fixtures/free-port.mjs";
 
 test("document identity survives aliases and rename, while new files never inherit shares", async () => {
   const dir = await mkdtemp(join(tmpdir(), "locdoc-lifecycle-"));
   await mkdir(join(dir, "state"));
   await writeFile(join(dir, "state/owner.key"), "lifecycle-owner");
-  const base = "http://127.0.0.1:3484";
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
   const server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3484",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_PUBLIC_URL: base,

@@ -5,21 +5,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
+import { freePort } from "./fixtures/free-port.mjs";
 
 const binary = resolve("target/debug/locdoc");
 const key = "shutdown-owner";
-
-async function freePort() {
-  const server = createServer().listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address();
-  server.close();
-  await once(server, "close");
-  return port;
-}
 
 // systemd stops and restarts the unit with SIGTERM, not SIGINT.
 test("SIGTERM shuts the server down gracefully and keeps its state", async () => {

@@ -17,8 +17,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
+import { freePort } from "./fixtures/free-port.mjs";
 
-const base = "http://127.0.0.1:3514",
+const port = await freePort();
+const base = `http://127.0.0.1:${port}`,
   key = "folder-sharing-fixture-owner";
 let dir, server, cookie;
 const peers = [];
@@ -154,7 +156,7 @@ before(async () => {
   server = spawn("./target/debug/locdoc", [], {
     env: {
       ...process.env,
-      LOCDOC_BIND: "127.0.0.1:3514",
+      LOCDOC_BIND: `127.0.0.1:${port}`,
       LOCDOC_DOCS: join(dir, "docs"),
       LOCDOC_STATE: join(dir, "state"),
       LOCDOC_PUBLIC_URL: base,
