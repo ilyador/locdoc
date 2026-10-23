@@ -147,7 +147,9 @@ A release's `backup/` folder holds only the state from before that deploy. To re
 Choose **Fountain screenplay** when creating a document, or place a `.fountain`
 file in your documents folder. Locdoc formats it as you type, using the
 [Fountain syntax](https://fountain.io/syntax/). The current line reveals its
-formatting markers while you edit; the file on disk stays plain text.
+formatting markers while you edit; the file on disk stays plain text. Moving
+the caret to another line, or typing ordinary text, reads again and lays out
+only the lines it changes, so a long script stays quick to edit.
 Courier Prime is bundled as the default Fountain font. Font, text size, line
 height and page width preferences are saved separately for Markdown and Fountain
 in each browser.
@@ -169,7 +171,7 @@ Comments, shared folders, simultaneous editing,
 desktop file sync and raw-file downloads use the same system as Markdown.
 
 
-Speaker names already used in a script appear as suggestions when typing a new character cue. **Tab** accepts a suggestion; **↑/↓** followed by **Enter** selects one, and **Esc** dismisses the list. Enter by itself still inserts a line break. Names in comments and omitted passages are excluded.
+Speaker names already used in a script appear as suggestions when typing a new character cue: a name in capitals, or a name in any script after `@`, such as a Hebrew one. **Tab** accepts a suggestion; **↑/↓** followed by **Enter** selects one, and **Esc** dismisses the list. Enter by itself still inserts a line break. Names in comments and omitted passages are excluded.
 
 Paragraph spacing is available under **aA → Layout** for both Markdown and Fountain. Each format remembers its own value. Spacing follows explicit source lines; wrapped text, blank lines, speaker cues and parentheticals keep their existing layout.
 
@@ -186,7 +188,8 @@ comment goes at the end of the line where its passage ends; another one on that
 line starts after a blank line the editor hides with the records. Adding a
 comment never shows an empty line. Joining the next line onto a line that
 comments end, with Backspace at its start or Delete at the end of the line,
-moves their records to the end of the joined text, where a new comment would go.
+moves their records to the end of the joined text, where a new comment would go;
+so does joining the text that a record on a line of its own shows there.
 A rename can change a document between `.md`, `.fountain` and `.txt`; it keeps
 its links, comments and history. A plain text document renamed to Markdown shows
 its image syntax as images to you, and to link visitors only once you approve
@@ -244,7 +247,7 @@ The passage being discussed[[comment(alex): this is my comment]]
 [[comment(ana): this is a response]]
 ```
 
-Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. In Markdown and Fountain, the web editor writes a new comment at the end of the text of the paragraph, heading or list item where its passage ends, before a heading's closing marks, so it adds no line; another conversation there starts after a blank line that the editor hides with the records, or, on a list item, goes to the end of the list. A passage selected with the line break after it gets its record after the passage. A table, fenced code or HTML block takes the record on the line after it, behind the blank line Markdown needs after a table or HTML block, which the editor hides too: adding a comment never shows an empty line. Backspace at the start of the line after such records joins that line onto the table or HTML block, as without them, and the records, with any of that line's own, stay after the block behind its hidden blank line. A record never makes another block of the line it joins or the line under it: one whose own `|` would make a table header of a paragraph's last line goes on the line after it, continuing the paragraph, and one that `---` or `===` under fenced code would underline as a heading goes with the next block instead, so these show no empty line either. The selected passage stays anchored separately, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
+Adjacent records separated by spaces or one newline are replies in one conversation; a blank line starts another. Edit them from any desktop editor. The web editor hides them where they are, so they take no room: in every format, Delete just before records, or Backspace just after them, deletes the character a reader sees past them and keeps the records whole. In Markdown and Fountain, the web editor writes a new comment at the end of the text of the paragraph, heading or list item where its passage ends, before a heading's closing marks, so it adds no line; another conversation there starts after a blank line that the editor hides with the records, or, on a list item, goes to the end of the list. A passage selected with the line break after it gets its record after the passage. Joining the next line onto a line whose text records end, with Backspace at its start or Delete at the end of the line, moves them to the end of the text of the paragraph, heading or list item the joined line is in, where a new comment about it would go, so a desktop editor never shows them inside the joined text. A record on a line of its own shows the next line's text there; Backspace at the start of that text joins it onto the line above the same way, and an empty line shown there goes while the record keeps its line. A table, fenced code or HTML block takes the record on the line after it, behind the blank line Markdown needs after a table or HTML block, which the editor hides too: adding a comment never shows an empty line. Backspace at the start of the line after such records joins that line onto the table or HTML block, as without them, and the records, with any of that line's own, stay after the block behind its hidden blank line. A record never makes another block of the line it joins or the line under it: one whose own `|` would make a table header of a paragraph's last line goes on the line after it, continuing the paragraph, and one that `---` or `===` under fenced code would underline as a heading goes with the next block instead, so these show no empty line either. The selected passage stays anchored separately, and records inside code examples, HTML or Markdown link/image syntax remain literal. Plain text has its own rules; see [Plain text](#plain-text).
 
 Each record occupies one physical line. Escape backslashes as `\\`, literal `]` as `\]`, `)` in names as `\)`, and message line breaks as `\n` or `\r`. Names allow 1–60 characters; messages allow 1–4,000. Comment text belongs to the file; SQLite retains anchors, timestamps and resolved state. File-added comments have no invented timestamp. Cutting and reinserting an unchanged conversation within the same document preserves its timestamps and resolved state when the entire conversation is unique and its original records were removed. Copies, altered conversations and ambiguous duplicates receive independent metadata; recreated raw text never inherits author permissions or posting receipts.
 

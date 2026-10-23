@@ -879,5 +879,122 @@
       "after": "Hello there.",
       "expected": "INT. HOUSE - DAY\n\nALEX\nHello there.[[comment(ana): A note]]\n\nBEN\nHi."
     }
+  },
+  {
+    "name": "plain text: a line joined onto a line that a comment ends takes the record to the end of their text",
+    "path": "notes.txt",
+    "source": "Buy milkBuy eggs\nBuy bread",
+    "threads": [],
+    "comment": {
+      "after": "milk",
+      "join": true,
+      "expected": "Buy milkBuy eggs[[comment(ana): A note]]\nBuy bread"
+    }
+  },
+  {
+    "name": "Markdown: a line joined onto a paragraph line that a comment ends takes the record to the end of their text",
+    "path": "notes.md",
+    "source": "Buy milkBuy eggs",
+    "threads": [],
+    "comment": {
+      "after": "milk",
+      "join": true,
+      "expected": "Buy milkBuy eggs[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a joined line that more of its paragraph follows takes the record to the paragraph's end",
+    "path": "notes.md",
+    "source": "Buy milkBuy eggs\nBuy bread",
+    "threads": [],
+    "comment": {
+      "after": "milk",
+      "join": true,
+      "expected": "Buy milkBuy eggs\nBuy bread[[comment(ana): A note]]"
+    }
+  },
+  {
+    "name": "Markdown: a heading joined onto a paragraph is the paragraph's text",
+    "path": "notes.md",
+    "source": "Para.# Heading\n\nNext.",
+    "threads": [],
+    "comment": {
+      "after": "Para.",
+      "join": true,
+      "expected": "Para.# Heading[[comment(ana): A note]]\n\nNext."
+    }
+  },
+  {
+    "name": "Markdown: a list item joined onto another ends the item's text",
+    "path": "notes.md",
+    "source": "- one- two\n- three",
+    "threads": [],
+    "comment": {
+      "after": "one",
+      "join": true,
+      "expected": "- one- two[[comment(ana): A note]]\n- three"
+    }
+  },
+  {
+    "name": "Markdown: a line joined onto a heading ends the heading's text, before its closing marks",
+    "path": "notes.md",
+    "source": "## TitleMore ##\nText",
+    "threads": [],
+    "comment": {
+      "after": "Title",
+      "join": true,
+      "expected": "## TitleMore[[comment(ana): A note]] ##\nText"
+    }
+  },
+  {
+    "name": "Markdown: a joined line's own conversation still ends their text",
+    "path": "notes.md",
+    "source": "Buy milkBuy eggs[[comment(cy): Free range?]]\n## Next",
+    "threads": [
+      [
+        {
+          "name": "cy",
+          "body": "Free range?"
+        }
+      ]
+    ],
+    "comment": {
+      "after": "milk",
+      "join": true,
+      "expected": "Buy milkBuy eggs[[comment(cy): Free range?]]\n\n[[comment(ana): A note]]\n## Next"
+    }
+  },
+  {
+    "name": "Markdown: a quoted line joined onto another ends the quote's text",
+    "path": "notes.md",
+    "source": "> quoted> more\n\nAfter",
+    "threads": [],
+    "comment": {
+      "after": "quoted",
+      "join": true,
+      "expected": "> quoted> more[[comment(ana): A note]]\n\nAfter"
+    }
+  },
+  {
+    "name": "Fountain: an action line joined onto another ends their text",
+    "path": "script.fountain",
+    "source": "She waits.He leaves.\n\nALEX\nHello.",
+    "threads": [],
+    "comment": {
+      "after": "waits.",
+      "join": true,
+      "expected": "She waits.He leaves.[[comment(ana): A note]]\n\nALEX\nHello."
+    }
+  },
+  {
+    "name": "Fountain: a dialogue line joined onto another leaves the record at the end of the speech",
+    "path": "script.fountain",
+    "source": "ALEX\nHello there.How are you?\nFine?\n\nBEN\nHi.",
+    "threads": [],
+    "comment": {
+      "after": "there.",
+      "join": true,
+      "expected": "ALEX\nHello there.How are you?\nFine?[[comment(ana): A note]]\n\nBEN\nHi."
+    }
   }
 ]

@@ -32,7 +32,12 @@ export function completeFountainSpeaker(
   const prefix = /^([ \t]*)(@?)([\p{L}\p{M}\p{N} .’'_#-]*)$/u.exec(
     state.sliceDoc(line.from, pos),
   );
-  if (!prefix || (!explicit && !hasSpeakerPrefix(prefix[3]))) return null;
+  // Typing offers names for a name that starts in capitals, or for one in
+  // any script after the @ that forces a cue, such as a Hebrew name: Hebrew
+  // has no capitals, and its action never starts with @.
+  const typed = (text: string) =>
+    prefix![2] ? /^[\p{L}\p{N}]/u.test(text) : hasSpeakerPrefix(text);
+  if (!prefix || (!explicit && !typed(prefix[3]))) return null;
   const current = script.lines[line.number - 1];
   if (!["blank", "action", "character"].includes(current.kind)) return null;
   // Standalone annotations are transparent to Fountain's cue boundaries.
@@ -81,8 +86,7 @@ export function completeFountainSpeaker(
       },
     })),
     validFor: (text) =>
-      (explicit || hasSpeakerPrefix(text)) &&
-      /^[\p{L}\p{M}\p{N} .’'_#-]*$/u.test(text),
+      (explicit || typed(text)) && /^[\p{L}\p{M}\p{N} .’'_#-]*$/u.test(text),
   };
 }
 

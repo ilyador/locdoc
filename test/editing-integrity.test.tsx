@@ -430,6 +430,43 @@ test("native line-join repair retains hidden comment records", async () => {
   }
 });
 
+test("native Backspace at the start of the line a record's own line shows joins it onto the line above", async () => {
+  const record = "[[comment(ana): Keep this record]]";
+  const source = `First word\n${record}\nSecond word`;
+  const fixture = mount(source);
+  try {
+    act(() => {
+      // The caret is after the record, where the line it shows starts.
+      fixture.view.dispatch({ selection: { anchor: source.length - 11 } });
+      fixture.view.focus();
+    });
+    await act(async () => {
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("beforeinput", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      const node =
+        fixture.view.contentDOM.querySelector(".cm-line")!.firstChild!;
+      (node as Text).deleteData(0, 1);
+      fixture.view.contentDOM.dispatchEvent(
+        new window.InputEvent("input", {
+          inputType: "deleteContentBackward",
+          bubbles: true,
+        }),
+      );
+      await waitFor(() =>
+        assert.equal(fixture.text.toString(), `First wordSecond word${record}`),
+      );
+    });
+    assert.equal(fixture.view.state.selection.main.head, "First word".length);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("formatting retains visible and hidden CRDT item identities and supports undo", () => {
   const source = "left[[comment(ana): Keep this record]]right";
   const fixture = mount(source);

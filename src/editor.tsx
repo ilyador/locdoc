@@ -17,6 +17,7 @@ import * as Y from "yjs";
 import type { WebsocketProvider } from "y-websocket";
 import {
   commentLayer,
+  deletionPastRecords,
   resolveCommentAnchor,
   setCommentLayout,
   sourceCommentLayer,
@@ -304,6 +305,7 @@ export const MarkdownEditor = forwardRef<
               },
             },
             ...guardedUndoKeymap,
+            ...deletionPastRecords(defaultKeymap),
             ...defaultKeymap,
             ...findKeymap,
             indentWithTab,

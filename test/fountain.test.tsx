@@ -1,8 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Compartment, EditorSelection, EditorState } from "@codemirror/state";
+import {
+  ChangeSet,
+  Compartment,
+  EditorSelection,
+  EditorState,
+  Text,
+} from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { parseFountain } from "../src/fountain";
+import {
+  sourceCommentLayer,
+  sourceCommentRanges,
+} from "../src/editor-comments";
+import {
+  editFountain,
+  moveEditingLine,
+  parseFountain,
+  type FountainScript,
+} from "../src/fountain";
 import { fountainPreview, fountainScript } from "../src/fountain-preview";
 import {
   documentFormat,
@@ -362,5 +377,269 @@ test("file labels, names, document links and counts understand Fountain", () => 
       "Story.fountain",
     ),
     3,
+  );
+});
+
+// A script as short lines of text: each line's kind, place, text and
+// markers, then its notes and omissions.
+function scriptRows(script: FountainScript) {
+  return [
+    ...script.lines.map(
+      (line) =>
+        `${line.kind} ${line.from}-${line.to} ${JSON.stringify(line.text)} ` +
+        `[${line.markers.map((m) => `${m.from}-${m.to}`).join(" ")}] ` +
+        `${line.markers.indexOf(line.prefix!)} ${line.markers.indexOf(line.suffix!)}`,
+    ),
+    `notes ${script.notes.map((r) => `${r.from}-${r.to}`).join(" ")}`,
+    `omissions ${script.omissions.map((r) => `${r.from}-${r.to}`).join(" ")}`,
+  ];
+}
+
+// The decorations and block wrappers a state shows, as short lines of text.
+function layoutRows(state: EditorState) {
+  const rows: string[] = [];
+  for (const set of state.facet(EditorView.decorations))
+    if (typeof set !== "function")
+      set.between(0, state.doc.length, (from, to, value) => {
+        rows.push(
+          `${from}-${to} ${value.startSide} ${JSON.stringify(value.spec)}`,
+        );
+      });
+  for (const set of state.facet(EditorView.blockWrappers))
+    set.between(0, state.doc.length, (from, to, value) => {
+      rows.push(
+        `${from}-${to} ${value.tagName} ${JSON.stringify(value.attributes)}`,
+      );
+    });
+  return rows.sort();
+}
+
+// Compares two lists of rows by their first difference.
+function sameRows(actual: string[], expected: string[], label: string) {
+  const index = actual.findIndex((row, i) => row !== expected[i]);
+  if (index >= 0 || actual.length !== expected.length)
+    assert.equal(
+      actual[index] ?? `(${actual.length} rows)`,
+      expected[index] ?? `(${expected.length} rows)`,
+      `${label}: row ${index}`,
+    );
+}
+
+const tricky = [
+  "Title: The Signal\nAuthor: Example Writer\n\nINT. STUDIO - DAY\n\nA lamp flickers.\n\nMORGAN (V.O.)\n(quietly)\nIs anyone here?\n\nLEE ^\nYes.\n\nCUT TO:\n\nEXT. STREET - NIGHT",
+  "An action.\n\nSARA\n\n\n# Next section\n\nBEN\nHi.\n  \nStill Ben.",
+  "@מאיה\nאיפה היית?\n\nפנים. בית - יום\n\nמאיה\nבבית.",
+  "She waits.[[comment(alex): Too long?]]\n[[comment(ana): No]]\n\nMAYA\nHello.[[A note\nthat goes on]]\n\n/*\nCUT\nSCENE\n*/\n\nBEN\n*Bye* _now_ \\*.",
+  "> THE END <\n\n~A song\n~Another\n\n===\n\n.FORCED SCENE\n\n!LOUD ACTION\n\nMAYA\n",
+];
+
+test("a caret on another line reads the lines it changes as a full parse does", () => {
+  for (const source of tricky) {
+    const count = source.split("\n").length;
+    const lines = [undefined, ...Array.from({ length: count }, (_, i) => i)];
+    for (const before of lines)
+      for (const after of lines) {
+        const label = `${JSON.stringify(source.slice(0, 30))} from ${before} to ${after}`;
+        const script = parseFountain(source, before);
+        const moved = moveEditingLine(script, before, after)!;
+        sameRows(
+          scriptRows(moved.script),
+          scriptRows(parseFountain(source, after)),
+          label,
+        );
+        if (!moved.lines.length)
+          assert.ok(moved.script === script, `${label}: the same script`);
+      }
+  }
+});
+
+test("an edit of ordinary text reads the lines it changes as a full parse does", () => {
+  for (const source of tricky) {
+    const doc = Text.of(source.split("\n"));
+    const count = doc.lines;
+    for (let at = 0; at <= source.length; at++)
+      for (const change of [
+        { from: at, insert: "x" },
+        { from: at, insert: " " },
+        { from: at, insert: "A" },
+        { from: at, insert: "\n" },
+        { from: at, insert: "\n\n" },
+        { from: at, insert: "MAYA\nHi." },
+        { from: at, to: Math.min(at + 1, source.length) },
+        { from: at, to: Math.min(at + 3, source.length) },
+      ]) {
+        const changes = ChangeSet.of([change], source.length);
+        const after = changes.apply(doc);
+        const line = after.lineAt(at).number - 1;
+        for (const [before, editing] of [
+          [undefined, undefined],
+          [doc.lineAt(at).number - 1, line],
+          [(line + 2) % count, line],
+        ] as const) {
+          const updated = editFountain(
+            parseFountain(source, before),
+            changes,
+            doc,
+            after,
+            before,
+            editing,
+          );
+          if (!updated) continue;
+          sameRows(
+            scriptRows(updated.script),
+            scriptRows(parseFountain(after.toString(), editing)),
+            `${JSON.stringify(source.slice(0, 30))}: ${JSON.stringify(change)}, editing ${before} then ${editing}`,
+          );
+        }
+      }
+  }
+});
+
+test("moving the caret and typing lay out a script as a fresh layout does", () => {
+  const focus = (state: EditorState, focused: boolean) =>
+    state.update({
+      effects: state
+        .facet(EditorView.focusChangeEffect)
+        .flatMap((effect) => effect(state, focused) ?? []),
+    }).state;
+  for (const source of tricky) {
+    let state = focus(
+      EditorState.create({
+        doc: source,
+        extensions: [sourceCommentLayer, fountainPreview()],
+      }),
+      true,
+    );
+    const check = (label: string) => {
+      // Replacing the whole text lays the script out afresh.
+      const fresh = state.update({
+        changes: {
+          from: 0,
+          to: state.doc.length,
+          insert: state.doc.toString(),
+        },
+        selection: state.selection,
+      }).state;
+      sameRows(
+        scriptRows(state.facet(fountainScript)!),
+        scriptRows(fresh.facet(fountainScript)!),
+        `${label}: script`,
+      );
+      sameRows(layoutRows(state), layoutRows(fresh), `${label}: layout`);
+    };
+    const type = (insert: string) => {
+      const at = state.selection.main.head;
+      state = state.update({
+        changes: { from: at, insert },
+        selection: { anchor: at + insert.length },
+        userEvent: "input.type",
+      }).state;
+    };
+    const backspace = () => {
+      const at = state.selection.main.head;
+      state = state.update({
+        changes: { from: at - 1, to: at },
+        selection: { anchor: at - 1 },
+        userEvent: "delete.backward",
+      }).state;
+    };
+    for (let n = 1; n <= source.split("\n").length; n++) {
+      // A caret is never inside the records a line ends with.
+      const end = state.doc.line(n).to;
+      if (
+        sourceCommentRanges(state).some(
+          (range) => range.from < end && end < range.to,
+        )
+      )
+        continue;
+      state = state.update({
+        selection: { anchor: end },
+        userEvent: "select",
+      }).state;
+      check(`caret on line ${n}`);
+      type(n % 2 ? "x" : "A");
+      check(`typing on line ${n}`);
+      backspace();
+      check(`deleting on line ${n}`);
+      // A new line, its first letters, and joining it back.
+      type("\n");
+      check(`a new line after line ${n}`);
+      type("SA");
+      check(`typing a new line after line ${n}`);
+      backspace();
+      backspace();
+      backspace();
+      check(`joining the new line after line ${n}`);
+      assert.equal(state.doc.toString(), source, `line ${n}`);
+    }
+    state = focus(state, false);
+    check("without focus");
+  }
+});
+
+test("moving the caret and typing in a long script read only the lines they change", () => {
+  const scenes = Array.from(
+    { length: 400 },
+    (_, i) =>
+      `INT. ROOM ${i} - DAY\n\nMaya waits by the door, *quietly*.\n\nMAYA\n(softly)\nWhere were you?${i % 50 ? "" : "[[comment(alex): Too blunt?]]"}\n\nBEN ^\nOut.\n\n`,
+  );
+  const source = `Title: A Long Script\n\n${scenes.join("")}[[A note]]\n\n/*\nCut\n*/`;
+  let state = EditorState.create({
+    doc: source,
+    extensions: [sourceCommentLayer, fountainPreview()],
+  });
+  state = state.update({
+    effects: state
+      .facet(EditorView.focusChangeEffect)
+      .flatMap((effect) => effect(state, true) ?? []),
+  }).state;
+  const opened = state.facet(fountainScript)!;
+  const type = (insert: string) => {
+    const at = state.selection.main.head;
+    state = state.update({
+      changes: { from: at, insert },
+      selection: { anchor: at + insert.length },
+      userEvent: "input.type",
+    }).state;
+  };
+  // Moving the caret, and typing on lines with text, never serialize the
+  // script to parse it again.
+  const original = Text.prototype.toString;
+  let wholeScriptReads = 0;
+  Text.prototype.toString = function () {
+    if (this.length > 10000) wholeScriptReads++;
+    return original.call(this);
+  };
+  try {
+    for (let n = 1500; n < 1560; n++) {
+      state = state.update({
+        selection: { anchor: state.doc.line(n).to },
+        userEvent: "select",
+      }).state;
+      if (state.doc.line(n).text.trim()) type("a");
+    }
+  } finally {
+    Text.prototype.toString = original;
+  }
+  assert.equal(wholeScriptReads, 0, "no step serialized the script");
+  // New lines too read only the lines around them.
+  type("\n");
+  type("MAYA");
+  type("\n");
+  type("Here.");
+  const script = state.facet(fountainScript)!;
+  assert.ok(
+    script.lines[100] === opened.lines[100],
+    "a line far before the edits keeps its parse",
+  );
+  sameRows(
+    scriptRows(script),
+    scriptRows(
+      parseFountain(
+        state.doc.toString(),
+        state.doc.lineAt(state.selection.main.head).number - 1,
+      ),
+    ),
+    "the script reads as a full parse",
   );
 });
