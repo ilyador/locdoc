@@ -266,6 +266,12 @@ export const MarkdownEditor = forwardRef<
           lineBackspaceIntent(),
           readOnlyInputGuard,
           EditorView.lineWrapping,
+          // These are prose editors: override CodeMirror's code-editing defaults.
+          EditorView.contentAttributes.of({
+            spellcheck: "true",
+            autocorrect: "on",
+            "data-gramm": "false",
+          }),
           perLineDirection,
           drawSelection(),
           highlightSelectionMatches(),

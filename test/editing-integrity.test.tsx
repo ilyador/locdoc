@@ -274,6 +274,73 @@ function mount(source: string, path = "Note.md") {
   };
 }
 
+test("native autocorrection updates collaborative text without changing formatting or comments", async () => {
+  const source = "A **teh** word.[[comment(ana): Keep this note]]";
+  for (const path of ["Note.md", "Script.fountain", "Note.txt"]) {
+    const fixture = mount(source, path);
+    try {
+      act(() => {
+        fixture.view.dispatch({
+          selection: { anchor: source.indexOf("teh") + 3 },
+        });
+        fixture.view.focus();
+      });
+      await act(async () => {
+        const allowed = fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("beforeinput", {
+            inputType: "insertReplacementText",
+            data: "the",
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+        assert.equal(allowed, true, "native correction is not intercepted");
+        const walker = document.createTreeWalker(
+          fixture.view.contentDOM,
+          window.NodeFilter.SHOW_TEXT,
+        );
+        let word: Text | null = null;
+        while (walker.nextNode()) {
+          if (walker.currentNode.nodeValue?.includes("teh")) {
+            word = walker.currentNode as Text;
+            break;
+          }
+        }
+        assert.ok(word, "the misspelled word is rendered");
+        const offset = word.data.indexOf("teh");
+        word.replaceData(offset, 3, "the");
+        window.getSelection()!.collapse(word, offset + 3);
+        fixture.view.contentDOM.dispatchEvent(
+          new window.InputEvent("input", {
+            inputType: "insertReplacementText",
+            data: "the",
+            bubbles: true,
+          }),
+        );
+        await waitFor(() =>
+          assert.equal(
+            fixture.text.toString(),
+            source.replace("teh", "the"),
+            path,
+          ),
+        );
+      });
+      assert.equal(
+        fixture.view.state.doc.toString(),
+        source.replace("teh", "the"),
+      );
+      act(() => {
+        yUndoManagerKeymap.find((binding) => binding.key === "Mod-z")!.run!(
+          fixture.view,
+        );
+      });
+      assert.equal(fixture.text.toString(), source, "the correction can be undone");
+    } finally {
+      fixture.close();
+    }
+  }
+});
+
 test("native Backspace at a new line removes its break even when the browser mutates the preceding word", async () => {
   for (const path of ["Note.md", "Script.fountain"]) {
     const fixture = mount("First word\n", path);

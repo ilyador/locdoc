@@ -98,7 +98,5 @@ export const plainTextSupport = [
   placeholder("Start writing."),
   EditorView.contentAttributes.of({
     "aria-label": "Plain text document",
-    spellcheck: "true",
-    "data-gramm": "false",
   }),
 ];

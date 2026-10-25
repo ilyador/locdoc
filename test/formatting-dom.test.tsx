@@ -140,6 +140,38 @@ function wordStyles(word: Node) {
   return [...styles].sort();
 }
 
+test("native spelling and autocorrection stay enabled across document formats", () => {
+  const ydoc = new Y.Doc();
+  ydoc.getText("content").insert(0, "Some prose.");
+  const awareness = new Awareness(ydoc);
+  const props = {
+    ydoc,
+    provider: { awareness } as any,
+    editable: true,
+    id: "native-writing",
+    onComment() {},
+    onUpload() {},
+  };
+  const page = render(<MarkdownEditor {...props} path="Note.md" />);
+  try {
+    for (const path of ["Note.md", "Note.fountain", "Note.txt", "Note.md"]) {
+      page.rerender(<MarkdownEditor {...props} path={path} />);
+      const content = page.container.querySelector<HTMLElement>(".cm-content")!;
+      assert.equal(content.getAttribute("spellcheck"), "true", path);
+      assert.equal(content.getAttribute("autocorrect"), "on", path);
+      assert.equal(
+        content.getAttribute("writingsuggestions"),
+        "false",
+        "retain CodeMirror's protection against inline completion rewrites",
+      );
+    }
+  } finally {
+    page.unmount();
+    awareness.destroy();
+    ydoc.destroy();
+  }
+});
+
 for (const path of ["Note.md", "Note.fountain"])
   for (const formatted of [
     "**mispelled**",

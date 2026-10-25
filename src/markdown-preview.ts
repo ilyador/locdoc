@@ -527,8 +527,6 @@ export function documentPreview(
     ),
     EditorView.contentAttributes.of({
       "aria-label": fountain ? "Fountain screenplay" : "Markdown document",
-      spellcheck: "true",
-      "data-gramm": "false",
     }),
   ];
 }
