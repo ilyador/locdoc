@@ -2,6 +2,7 @@ import type { ChangeDesc, EditorState, Transaction } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 import { Tree, type TreeBuffer } from "@lezer/common";
 import { shownLines } from "./editor-comments";
+import { previewSelection } from "./editor-engagement";
 
 export type PreviewRange = { from: number; to: number };
 
@@ -77,14 +78,14 @@ export function previewRanges(tr: Transaction): PreviewRange[] {
   tr.changes.iterChangedRanges((_from, _to, from, to) =>
     ranges.push({ from, to }),
   );
-  // An edit can map the old selection onto a different line even without an
-  // explicit selection transaction. Refresh both ends of the visibility change.
+  // Refresh both ends of the preview's visibility change. A native touch
+  // selection can hold the old revealed block while the actual caret moves.
   const selections = [
-    ...tr.startState.selection.ranges.map((r) => ({
+    ...previewSelection(tr.startState).map((r) => ({
       from: tr.changes.mapPos(r.from, -1),
       to: tr.changes.mapPos(r.to, 1),
     })),
-    ...tr.state.selection.ranges,
+    ...previewSelection(tr.state),
   ];
   for (const range of selections)
     ranges.push({ from: range.from, to: range.to });

@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
 import { EditorState } from "@codemirror/state";
+import { ensureSyntaxTree } from "@codemirror/language";
 import { keyboardCaretScroll } from "../src/editor-scroll";
 
 let dom: JSDOM;
@@ -196,6 +197,95 @@ test("touch selection preserves Markdown layout and native callouts until typing
     doc.close();
   }
 });
+
+for (const resume of ["typing", "arrow", "mouse"] as const)
+  test(`resuming with ${resume} hides the old touch-held Markdown block`, () => {
+    // A short document reparses together and can conceal a stale decoration.
+    // Keep the two selections in separate, reusable parser fragments.
+    const source = Array.from(
+      { length: 800 },
+      (_, n) =>
+        `## Heading ${n}\n\nParagraph ${n} has **some words** to read and edit.\n`,
+    ).join("\n");
+    const doc = open(source);
+    try {
+      assert.ok(
+        ensureSyntaxTree(doc.view.state, source.length, 2000),
+        "the long fixture must parse completely",
+      );
+      act(() => doc.view.dispatch({}));
+      const heading = source.indexOf("Heading 10\n");
+      const paragraph = source.indexOf("Paragraph 80 ");
+      const headingMarkersHidden = () => {
+        let hidden = false;
+        for (const set of doc.view.state.facet(EditorView.decorations)) {
+          if (typeof set === "function") continue;
+          set.between(heading - 3, heading, (from, to) => {
+            if (from === heading - 3 && to === heading) hidden = true;
+          });
+        }
+        return hidden;
+      };
+      act(() => {
+        doc.view.focus();
+        doc.view.dispatch({
+          selection: { anchor: heading },
+          userEvent: "select.pointer",
+        });
+      });
+      assert.equal(headingMarkersHidden(), false);
+      const pointer = (type: "touch" | "mouse") => {
+        const event = new window.Event("pointerdown", { bubbles: true });
+        Object.defineProperty(event, "pointerType", { value: type });
+        act(() => doc.view.contentDOM.dispatchEvent(event));
+      };
+      pointer("touch");
+      act(() =>
+        doc.view.dispatch({
+          selection: { anchor: paragraph },
+          userEvent: "select.pointer",
+        }),
+      );
+      assert.equal(
+        headingMarkersHidden(),
+        false,
+        "native selection keeps the previous preview layout stable",
+      );
+      if (resume === "typing")
+        act(() =>
+          doc.view.dispatch({
+            changes: { from: paragraph, insert: "New " },
+            selection: { anchor: paragraph + 4 },
+            userEvent: "input.type",
+          }),
+        );
+      else if (resume === "arrow")
+        act(() =>
+          doc.view.contentDOM.dispatchEvent(
+            new window.KeyboardEvent("keydown", {
+              key: "ArrowRight",
+              bubbles: true,
+            }),
+          ),
+        );
+      else pointer("mouse");
+      assert.equal(
+        headingMarkersHidden(),
+        true,
+        "leaving native selection must refresh the formerly revealed block",
+      );
+      const expected =
+        resume === "typing"
+          ? source.slice(0, paragraph) + "New " + source.slice(paragraph)
+          : source;
+      assert.ok(
+        doc.text.toString() === expected,
+        "preview changes must preserve collaborative text",
+      );
+    } finally {
+      doc.close();
+    }
+  });
 
 test("touch selection preserves Fountain markers and word nodes through focus changes", () => {
   const source = ".INT. ROOM - DAY\n\n@MAYA\nA **bold passage** to copy.";
