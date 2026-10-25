@@ -138,6 +138,7 @@ impl Heartbeat {
 
 #[derive(Default)]
 pub(super) struct Presence {
+    actor: Option<String>,
     source: Option<yrs::ClientID>,
     wire: Option<yrs::ClientID>,
     received: Option<u32>,
@@ -145,6 +146,20 @@ pub(super) struct Presence {
     removed: bool,
 }
 impl Presence {
+    /// An owner is one person across all authenticated sessions. Visitors
+    /// keep their browser identity. Never identify a person by a display name.
+    /// The actor is internal: `outgoing` removes it before sending any state.
+    pub(super) fn for_request(h: &HeaderMap, owner: bool) -> Self {
+        let actor = if owner {
+            Some("owner".to_string())
+        } else {
+            guest_id(h).ok().map(|guest| format!("guest:{guest}"))
+        };
+        Self {
+            actor,
+            ..Self::default()
+        }
+    }
     pub(super) fn client(&self) -> Option<yrs::ClientID> {
         self.wire
     }
@@ -186,6 +201,20 @@ impl Presence {
         }
         self.received = Some(entry.clock);
         self.removed = removed;
+        if !removed {
+            let mut state: Value =
+                serde_json::from_str(&entry.json).map_err(|_| bad("Invalid presence state."))?;
+            let state_object = state
+                .as_object_mut()
+                .ok_or_else(|| bad("Invalid presence state."))?;
+            // This field is server-authored, including when a client echoes
+            // another connection's state or tries to claim the owner's actor.
+            state_object.remove("locdocActor");
+            if let Some(actor) = &self.actor {
+                state_object.insert("locdocActor".into(), json!(actor));
+            }
+            entry.json = state.to_string().into();
+        }
         // Peer clocks are untrusted. A MAX clock must not overflow Yrs during
         // disconnect or poison a later connection which reuses the source ID.
         self.clock = self
@@ -198,9 +227,6 @@ impl Presence {
         Ok(())
     }
     pub(super) fn outgoing(&self, bytes: Vec<u8>) -> Option<Vec<u8>> {
-        let Some(client) = self.wire else {
-            return Some(bytes);
-        };
         if bytes.first() != Some(&1) {
             return Some(bytes);
         }
@@ -209,7 +235,27 @@ impl Presence {
         let Message::Awareness(mut update) = Message::decode_v1(&bytes).ok()? else {
             return None;
         };
-        update.clients.remove(&client);
+        update.clients.retain(|client, state| {
+            if Some(*client) == self.wire {
+                return false;
+            }
+            let Ok(mut json) = serde_json::from_str::<Value>(&state.json) else {
+                return false;
+            };
+            if let Some(actor) = json
+                .as_object_mut()
+                .and_then(|state| state.remove("locdocActor"))
+            {
+                if actor
+                    .as_str()
+                    .is_some_and(|actor| self.actor.as_deref() == Some(actor))
+                {
+                    return false;
+                }
+                state.json = json.to_string().into();
+            }
+            true
+        });
         (!update.clients.is_empty()).then(|| Message::Awareness(update).encode_v1())
     }
 }
@@ -473,6 +519,91 @@ mod tests {
         assert!(heartbeat.ping().is_none());
         heartbeat.pong(&nonce);
         assert!(heartbeat.ping().is_some());
+    }
+
+    #[test]
+    fn actor_identity_recognizes_owner_sessions_and_remembered_visitors() {
+        let mut first = HeaderMap::new();
+        first.insert(
+            header::COOKIE,
+            format!("locdoc_guest={}", "a".repeat(64)).parse().unwrap(),
+        );
+        let mut second = HeaderMap::new();
+        second.insert(
+            header::COOKIE,
+            format!("locdoc_guest={}", "b".repeat(64)).parse().unwrap(),
+        );
+        let owner = Presence::for_request(&first, true).actor.unwrap();
+        assert_eq!(
+            Presence::for_request(&second, true).actor.as_ref(),
+            Some(&owner)
+        );
+        let guest = Presence::for_request(&first, false).actor.unwrap();
+        assert_ne!(guest, owner);
+        assert_ne!(
+            Presence::for_request(&second, false).actor.as_ref(),
+            Some(&guest)
+        );
+        assert!(
+            Presence::for_request(&HeaderMap::new(), false)
+                .actor
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn same_person_is_filtered_before_the_new_connection_publishes_any_presence() {
+        let mut awareness = Awareness::new(Doc::new());
+        let mut old = Presence {
+            actor: Some("owner".into()),
+            ..Presence::default()
+        };
+        let mut state = update(1, "{\"user\":{\"name\":\"Old name\"}}");
+        old.accept(&mut state, &awareness).unwrap();
+        awareness.apply_update(state).unwrap();
+        let reopened = Presence {
+            actor: Some("owner".into()),
+            ..Presence::default()
+        };
+        assert!(reopened.client().is_none());
+        assert!(
+            reopened
+                .outgoing(Message::Awareness(awareness.update().unwrap()).encode_v1())
+                .is_none()
+        );
+        // A visitor may use exactly the owner's name and echo their actor;
+        // the server replaces it with that visitor's own identity.
+        for actor in [None, Some("guest".to_string())] {
+            let mut visitor = Presence {
+                actor: actor.clone(),
+                ..Presence::default()
+            };
+            let mut state = update(
+                2,
+                "{\"locdocActor\":\"owner\",\"user\":{\"name\":\"Old name\"}}",
+            );
+            visitor.accept(&mut state, &awareness).unwrap();
+            awareness.apply_update(state.clone()).unwrap();
+            let json: Value =
+                serde_json::from_str(&state.clients.values().next().unwrap().json).unwrap();
+            assert_eq!(json["locdocActor"].as_str(), actor.as_deref());
+            let bytes = reopened
+                .outgoing(Message::Awareness(state).encode_v1())
+                .unwrap();
+            let Message::Awareness(filtered) = Message::decode_v1(&bytes).unwrap() else {
+                panic!("Expected presence");
+            };
+            assert!(filtered.clients.contains_key(&visitor.client().unwrap()));
+            assert!(
+                filtered.clients.values().all(|state| {
+                    serde_json::from_str::<Value>(&state.json)
+                        .unwrap()
+                        .get("locdocActor")
+                        .is_none()
+                }),
+                "internal identities never reach another visitor"
+            );
+        }
     }
 
     #[test]

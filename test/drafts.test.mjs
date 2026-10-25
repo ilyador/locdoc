@@ -2,13 +2,43 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "fake-indexeddb/auto";
 import * as Y from "yjs";
+import { Awareness } from "y-protocols/awareness";
 import { DraftJournal, hasUnstoredDrafts } from "../src/drafts.ts";
 import {
   captureInsertion,
   insertAttachment,
   documentSession,
 } from "../src/document-session.ts";
-import { normalizePresence } from "../src/presence.ts";
+import { normalizePresence, pagePresence, publishPresence } from "../src/presence.ts";
+
+test("closing a page withdraws its presence and a cached page restores it without touching text", () => {
+  const doc = new Y.Doc();
+  doc.getText("content").insert(0, "My local draft");
+  const awareness = new Awareness(doc);
+  const page = new EventTarget();
+  publishPresence(awareness, "Original name");
+  const state = awareness.getLocalState();
+  const stop = pagePresence(awareness, page);
+  try {
+    page.dispatchEvent(new Event("pagehide"));
+    assert.equal(awareness.getLocalState(), null);
+    page.dispatchEvent(new Event("pagehide"));
+    page.dispatchEvent(new Event("pageshow"));
+    assert.ok(awareness.getLocalState() === state, "restore the cached view's presence");
+    page.dispatchEvent(new Event("pagehide"));
+    awareness.setLocalState({ user: { name: "New name" } });
+    page.dispatchEvent(new Event("pageshow"));
+    assert.equal(awareness.getLocalState().user.name, "New name", "never restore over newer presence");
+    stop();
+    page.dispatchEvent(new Event("pagehide"));
+    assert.equal(awareness.getLocalState().user.name, "New name", "a closed view has no page listeners");
+    assert.equal(doc.getText("content").toString(), "My local draft");
+  } finally {
+    stop();
+    awareness.destroy();
+    doc.destroy();
+  }
+});
 
 function seed(content = "Hello") {
   const ydoc = new Y.Doc();

@@ -246,6 +246,8 @@ One live-preview editor styles Markdown and reveals syntax near the cursor. Mark
 
 Headings in the web editor start with `#` (up to six). A line of dashes or equals signs below text never turns it into a heading.
 
+Your other authenticated owner sessions never appear as remote cursors, including after reopening a page or switching devices. Returning guests are recognized by their browser cookie; a matching display name alone does not make two visitors the same person. Closing a page withdraws its presence, and returning to a browser-cached page restores it.
+
 Select text to comment, then open the small inline marker to read or reply. Comments also live in the raw Markdown:
 
 ```md

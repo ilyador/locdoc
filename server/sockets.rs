@@ -117,7 +117,10 @@ async fn socket_loop(
         close_socket(&mut sender, &mut receiver).await;
         return;
     }
-    let mut peer = Peer::default();
+    let mut peer = Peer {
+        presence: peers::Presence::for_request(&h, s.owner(&h)),
+        ..Peer::default()
+    };
     let target = room.clone();
     let document_id = id.clone();
     let headers = h.clone();
@@ -145,6 +148,9 @@ async fn socket_loop(
         return;
     };
     for data in initial {
+        let Some(data) = peer.presence.outgoing(data) else {
+            continue;
+        };
         if !send_socket(&mut sender, WsMessage::Binary(data.into())).await {
             return;
         }

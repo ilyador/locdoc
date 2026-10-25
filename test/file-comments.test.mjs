@@ -118,13 +118,18 @@ function assertSelectedPassage(snapshot, comment, expected) {
     doc.destroy();
   }
 }
-async function connect(id) {
+async function connect(id, token) {
   const snapshot = await request(`/api/docs/${id}`),
     doc = new Y.Doc();
   Y.applyUpdate(doc, Buffer.from(snapshot.state, "base64"));
   class Socket extends WebSocket {
     constructor(url) {
-      super(url, { headers: { Authorization: `Bearer ${key}`, Origin: base } });
+      super(url, {
+        headers: {
+          ...(token ? { Cookie: cookie } : { Authorization: `Bearer ${key}` }),
+          Origin: base,
+        },
+      });
     }
   }
   const provider = new WebsocketProvider(
@@ -135,7 +140,7 @@ async function connect(id) {
       WebSocketPolyfill: Socket,
       disableBc: true,
       connect: false,
-      params: { client: "plain-text-v2" },
+      params: { client: "plain-text-v2", ...(token ? { token } : {}) },
     },
   );
   const peer = { doc, provider, text: doc.getText("content"), waiting: false };
@@ -359,9 +364,10 @@ test("posting a comment on newly typed text tolerates HTTP overtaking the CRDT u
 });
 
 test("choosing a name never publishes a rejected null identity or disconnects collaboration", async () => {
-  const d = await create("names.md", "Choose a name."),
-    visitor = await connect(d.id),
-    observer = await connect(d.id);
+  const d = await create("names.md", "Choose a name.");
+  const shared = await request(`/api/docs/${d.id}/share`, "POST", { permission: "view" });
+  const visitor = await connect(d.id, shared.shareUrl.split("/").pop());
+  const observer = await connect(d.id);
   publishPresence(visitor.provider.awareness, "");
   await delay(60);
   assert.equal(visitor.provider.wsconnected, true);

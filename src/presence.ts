@@ -39,3 +39,29 @@ export function publishPresence(awareness: Awareness, name: string) {
     colorLight: color + "24",
   });
 }
+
+// Closing or caching a page does not unmount React. Withdraw its cursor while
+// keeping its connection and draft journal free to finish saving. A cached
+// page restores its presence when the browser shows it again.
+export function pagePresence(awareness: Awareness, page: Window) {
+  let paused: ReturnType<Awareness["getLocalState"]> = null;
+  const hide = () => {
+    const state = awareness.getLocalState();
+    if (state) {
+      paused = state;
+      awareness.setLocalState(null);
+    }
+  };
+  const show = () => {
+    if (paused && awareness.getLocalState() === null)
+      awareness.setLocalState(paused);
+    paused = null;
+  };
+  page.addEventListener("pagehide", hide);
+  page.addEventListener("pageshow", show);
+  return () => {
+    page.removeEventListener("pagehide", hide);
+    page.removeEventListener("pageshow", show);
+    paused = null;
+  };
+}

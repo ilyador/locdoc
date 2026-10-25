@@ -11,7 +11,7 @@ import {
 import { api, ApiError, decodeState, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
 import { documentSession, type DocumentSession } from "./document-session";
-import { normalizePresence } from "./presence";
+import { normalizePresence, pagePresence } from "./presence";
 import { trashItem } from "./file-actions";
 import { sharedToken, type Document as Doc, type TrashItem } from "./model";
 type Projection = "synced" | "pending" | "blocked" | "conflict";
@@ -63,6 +63,7 @@ export function useDocument(
     let active = true;
     let connection: DocumentSession | null = null;
     let cancelRetry: (() => void) | undefined;
+    let stopPresence: (() => void) | undefined;
     setDoc(null);
     setSession(null);
     setError("");
@@ -356,6 +357,7 @@ export function useDocument(
           setPeople(next);
         };
         provider.awareness.on("change", presence);
+        stopPresence = pagePresence(provider.awareness, window);
         connection = documentSession(d.id, ydoc, provider, drafts);
         setSession(connection);
         provider.connect();
@@ -374,6 +376,7 @@ export function useDocument(
     return () => {
       active = false;
       cancelRetry?.();
+      stopPresence?.();
       connection?.leave();
       setPeople([]);
     };

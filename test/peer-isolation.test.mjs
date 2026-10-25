@@ -55,11 +55,11 @@ function raw(options = {}) {
   return socket;
 }
 
-async function connected(owner = false, id = document.id) {
+async function connected(owner = false, id = document.id, headers = {}) {
   const ydoc = new Y.Doc();
   class Socket extends WebSocket {
     constructor(url) {
-      super(url, { headers: owner ? { Authorization: `Bearer ${ownerKey}` } : {} });
+      super(url, { headers: { ...(owner ? { Authorization: `Bearer ${ownerKey}` } : {}), ...headers } });
     }
   }
   const provider = new WebsocketProvider(
@@ -75,10 +75,22 @@ async function connected(owner = false, id = document.id) {
     name: owner ? "Owner" : "Guest",
     color: "#487495",
   });
+  const seen = new Set();
+  provider.awareness.on("change", () => {
+    for (const [client, state] of provider.awareness.getStates())
+      if (client !== ydoc.clientID && state.user?.name) seen.add(state.user.name);
+  });
   const synchronized = once(provider, "sync");
   provider.connect();
   await synchronized;
-  return { provider, ydoc };
+  return { provider, ydoc, seen };
+}
+
+function showCursor(client) {
+  const position = Y.relativePositionToJSON(
+    Y.createRelativePositionFromTypeIndex(client.ydoc.getText("content"), 0),
+  );
+  client.provider.awareness.setLocalStateField("cursor", { anchor: position, head: position });
 }
 
 function awareness(entries) {
@@ -139,6 +151,95 @@ after(async () => {
   server?.kill("SIGINT");
   if (server && server.exitCode === null) await once(server, "exit");
   if (directory) await rm(directory, { recursive: true, force: true });
+});
+
+test("owner devices and a reopened page never receive their own other cursors, including bootstrap", async () => {
+  const clients = [];
+  try {
+    const desktop = (await request("/api/login", { key: ownerKey })).session;
+    const phone = (await request("/api/login", { key: ownerKey })).session;
+    assert.notEqual(desktop, phone, "the devices authenticate with separate sessions");
+    const first = await connected(true, document.id, {
+      Cookie: `locdoc_guest=${"a".repeat(64)}`, Authorization: `Bearer ${desktop}`,
+    });
+    clients.push(first);
+    first.provider.awareness.setLocalStateField("user", { name: "Previous owner" });
+    showCursor(first);
+    const observer = await connected();
+    clients.push(observer);
+    const observed = () => [...observer.provider.awareness.getStates().values()];
+    await waitFor(() => observed().some((state) => state.user?.name === "Previous owner"));
+    const second = await connected(true, document.id, {
+      Cookie: `locdoc_guest=${"b".repeat(64)}`, Authorization: `Bearer ${phone}`,
+    });
+    clients.push(second);
+    second.provider.awareness.setLocalStateField("user", { name: "Other owner device" });
+    showCursor(second);
+    const reopened = await connected(true, document.id, {
+      Cookie: `locdoc_guest=${"a".repeat(64)}`, Authorization: `Bearer ${desktop}`,
+    });
+    clients.push(reopened);
+    reopened.provider.awareness.setLocalStateField("user", { name: "Reopened owner" });
+    showCursor(reopened);
+    await waitFor(() => observed().some((state) => state.user?.name === "Reopened owner" && state.cursor)
+      && observed().some((state) => state.user?.name === "Other owner device" && state.cursor));
+    assert.ok(observed().every((state) => state.locdocActor === undefined), "internal identities are never exposed");
+    for (const client of [first, second, reopened]) {
+      assert.equal(client.seen.has("Previous owner"), false, "no old cursor flashed during bootstrap");
+      assert.equal(client.seen.has("Other owner device"), false);
+      assert.equal(client.seen.has("Reopened owner"), false);
+    }
+    // A different person with the same name cannot claim the owner's identity.
+    observer.provider.awareness.setLocalStateField("locdocActor", "owner");
+    observer.provider.awareness.setLocalStateField("user", { name: "Reopened owner" });
+    showCursor(observer);
+    await waitFor(() => reopened.seen.has("Reopened owner"));
+    const remote = [...reopened.provider.awareness.getStates()]
+      .filter(([id, state]) => id !== reopened.ydoc.clientID && state.user?.name === "Reopened owner");
+    assert.equal(remote.length, 1, "a same-named guest remains visible");
+    assert.equal(remote[0][1].locdocActor, undefined, "guest identity claims are discarded");
+    await waitFor(() => [...reopened.provider.awareness.getStates()]
+      .some(([id, state]) => id !== reopened.ydoc.clientID && state.user?.name === "Reopened owner" && state.cursor));
+    assert.equal(first.provider.wsconnected, true, "the old device remains usable");
+    assert.equal(second.provider.wsconnected, true);
+  } finally {
+    for (const client of clients) {
+      client.provider.destroy();
+      client.ydoc.destroy();
+      providers.delete(client.provider);
+    }
+  }
+});
+
+test("a returning visitor hides its other tabs without hiding a different visitor with the same name", async () => {
+  const clients = [];
+  try {
+    const headers = { Cookie: `locdoc_guest=${"c".repeat(64)}` };
+    const first = await connected(false, document.id, headers);
+    clients.push(first);
+    first.provider.awareness.setLocalStateField("user", { name: "Returning visitor" });
+    const second = await connected(false, document.id, headers);
+    clients.push(second);
+    second.provider.awareness.setLocalStateField("user", { name: "Visitor's other tab" });
+    const other = await connected(false, document.id, { Cookie: `locdoc_guest=${"d".repeat(64)}` });
+    clients.push(other);
+    other.provider.awareness.setLocalStateField("user", { name: "Different visitor" });
+    await waitFor(() => second.seen.has("Different visitor"));
+    assert.equal(second.seen.has("Returning visitor"), false, "the old tab never flashed during bootstrap");
+    other.provider.awareness.setLocalStateField("user", { name: "Returning visitor" });
+    await waitFor(() => second.seen.has("Returning visitor"));
+    const others = [...second.provider.awareness.getStates()]
+      .filter(([id, state]) => id !== second.ydoc.clientID && state.user?.name === "Returning visitor");
+    assert.equal(others.length, 1);
+    assert.equal(second.seen.has("Visitor's other tab"), false);
+    assert.equal(first.seen.has("Visitor's other tab"), false);
+  } finally {
+    for (const client of clients) {
+      client.provider.destroy();
+      client.ydoc.destroy();
+      providers.delete(client.provider);
+    }
+  }
 });
 
 test("viewers cannot change or remove another connection's cursor or name", async () => {
