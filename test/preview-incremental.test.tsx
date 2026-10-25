@@ -9,18 +9,13 @@ import {
   type TransactionSpec,
 } from "@codemirror/state";
 import { EditorView, type WidgetType } from "@codemirror/view";
-import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { JSDOM } from "jsdom";
-import { commentMarkdown } from "../src/comment-syntax";
 import { sourceCommentLayer } from "../src/editor-comments";
 import { engagement } from "../src/editor-engagement";
-import { livePreview } from "../src/markdown-preview";
+import { livePreview, markdownWriting } from "../src/markdown-preview";
 
-const language = markdown({
-  base: markdownLanguage,
-  extensions: [commentMarkdown],
-});
+const language = markdownWriting;
 const preview = livePreview("preview-fixture", undefined, "Notes/Note.md", [
   { id: "linked", path: "Notes/Linked.md", kind: "file", shared: false },
 ]);
@@ -257,14 +252,14 @@ test("incremental Markdown invalidation follows fences, tables, lists, quotes an
     "remove block quote marker",
   );
   state = replace(state, "## Heading", "Heading", "remove ATX heading marker");
-  state = replace(state, "Tail.", "Tail.\n=====", "add setext heading");
+  state = replace(state, "Tail.", "Tail.\n=====", "add equals line");
   state = replace(
     state,
     "Tail.\n=====",
     "Tail.\n-----",
-    "change setext heading level",
+    "change equals to dashes",
   );
-  state = replace(state, "Tail.\n-----", "Tail.", "remove setext heading");
+  state = replace(state, "Tail.\n-----", "Tail.", "remove dash line");
   state = replace(
     state,
     "**Literal**",
@@ -473,42 +468,43 @@ test("selection changes reveal exactly the affected Markdown lines and blocks", 
   );
 });
 
-test("a setext heading styles each line of its text and hides its underline until a selection touches it", () => {
-  const source =
-    "Intro.\n\nTwo lines\nof title\n=====\nBody.\n\n> Quoted\n> -----\n\nTail.";
-  let state = create(source, { anchor: source.indexOf("Tail") });
-  const at = (text: string) => source.indexOf(text);
-  // The source that replace decorations hide, and the lines heading styles.
-  const hidden = (state: EditorState) =>
-    decorationRows(state)
-      .map((row) => JSON.parse(row) as { from: number; to: number } & object)
-      .filter((row) => Object.keys(row).length === 3)
-      .map((row) => state.sliceDoc(row.from, row.to));
+test("dash and equals lines never promote preceding text to a heading", () => {
   const headings = (state: EditorState) =>
-    decorationRows(state)
-      .map((row) => JSON.parse(row) as { from: number; class?: string })
-      .filter((row) => /^md-h\d$/.test(row.class ?? ""))
-      .sort((a, b) => a.from - b.from)
-      .map((row) => `${row.class}@${row.from}`);
-  assert.deepEqual(headings(state), [
-    `md-h1@${at("Two lines")}`,
-    `md-h1@${at("of title")}`,
-    `md-h2@${at("> Quoted")}`,
-  ]);
-  assert.ok(hidden(state).includes("\n====="), "the underline hides");
-  assert.ok(hidden(state).includes("\n> -----"), "a quoted one too");
-  state = update(state, { selection: { anchor: at("of title") } }, "text");
-  assert.ok(!hidden(state).includes("\n====="), "its text reveals it");
-  assert.ok(hidden(state).includes("\n> -----"));
-  state = update(state, { selection: { anchor: at("=====") } }, "underline");
-  assert.ok(!hidden(state).includes("\n====="), "so does its own line");
-  state = update(state, { selection: { anchor: at("Body.") } }, "after");
-  assert.ok(hidden(state).includes("\n====="), "the next line is away");
-  state = update(state, { selection: { anchor: at("-----") } }, "quoted");
-  assert.ok(!hidden(state).includes("\n> -----"));
-  state = replace(state, "=====", "", "remove the underline");
-  assert.deepEqual(headings(state), [`md-h2@${at("> Quoted") - 5}`]);
-  replace(state, "of title\n", "of title\n---", "underline it again");
+    decorationRows(state).filter((row) =>
+      /^md-h\d$/.test(JSON.parse(row).class ?? ""),
+    );
+  for (const prefix of ["", "> ", "- "]) {
+    const continuation = prefix === "- " ? "  " : prefix;
+    let state = create(
+      `${prefix}Two lines\n${continuation}of text\n${continuation}\n\nTail.`,
+    );
+    for (const marker of ["-", "--", "---", "=", "==", "====="]) {
+      state = update(
+        state,
+        {
+          changes: {
+            from: state.doc.line(3).from,
+            to: state.doc.line(3).to,
+            insert: continuation + marker,
+          },
+        },
+        `type ${marker} after ${prefix || "prose"}`,
+      );
+      assert.equal(headings(state).length, 0, "no underline-style heading");
+    }
+    state = update(
+      state,
+      {
+        changes: {
+          from: 0,
+          to: state.doc.length,
+          insert: "## Explicit heading\n\nTail.",
+        },
+      },
+      "use an explicit heading",
+    );
+    assert.equal(headings(state).length, 1, "# headings still render");
+  }
 });
 
 // The transaction a view dispatches when its focus changes.

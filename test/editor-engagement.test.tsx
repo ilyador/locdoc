@@ -162,38 +162,51 @@ test("a heading on the first line renders at open and focusing the editor reveal
   }
 });
 
-test("a setext heading shows its underline only while the selection is on the heading", () => {
-  const source = "Story\n=====\nA first beat.\n\nScene\n-----\nMore.";
+test("typing a dash below text does not make a heading or rewrite the source", () => {
+  const source = "Motivation questions\n";
   const doc = open(source);
-  const click = (text: string, offset = 0) =>
+  try {
     act(() =>
       doc.view.dispatch({
-        selection: { anchor: source.indexOf(text) + offset },
-        userEvent: "select.pointer",
+        changes: { from: source.length, insert: "-" },
+        selection: { anchor: source.length + 1 },
+        userEvent: "input.type",
       }),
     );
-  try {
-    assert.equal(doc.line(".cm-line.md-h1"), "Story", "= underlines a heading");
-    assert.equal(doc.line(".cm-line.md-h2"), "Scene", "- a smaller one");
-    assert.ok(!/[=-]{5}/.test(doc.shown()), "both underlines are hidden");
-    assert.equal(
-      doc.page.container.querySelectorAll(".md-rule").length,
-      0,
-      "an underline is no rule",
+    assert.equal(doc.line(".md-h2"), undefined);
+    assert.equal(doc.text.toString(), source + "-", "typing retains exact bytes");
+    assert.equal(doc.line(".cm-line"), "Motivation questions");
+    assert.ok(doc.shown().includes("-"), "the dash remains visible");
+    act(() =>
+      doc.view.dispatch({
+        changes: { from: source.length + 1, insert: " First question" },
+        userEvent: "input.type",
+      }),
     );
-    click("Story", 2);
-    assert.ok(doc.shown().includes("====="), "its text shows the underline");
-    assert.ok(!doc.shown().includes("-----"), "the other one stays hidden");
-    assert.equal(doc.line(".cm-line.md-h1"), "Story");
-    click("=====", 5);
-    assert.ok(doc.shown().includes("====="), "so does the underline's line");
-    click("Scene");
-    assert.ok(doc.shown().includes("-----"));
-    assert.ok(!doc.shown().includes("====="), "away, it hides again");
-    click("More.");
-    assert.ok(!/[=-]{5}/.test(doc.shown()), "the next line is away");
+    assert.ok(doc.page.container.querySelector(".md-list"), "a bullet still works");
   } finally {
     doc.close();
+  }
+});
+
+test("underline-style headings stay disabled when opening or reading Markdown", () => {
+  for (const marker of ["-", "--", "---", "=", "==", "====="]) {
+    const source = `Story\n${marker}\n\n## Explicit heading`;
+    const doc = open(source);
+    try {
+      assert.equal(doc.line(".md-h1"), undefined, "equals never underlines a title");
+      assert.equal(doc.line(".md-h2"), "Explicit heading", "only # creates the heading");
+      assert.equal(doc.line(".cm-line"), "Story");
+      assert.equal(doc.text.toString(), source);
+      assert.equal(
+        doc.page.container.querySelectorAll(".md-rule").length,
+        marker === "---" ? 1 : 0,
+        "three dashes still draw a divider",
+      );
+      if (marker !== "---") assert.ok(doc.shown().includes(marker));
+    } finally {
+      doc.close();
+    }
   }
 });
 

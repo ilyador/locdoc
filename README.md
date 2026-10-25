@@ -244,6 +244,8 @@ Drag the sidebar's right edge to resize it on desktop; its width is remembered l
 
 One live-preview editor styles Markdown and reveals syntax near the cursor. Markdown preview updates reuse unchanged parser blocks and mapped decorations, including offscreen media and tables. Structural changes refresh the affected blocks; partial background parsing retains offscreen layout until those blocks are parsed again. The footer's word count and reading time catch up half a second after typing pauses, and every two seconds during longer typing, so counting a long document never runs on each keystroke. Use the toolbar for checkboxes, tables, links, media and comments. Font, size, line height, page width and light/dark appearance are browser preferences. Open aA for live controls in a bottom sheet on mobile or a column to the left of the document on desktop. The document stays visible and editable while you adjust Font, Layout and Theme. Google Fonts can be searched and installed locally by the owner.
 
+Headings in the web editor start with `#` (up to six). A line of dashes or equals signs below text never turns it into a heading.
+
 Select text to comment, then open the small inline marker to read or reply. Comments also live in the raw Markdown:
 
 ```md

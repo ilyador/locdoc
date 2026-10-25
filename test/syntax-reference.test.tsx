@@ -239,21 +239,6 @@ const markdownChecks: Record<string, (source: string) => void> = {
         assert.ok(has(six.line(0), "md-h6"), "up to six #"),
       );
     }),
-  "Heading\n===": (source) => {
-    for (const [underlined, level] of [
-      [source, "md-h1"],
-      ["Heading\n---", "md-h2"],
-    ] as const)
-      rendered(`${underlined}\n\nText`, "markdown", (view) => {
-        assert.ok(has(view.line(0), level), `${underlined}: ${level}`);
-        assert.deepEqual(
-          view.texts(),
-          ["Heading", "", "Text"],
-          `${underlined}: the underline is hidden`,
-        );
-        assert.equal(view.all(".md-rule").length, 0, "--- is not a rule");
-      });
-  },
   "**bold**": (source) =>
     rendered(source, "markdown", (view) => {
       assert.equal(view.one(".md-strong")?.textContent, "bold");
@@ -969,11 +954,11 @@ test("an example shows every character to type, never a ligature", () => {
   const view = footer(paths.markdown);
   act(() => view.trigger.click());
   const code = Array.from(view.panel()!.querySelectorAll("dt code")).find(
-    (example) => example.textContent === "Heading\n===",
+    (example) => example.textContent === "~~deleted~~",
   )!;
   assert.equal(
     getComputedStyle(code).getPropertyValue("font-variant-ligatures"),
     "none",
-    "=== is three signs",
+    "~~ is two signs",
   );
 });
