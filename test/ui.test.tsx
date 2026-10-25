@@ -1115,7 +1115,9 @@ test("a tree listing older than a local change or a newer listing cannot replace
   try {
     await waitFor(() => assert.equal(listings.length, 1));
     await act(async () => listings.shift()!(tree("a.md")));
-    await waitFor(() => assert.equal(hook.result.current.entries[0]?.path, "a.md"));
+    await waitFor(() =>
+      assert.equal(hook.result.current.entries[0]?.path, "a.md"),
+    );
     // A listing starts, then a file action changes the tree before it answers.
     let stale;
     act(() => {
@@ -1667,7 +1669,7 @@ test("the app shell follows keyboard viewport changes and releases its listeners
   }
 });
 
-test("touch zoom is blocked while single-finger scrolling remains available", async () => {
+test("native selection and clipboard gestures remain available while pinch zoom is blocked", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport.ts");
   const stop = protectTouchViewport(document);
   const touch = (count: number) => {
@@ -1677,7 +1679,8 @@ test("touch zoom is blocked while single-finger scrolling remains available", as
     return event.defaultPrevented;
   };
   assert.equal(touch(1), false);
-  assert.equal(touch(2), true);
+  assert.equal(touch(2), false);
+  assert.equal(touch(3), false);
   const gesture = new window.Event("gesturestart", { cancelable: true });
   document.dispatchEvent(gesture);
   assert.equal(gesture.defaultPrevented, true);
@@ -3365,7 +3368,9 @@ async function openDisplayName(page: ReturnType<typeof render>, name: string) {
   await waitFor(() => assert.equal(profile().textContent, name));
   fireEvent.click(page.container.querySelector(".profile")!);
   const field = screen.getByLabelText("Your display name") as HTMLInputElement;
-  const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+  const save = screen.getByRole("button", {
+    name: "Save",
+  }) as HTMLButtonElement;
   return {
     profile,
     field,

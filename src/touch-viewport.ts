@@ -89,17 +89,12 @@ export function protectTouchViewport(target: Document) {
   viewport?.addEventListener("resize", fitViewport);
   viewport?.addEventListener("scroll", fitViewport);
   const stopGesture = (event: Event) => event.preventDefault();
-  const stopMultiTouch = (event: TouchEvent) => {
-    if (event.touches.length > 1) event.preventDefault();
-  };
   const stopWheelZoom = (event: WheelEvent) => {
     if (event.ctrlKey) event.preventDefault();
   };
   const options = { passive: false };
   target.addEventListener("gesturestart", stopGesture, options);
   target.addEventListener("gesturechange", stopGesture, options);
-  target.addEventListener("touchstart", stopMultiTouch, options);
-  target.addEventListener("touchmove", stopMultiTouch, options);
   target.addEventListener("wheel", stopWheelZoom, options);
   return () => {
     win?.removeEventListener("resize", fitViewport);
@@ -117,8 +112,6 @@ export function protectTouchViewport(target: Document) {
     else root.style.removeProperty("--app-viewport-top");
     target.removeEventListener("gesturestart", stopGesture);
     target.removeEventListener("gesturechange", stopGesture);
-    target.removeEventListener("touchstart", stopMultiTouch);
-    target.removeEventListener("touchmove", stopMultiTouch);
     target.removeEventListener("wheel", stopWheelZoom);
   };
 }

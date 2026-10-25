@@ -29,6 +29,7 @@ import {
 } from "./fountain";
 import { emphasisContentRange } from "./emphasis-range";
 import { directionSyntax } from "./text-direction";
+import { previewSelection } from "./editor-engagement";
 
 // Reuse the established delimiter parser, with Fountain's underscore semantics.
 // Prefixing each isolated line prevents Markdown block rules from reclassifying it.
@@ -69,24 +70,21 @@ function wrapper(kind: FountainKind) {
 }
 
 const focus = StateEffect.define<boolean>();
-const editingLine = (state: EditorState, focused: boolean) =>
-  focused &&
-  !state.readOnly &&
-  state.selection.ranges.length === 1 &&
-  state.selection.main.empty
-    ? state.doc.lineAt(state.selection.main.head).number - 1
+const editingLine = (state: EditorState, focused: boolean) => {
+  const ranges = previewSelection(state, focused);
+  return ranges.length === 1 && ranges[0].empty
+    ? state.doc.lineAt(ranges[0].head).number - 1
     : undefined;
+};
 // The lines whose markers show: those a selection touches, while the view
 // has focus and accepts edits.
 const revealedLines = (state: EditorState, focused: boolean) =>
-  state.readOnly || !focused
-    ? ""
-    : state.selection.ranges
-        .map(
-          (range) =>
-            `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
-        )
-        .join(",");
+  previewSelection(state, focused)
+    .map(
+      (range) =>
+        `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
+    )
+    .join(",");
 
 // The decorations and block wrappers of the script's lines at `indices`, or
 // of every line and the ink of its notes and omissions.
@@ -98,13 +96,10 @@ function decorate(
 ) {
   const marks: ReturnType<Decoration["range"]>[] = [];
   const blocks: ReturnType<BlockWrapper["range"]>[] = [];
-  const active =
-    state.readOnly || !focused
-      ? []
-      : state.selection.ranges.map((r) => ({
-          from: state.doc.lineAt(r.from).from,
-          to: state.doc.lineAt(r.to).to,
-        }));
+  const active = previewSelection(state, focused).map((r) => ({
+    from: state.doc.lineAt(r.from).from,
+    to: state.doc.lineAt(r.to).to,
+  }));
   // A line whose text shows in a record's line reveals its markers as
   // that one displayed line.
   const visibleLineStarts = shownLines(state).at;
@@ -234,8 +229,8 @@ function relayout(
   const lines = new Set(changed);
   if (revealed !== value.revealed)
     for (const [ranges, map] of [
-      [tr.startState.selection.ranges, tr.docChanged],
-      [state.selection.ranges, false],
+      [previewSelection(tr.startState, value.focused), tr.docChanged],
+      [previewSelection(state, focused), false],
     ] as const)
       for (const range of ranges) {
         const from = map ? tr.changes.mapPos(range.from, -1) : range.from;

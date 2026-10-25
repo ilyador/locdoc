@@ -1,6 +1,88 @@
 import { StateEffect } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { EditorView, ViewPlugin } from "@codemirror/view";
 import * as Y from "yjs";
+
+// Keep the caret clear of the keyboard using CodeMirror's own scrolling.
+// WebKit rounds scrollTop: once the caret is within one pixel of its target,
+// consume the request instead of retrying that fraction on every keystroke.
+const keyboardMargins = { top: 24, bottom: 24 };
+export const keyboardCaretScroll = [
+  ViewPlugin.define((view) => {
+    const pane = view.dom.closest<HTMLElement>(".writing-pane");
+    const win = view.dom.ownerDocument.defaultView;
+    if (!pane || !win) return {};
+    let height = pane.clientHeight;
+    let frame: number | undefined;
+    const resize = new ResizeObserver(() => {
+      const next = pane.clientHeight;
+      const shrank = next < height - 1;
+      height = next;
+      if (!shrank) return;
+      if (frame !== undefined) win.cancelAnimationFrame(frame);
+      // The keyboard resizes the pane after Safari's initial caret reveal.
+      // Ask the editor to reveal it again in the final, smaller viewport.
+      frame = win.requestAnimationFrame(() => {
+        frame = undefined;
+        if (
+          view.hasFocus &&
+          view.state.selection.main.empty &&
+          pane.ownerDocument.documentElement.hasAttribute("data-keyboard-open")
+        )
+          view.dispatch({
+            effects: EditorView.scrollIntoView(view.state.selection.main),
+          });
+      });
+    });
+    resize.observe(pane);
+    return {
+      destroy() {
+        resize.disconnect();
+        if (frame !== undefined) win.cancelAnimationFrame(frame);
+      },
+    };
+  }),
+  EditorView.scrollMargins.of((view) =>
+    view.dom.ownerDocument.documentElement.hasAttribute("data-keyboard-open")
+      ? keyboardMargins
+      : null,
+  ),
+  EditorView.scrollHandler.of((view, range, options) => {
+    const doc = view.dom.ownerDocument;
+    if (
+      !doc.documentElement.hasAttribute("data-keyboard-open") ||
+      !view.hasFocus ||
+      !range.empty ||
+      range.head !== view.state.selection.main.head ||
+      options.y !== "nearest" ||
+      options.x !== "nearest"
+    )
+      return false;
+    const pane = view.dom.closest<HTMLElement>(".writing-pane");
+    if (!pane) return false;
+    // Scroll handlers run during a view update, when coordsAtPos cannot be
+    // called. Its already-drawn DOM position is safe to measure here.
+    const { node, offset } = view.domAtPos(range.head, range.assoc || 1);
+    const native = doc.createRange();
+    native.setStart(node, offset);
+    native.collapse(true);
+    const caret = native.getBoundingClientRect();
+    if (!caret.height) return false;
+    const bounds = pane.getBoundingClientRect();
+    const margins = { top: 0, bottom: 0, left: 0, right: 0 };
+    for (const source of view.state.facet(EditorView.scrollMargins)) {
+      const margin = source(view);
+      if (margin)
+        for (const side of ["top", "bottom", "left", "right"] as const)
+          margins[side] = Math.max(margins[side], margin[side] || 0);
+    }
+    return (
+      caret.top >= bounds.top + margins.top + options.yMargin - 1 &&
+      caret.bottom <= bounds.bottom - margins.bottom - options.yMargin + 1 &&
+      caret.left >= bounds.left + margins.left + options.xMargin - 1 &&
+      caret.right <= bounds.right - margins.right - options.xMargin + 1
+    );
+  }),
+];
 
 // This is browser reading state, never document content or collaborative state.
 // Pixels are not a reading position: CodeMirror estimates the height of text it

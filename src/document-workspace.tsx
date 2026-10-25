@@ -257,8 +257,7 @@ export function DocumentWorkspace({
       }),
     );
   const openCreate = (kind: "file" | "folder") => files.startCreate(kind);
-  const prepareNavigation = () =>
-    session?.drafts.flush() || Promise.resolve();
+  const prepareNavigation = () => session?.drafts.flush() || Promise.resolve();
   // A document created from the sidebar opens ready for writing.
   useEffect(() => {
     if (!session || !doc || !files.takeEditorFocus(doc.id)) return;
@@ -322,7 +321,6 @@ export function DocumentWorkspace({
         onEdit={(command) => {
           setPanel(null);
           if (editor.current) command(editor.current);
-          requestAnimationFrame(() => editor.current?.focus());
         }}
         onLink={startLink}
         onUpload={() => {

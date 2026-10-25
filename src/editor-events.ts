@@ -10,7 +10,8 @@ export function linkEvents(open: (target: LinkTarget) => void) {
       rect: link.getBoundingClientRect(),
     });
   return EditorView.domEventHandlers({
-    mouseover(e) {
+    pointerover(e) {
+      if (e.pointerType !== "mouse") return false;
       const link = (e.target as Element).closest<HTMLAnchorElement>(
         "a[data-link-url]",
       );
@@ -22,17 +23,12 @@ export function linkEvents(open: (target: LinkTarget) => void) {
       preview(link);
       return false;
     },
-    mousedown(e) {
+    click(e) {
       const link = (e.target as Element).closest<HTMLAnchorElement>(
         "a[data-link-url]",
       );
       if (link) {
         preview(link);
-      }
-      return false;
-    },
-    click(e) {
-      if ((e.target as Element).closest("a[data-link-url]")) {
         e.preventDefault();
         return true;
       }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Table, X } from "@phosphor-icons/react";
+import { EditorCommandButton } from "./editor-command-button";
 
 export function TablePicker({
   onInsert,
@@ -49,18 +50,18 @@ export function TablePicker({
         if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
       }}
     >
-      <button
+      <EditorCommandButton
         className={showLabel ? "menu-action" : "icon-button"}
         title="Insert table"
         aria-label="Insert table"
         aria-expanded={open}
         aria-controls="table-picker-panel"
         ref={trigger}
-        onClick={() => setOpen((value) => !value)}
+        run={() => setOpen((value) => !value)}
       >
         <Table size={19} />
         {showLabel && <span>Insert table</span>}
-      </button>
+      </EditorCommandButton>
       {open && (
         <div className="table-picker-panel" id="table-picker-panel">
           <div className="table-picker-heading">
@@ -107,7 +108,7 @@ export function TablePicker({
             {Array.from({ length: 6 }, (_, row) => (
               <div role="row" key={row}>
                 {Array.from({ length: 8 }, (_, column) => (
-                  <button
+                  <EditorCommandButton
                     key={column}
                     type="button"
                     role="gridcell"
@@ -127,7 +128,7 @@ export function TablePicker({
                     onFocus={() =>
                       setSize({ rows: row + 1, columns: column + 1 })
                     }
-                    onClick={() => insert(row + 1, column + 1)}
+                    run={() => insert(row + 1, column + 1)}
                   />
                 ))}
               </div>

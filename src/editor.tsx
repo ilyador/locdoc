@@ -40,7 +40,7 @@ import {
   guardedUndoKeymap,
   readOnlyInputGuard,
 } from "./editor-permissions";
-import { rememberEditorScroll } from "./editor-scroll";
+import { keyboardCaretScroll, rememberEditorScroll } from "./editor-scroll";
 import { findExtension, findKeymap } from "./find-panel";
 import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
 import { toggleInlineFormat } from "./inline-format";
@@ -266,6 +266,7 @@ export const MarkdownEditor = forwardRef<
           lineBackspaceIntent(),
           readOnlyInputGuard,
           EditorView.lineWrapping,
+          keyboardCaretScroll,
           // These are prose editors: override CodeMirror's code-editing defaults.
           EditorView.contentAttributes.of({
             spellcheck: "true",

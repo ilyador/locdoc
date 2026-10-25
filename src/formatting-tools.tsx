@@ -15,6 +15,7 @@ import {
 import type { DocumentFormat } from "./document-format";
 import type { EditorHandle } from "./editor-types";
 import { TablePicker } from "./table-picker";
+import { EditorCommandButton } from "./editor-command-button";
 
 export function FormattingTools({
   format,
@@ -123,17 +124,17 @@ export function FormattingTools({
       {commands
         .filter(({ className }) => !expanded || className !== "toolbar-primary")
         .map(({ label, icon: Glyph, className, run, disabled }) => (
-          <button
+          <EditorCommandButton
             key={label}
             className={`${expanded ? "menu-action" : "icon-button"} ${className || ""}`}
             aria-label={label}
             title={label}
             disabled={disabled}
-            onClick={run}
+            run={run}
           >
             <Glyph size={18} />
             {expanded && <span>{label.replace(/ \(.*\)$/, "")}</span>}
-          </button>
+          </EditorCommandButton>
         ))}
       {formatting && !fountain && (
         <div className="toolbar-media formatting-table">
@@ -146,15 +147,15 @@ export function FormattingTools({
         </div>
       )}
       {!expanded && (
-        <button
+        <EditorCommandButton
           className="icon-button toolbar-comment"
           aria-label="Add comment (Ctrl Alt M)"
           title="Add comment (Ctrl Alt M)"
           data-comment-control=""
-          onClick={onComment}
+          run={onComment}
         >
           <ChatCircle size={18} />
-        </button>
+        </EditorCommandButton>
       )}
     </div>
   );

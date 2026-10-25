@@ -21,7 +21,7 @@ import {
   sourceCommentRanges,
   visibleTextRanges,
 } from "./editor-comments";
-import { selectionReveals, userEngagement } from "./editor-engagement";
+import { previewSelection, userEngagement } from "./editor-engagement";
 import { resolveDocumentLink } from "./document-links";
 import { documentFormat } from "./document-format";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
@@ -76,7 +76,7 @@ export function livePreview(
     const images: ReturnType<Decoration["range"]>[] = [];
     // Read-only views, and editors the user has not engaged with yet, reveal
     // no source: every line renders as if no selection touched it.
-    const selection = selectionReveals(state) ? state.selection.ranges : [];
+    const selection = previewSelection(state);
     const active = selection.map((r) => ({
       from: state.doc.lineAt(r.from).from,
       to: state.doc.lineAt(r.to).to,
@@ -405,13 +405,9 @@ export function livePreview(
       if (tr.reconfigured) return create(tr.state);
       if (
         !tr.docChanged &&
-        !(
-          (tr.selection ||
-            selectionReveals(tr.state) !== selectionReveals(tr.startState)) &&
-          (previewLines(tr.state) !== previewLines(tr.startState) ||
-            touchedImages(tr.state, value.images) !==
-              touchedImages(tr.startState, value.images))
-        ) &&
+        previewLines(tr.state) === previewLines(tr.startState) &&
+        touchedImages(tr.state, value.images) ===
+          touchedImages(tr.startState, value.images) &&
         syntaxTree(tr.state) === syntaxTree(tr.startState)
       )
         return value;
@@ -471,9 +467,8 @@ export function livePreview(
 const inlineImage = Decoration.mark({});
 
 function touchedImages(state: EditorState, images: DecorationSet) {
-  if (!selectionReveals(state)) return "";
   const touched: number[] = [];
-  for (const range of state.selection.ranges)
+  for (const range of previewSelection(state))
     images.between(range.from, range.to, (from) => {
       touched.push(from);
     });
@@ -481,14 +476,12 @@ function touchedImages(state: EditorState, images: DecorationSet) {
 }
 
 function previewLines(state: EditorState) {
-  return selectionReveals(state)
-    ? state.selection.ranges
-        .map(
-          (range) =>
-            `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
-        )
-        .join(",")
-    : "";
+  return previewSelection(state)
+    .map(
+      (range) =>
+        `${state.doc.lineAt(range.from).number}:${state.doc.lineAt(range.to).number}`,
+    )
+    .join(",");
 }
 
 // Sidebar metadata refreshes must not replace the parser and discard its tree.

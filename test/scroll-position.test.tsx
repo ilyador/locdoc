@@ -2,9 +2,12 @@ import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import * as Y from "yjs";
-import { EditorState, StateEffect } from "@codemirror/state";
+import { EditorSelection, EditorState, StateEffect } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { rememberEditorScroll } from "../src/editor-scroll";
+import {
+  keyboardCaretScroll,
+  rememberEditorScroll,
+} from "../src/editor-scroll";
 
 const LINE = 20;
 const PADDING = 40;
@@ -52,6 +55,66 @@ beforeEach(() => {
 afterEach(() => {
   for (const stop of stops) stop();
   dom.window.close();
+});
+
+test("keyboard scrolling accepts a fractional edge instead of correcting every key", () => {
+  document.documentElement.setAttribute("data-keyboard-open", "");
+  const pane = document.createElement("div");
+  pane.className = "writing-pane";
+  document.body.appendChild(pane);
+  const editor = pane.appendChild(document.createElement("div"));
+  const text = editor.appendChild(document.createTextNode("text"));
+  pane.getBoundingClientRect = () => new dom.window.DOMRect(0, 100, 390, 400);
+  let bottom = 471.8; // Default 5px + keyboard 24px, rounded down by WebKit.
+  dom.window.Range.prototype.getBoundingClientRect = () =>
+    new dom.window.DOMRect(100, bottom - 20, 0, 20);
+  const state = EditorState.create({
+    doc: "text",
+    selection: { anchor: 1 },
+    extensions: keyboardCaretScroll,
+  });
+  const view = {
+    dom: editor,
+    state,
+    hasFocus: true,
+    domAtPos: () => ({ node: text, offset: 1 }),
+  } as unknown as EditorView;
+  const [handler] = state.facet(EditorView.scrollHandler);
+  const options = {
+    x: "nearest",
+    y: "nearest",
+    xMargin: 5,
+    yMargin: 5,
+  } as const;
+  for (let key = 0; key < 40; key++) {
+    assert.equal(handler(view, EditorSelection.cursor(1), options), true);
+  }
+  bottom += 20;
+  assert.equal(
+    handler(view, EditorSelection.cursor(1), options),
+    false,
+    "a new visual line still uses CodeMirror's normal scrolling",
+  );
+  bottom = 471.8;
+  assert.equal(
+    handler(view, EditorSelection.cursor(3), options),
+    false,
+    "an explicit target away from the caret keeps its scroll request",
+  );
+  assert.equal(
+    handler(view, EditorSelection.cursor(1), { ...options, y: "start" }),
+    false,
+    "reading-position restoration owns its own scroll request",
+  );
+  assert.equal(
+    handler(view, EditorSelection.range(0, 1), options),
+    false,
+    "selected ranges keep CodeMirror's normal scrolling",
+  );
+  document.documentElement.removeAttribute("data-keyboard-open");
+  assert.equal(handler(view, EditorSelection.cursor(1), options), false);
+  const [margins] = state.facet(EditorView.scrollMargins);
+  assert.equal(margins(view), null, "desktop scrolling remains unchanged");
 });
 
 function lines(count = 100) {
@@ -342,7 +405,11 @@ test("restoration adjusts only the document pane and then waits for layout chang
     "alignment must not recurse in a measure pass",
   );
   assert.equal(animationFrames.size, 0);
-  assert.equal(page.scrollEffects, 0, "Never invoke ancestor/viewport scrolling");
+  assert.equal(
+    page.scrollEffects,
+    0,
+    "Never invoke ancestor/viewport scrolling",
+  );
   assert.equal(
     resizes.size,
     1,
@@ -401,7 +468,11 @@ test("repeated Markdown layout notifications do not scroll an already aligned pa
     for (const resize of resizes) resize();
     page.settle();
   }
-  assert.equal(page.scrollWrites, writes, "No repeated scroll-layer invalidation");
+  assert.equal(
+    page.scrollWrites,
+    writes,
+    "No repeated scroll-layer invalidation",
+  );
   assert.equal(page.scrollEffects, 0, "No native viewport scroll requests");
 });
 

@@ -5,6 +5,8 @@ import React from "react";
 import * as Y from "yjs";
 import { EditorView } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
+import { EditorState } from "@codemirror/state";
+import { keyboardCaretScroll } from "../src/editor-scroll";
 
 let dom: JSDOM;
 let render: typeof import("@testing-library/react").render;
@@ -64,7 +66,7 @@ after(() => dom.window.close());
 
 // A document as Locdoc opens it: the editor has no focus, and its caret sits
 // at the start of the document, where nobody placed it.
-function open(source: string, path = "Writing/Plot.md") {
+function open(source: string, path = "Writing/Plot.md", inPane = false) {
   const ydoc = new Y.Doc();
   const text = ydoc.getText("content");
   text.insert(0, source);
@@ -78,7 +80,15 @@ function open(source: string, path = "Writing/Plot.md") {
     onComment() {},
     onUpload() {},
   };
-  const page = render(<MarkdownEditor {...props} />);
+  const page = render(
+    inPane ? (
+      <div className="writing-pane">
+        <MarkdownEditor {...props} />
+      </div>
+    ) : (
+      <MarkdownEditor {...props} />
+    ),
+  );
   const content = page.container.querySelector<HTMLElement>(".cm-content")!;
   const view = EditorView.findFromDOM(content)!;
   assert.equal(view.state.selection.main.head, 0);
@@ -104,6 +114,353 @@ function open(source: string, path = "Writing/Plot.md") {
 const plot =
   "![Reference image](_attachments/Plot-reference.jpg)\n## Story\n- A first beat.\n- A second beat.";
 const imageSource = "![Reference image](_attachments/Plot-reference.jpg)";
+
+test("all document formats use the keyboard's pane-only caret scrolling", () => {
+  const [handler] = EditorState.create({
+    extensions: keyboardCaretScroll,
+  }).facet(EditorView.scrollHandler);
+  for (const path of ["Page.md", "Scene.fountain", "Notes.txt"]) {
+    const doc = open("Writing", path);
+    try {
+      assert.ok(
+        doc.view.state.facet(EditorView.scrollHandler).includes(handler),
+        "the editor must install keyboard caret scrolling",
+      );
+    } finally {
+      doc.close();
+    }
+  }
+});
+
+test("touch selection preserves Markdown layout and native callouts until typing resumes", () => {
+  const source =
+    "# First heading\n\nA **bold passage** to copy.\n\n## Next heading";
+  const doc = open(source);
+  try {
+    const content = doc.view.contentDOM;
+    const heading = content.querySelector(".md-h1");
+    const bold = content.querySelector(".md-strong");
+    const touch = new window.Event("pointerdown", { bubbles: true });
+    Object.defineProperty(touch, "pointerType", { value: "touch" });
+    act(() => content.dispatchEvent(touch));
+    act(() => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: {
+          anchor: source.indexOf("bold"),
+          head: source.indexOf("** to"),
+        },
+        userEvent: "select.pointer",
+      });
+    });
+    assert.equal(doc.line(".md-h1"), "First heading");
+    assert.ok(
+      content.querySelector(".md-h1") === heading,
+      "heading keeps its DOM",
+    );
+    assert.ok(
+      content.querySelector(".md-strong") === bold,
+      "selected text keeps its DOM",
+    );
+    const callout = new window.Event("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+    });
+    content.dispatchEvent(callout);
+    assert.equal(callout.defaultPrevented, false);
+    assert.equal(doc.text.toString(), source);
+    act(() =>
+      doc.view.dispatch({
+        selection: { anchor: source.indexOf("Next") },
+        userEvent: "select.pointer",
+      }),
+    );
+    assert.equal(
+      doc.line(".md-h2"),
+      "Next heading",
+      "moving a native caret reveals no markers",
+    );
+    act(() =>
+      doc.view.dispatch({
+        changes: { from: source.indexOf("Next"), insert: "A " },
+        selection: { anchor: source.indexOf("Next") + 2 },
+        userEvent: "input.type",
+      }),
+    );
+    assert.equal(
+      doc.line(".md-h2"),
+      "## A Next heading",
+      "an actual edit resumes live source",
+    );
+  } finally {
+    doc.close();
+  }
+});
+
+test("touch selection preserves Fountain markers and word nodes through focus changes", () => {
+  const source = ".INT. ROOM - DAY\n\n@MAYA\nA **bold passage** to copy.";
+  const doc = open(source, "Scene.fountain");
+  try {
+    const content = doc.view.contentDOM;
+    const shown = doc.shown();
+    const bold = content.querySelector(".md-strong");
+    const touch = new window.Event("pointerdown", { bubbles: true });
+    Object.defineProperty(touch, "pointerType", { value: "touch" });
+    act(() => content.dispatchEvent(touch));
+    act(() => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: {
+          anchor: source.indexOf("bold"),
+          head: source.indexOf("** to"),
+        },
+        userEvent: "select.pointer",
+      });
+    });
+    assert.equal(doc.shown(), shown);
+    assert.ok(
+      content.querySelector(".md-strong") === bold,
+      "word DOM survives native selection",
+    );
+    act(() => content.blur());
+    assert.equal(
+      doc.shown(),
+      shown,
+      "blur does not reshape a held native selection",
+    );
+    assert.equal(doc.text.toString(), source);
+  } finally {
+    doc.close();
+  }
+});
+
+test("the first formatting-button tap preserves the selected passage for linking", async () => {
+  const { FormattingTools } = await import("../src/formatting-tools");
+  const doc = open("A selected passage.");
+  const calls: string[] = [];
+  const tools = render(
+    <FormattingTools
+      format="markdown"
+      editable
+      busy={false}
+      onEdit={() => {}}
+      onUpload={() => {}}
+      onComment={() => {}}
+      onLink={() => {
+        const { from, to } = doc.view.state.selection.main;
+        calls.push(doc.view.state.sliceDoc(from, to));
+      }}
+    />,
+  );
+  try {
+    act(() => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: { anchor: 2, head: 10 },
+        userEvent: "select.pointer",
+      });
+    });
+    const button = tools.container.querySelector<HTMLButtonElement>(
+      '[aria-label^="Insert link"]',
+    )!;
+    const down = new window.MouseEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+    });
+    act(() => button.dispatchEvent(down));
+    assert.equal(
+      down.defaultPrevented,
+      true,
+      "the toolbar must not take native focus",
+    );
+    assert.ok(
+      document.activeElement === doc.view.contentDOM,
+      "editor retains focus",
+    );
+    act(() => button.click());
+    assert.deepEqual(calls, ["selected"]);
+    assert.equal(doc.text.toString(), "A selected passage.");
+  } finally {
+    tools.unmount();
+    doc.close();
+  }
+});
+
+test("editor commands activate once on release, support keyboard clicks, and cancel a drag", async () => {
+  const { EditorCommandButton } = await import("../src/editor-command-button");
+  const original = Object.getOwnPropertyDescriptor(window, "PointerEvent");
+  Object.defineProperty(window, "PointerEvent", {
+    value: window.MouseEvent,
+    configurable: true,
+  });
+  let calls = 0;
+  const props = {
+    run: () => {
+      calls++;
+    },
+    children: "Command",
+  };
+  const page = render(<EditorCommandButton {...props} />);
+  const button = page.container.querySelector("button")!;
+  button.getBoundingClientRect = () => new DOMRect(0, 0, 32, 32);
+  const pointer = (type: string) => {
+    const event = new window.MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+      relatedTarget: document.body,
+    });
+    Object.defineProperty(event, "pointerId", { value: 7 });
+    act(() => button.dispatchEvent(event));
+    return event;
+  };
+  try {
+    assert.equal(pointer("pointerdown").defaultPrevented, true);
+    assert.equal(calls, 0);
+    pointer("pointerup");
+    assert.equal(calls, 1, "release works without a compatibility click");
+    act(() =>
+      button.dispatchEvent(
+        new window.MouseEvent("click", { bubbles: true, detail: 1 }),
+      ),
+    );
+    assert.equal(calls, 1, "the later pointer click cannot run twice");
+    act(() => button.click());
+    assert.equal(calls, 2, "keyboard and assistive activation still work");
+    pointer("pointerdown");
+    pointer("pointerout");
+    pointer("pointerup");
+    assert.equal(calls, 2, "dragging off the button cancels the press");
+    pointer("pointerdown");
+    pointer("pointercancel");
+    pointer("pointerup");
+    assert.equal(calls, 2);
+    pointer("pointerdown");
+    page.rerender(<EditorCommandButton {...props} disabled />);
+    pointer("pointerup");
+    assert.equal(calls, 2, "disabling a pending command cancels it");
+  } finally {
+    page.unmount();
+    if (original) Object.defineProperty(window, "PointerEvent", original);
+    else Reflect.deleteProperty(window, "PointerEvent");
+  }
+});
+
+test("touch links open on click, without a hover or a first tap to arm them", () => {
+  const doc = open("[A page](https://example.test/)");
+  const opened: string[] = [];
+  doc.page.rerender(
+    <MarkdownEditor
+      {...doc.props}
+      onLink={(target) => opened.push(target.url)}
+    />,
+  );
+  try {
+    const link = doc.view.contentDOM.querySelector("a[data-link-url]")!;
+    const over = new window.Event("pointerover", { bubbles: true });
+    Object.defineProperty(over, "pointerType", { value: "touch" });
+    act(() => link.dispatchEvent(over));
+    assert.equal(
+      opened.length,
+      0,
+      "a touch must not be treated as mouse hover",
+    );
+    const click = new window.MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => link.dispatchEvent(click));
+    assert.equal(click.defaultPrevented, true);
+    assert.deepEqual(opened, ["https://example.test/"]);
+  } finally {
+    doc.close();
+  }
+});
+
+test("keyboard resizing reveals the current caret once and leaves native ranges alone", async (t) => {
+  const originalObserver = globalThis.ResizeObserver;
+  const clientHeight = Object.getOwnPropertyDescriptor(
+    window.Element.prototype,
+    "clientHeight",
+  )!;
+  let height = 500;
+  const observers: {
+    target?: Element;
+    callback: () => void;
+    disconnected: boolean;
+  }[] = [];
+  Object.defineProperty(window.Element.prototype, "clientHeight", {
+    configurable: true,
+    get() {
+      return this.classList.contains("writing-pane") ? height : 0;
+    },
+  });
+  globalThis.ResizeObserver = class {
+    item: (typeof observers)[number];
+    constructor(callback: () => void) {
+      this.item = { callback, disconnected: false };
+      observers.push(this.item);
+    }
+    observe(target: Element) {
+      this.item.target = target;
+    }
+    unobserve() {}
+    disconnect() {
+      this.item.disconnected = true;
+    }
+  } as any;
+  let doc: ReturnType<typeof open> | undefined;
+  try {
+    doc = open("A passage to edit.", "Page.md", true);
+    act(() => {
+      doc!.view.focus();
+      doc!.view.dispatch({ selection: { anchor: 5 } });
+    });
+    document.documentElement.setAttribute("data-keyboard-open", "");
+    const resize = observers.find((item) =>
+      item.target?.classList.contains("writing-pane"),
+    )!;
+    assert.ok(resize, "the editor observes its actual writing pane");
+    const originalDispatch = doc.view.dispatch;
+    const dispatch = t.mock.method(doc.view, "dispatch");
+    const requests = () =>
+      dispatch.mock.calls.flatMap((call) => {
+        const spec = call.arguments[0] as any;
+        return spec?.effects?.value?.range
+          ? [spec.effects.value.range.head]
+          : [];
+      });
+    height = 300;
+    resize.callback();
+    height = 280;
+    resize.callback();
+    await waitFor(() => assert.deepEqual(requests(), [5]));
+    act(() => originalDispatch({ selection: { anchor: 2, head: 8 } }));
+    height = 260;
+    resize.callback();
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    assert.equal(
+      requests().length,
+      1,
+      "native text selection must not be scrolled by the app",
+    );
+    doc.close();
+    doc = undefined;
+    assert.equal(resize.disconnected, true);
+  } finally {
+    doc?.close();
+    document.documentElement.removeAttribute("data-keyboard-open");
+    globalThis.ResizeObserver = originalObserver;
+    Object.defineProperty(
+      window.Element.prototype,
+      "clientHeight",
+      clientHeight,
+    );
+  }
+});
 
 test("an image on the first line renders at open and shows its source once clicked", () => {
   const doc = open(plot);
@@ -174,7 +531,11 @@ test("typing a dash below text does not make a heading or rewrite the source", (
       }),
     );
     assert.equal(doc.line(".md-h2"), undefined);
-    assert.equal(doc.text.toString(), source + "-", "typing retains exact bytes");
+    assert.equal(
+      doc.text.toString(),
+      source + "-",
+      "typing retains exact bytes",
+    );
     assert.equal(doc.line(".cm-line"), "Motivation questions");
     assert.ok(doc.shown().includes("-"), "the dash remains visible");
     act(() =>
@@ -183,7 +544,10 @@ test("typing a dash below text does not make a heading or rewrite the source", (
         userEvent: "input.type",
       }),
     );
-    assert.ok(doc.page.container.querySelector(".md-list"), "a bullet still works");
+    assert.ok(
+      doc.page.container.querySelector(".md-list"),
+      "a bullet still works",
+    );
   } finally {
     doc.close();
   }
@@ -194,8 +558,16 @@ test("underline-style headings stay disabled when opening or reading Markdown", 
     const source = `Story\n${marker}\n\n## Explicit heading`;
     const doc = open(source);
     try {
-      assert.equal(doc.line(".md-h1"), undefined, "equals never underlines a title");
-      assert.equal(doc.line(".md-h2"), "Explicit heading", "only # creates the heading");
+      assert.equal(
+        doc.line(".md-h1"),
+        undefined,
+        "equals never underlines a title",
+      );
+      assert.equal(
+        doc.line(".md-h2"),
+        "Explicit heading",
+        "only # creates the heading",
+      );
       assert.equal(doc.line(".cm-line"), "Story");
       assert.equal(doc.text.toString(), source);
       assert.equal(
