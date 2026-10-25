@@ -63,7 +63,10 @@ before(async () => {
   ({ DocumentSidebar } = await import("../src/document-sidebar.tsx"));
   ({ useFileActions } = await import("../src/file-actions.ts"));
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  document.documentElement.removeAttribute("data-keyboard-open");
+});
 after(() => window.close());
 
 const entries = [
@@ -114,6 +117,8 @@ function Sidebar({ view }: { view: "date" | "folders" }) {
         fileActions={files}
         prepare={async () => {}}
       />
+      <button className="new-doc">New document</button>
+      <div className="sidebar-bottom">Workspace information</div>
     </aside>
   );
 }
@@ -162,6 +167,24 @@ test("on touch and narrow layouts a file title keeps the first line to itself, w
   const folder = rowStyles("folders", "Notes");
   assert.equal(folder.row.display, "flex");
   assert.equal(folder.actions.opacity, "1");
+});
+
+test("the keyboard gives the sidebar's footer space to its scrolling files", () => {
+  style.textContent = touch;
+  const page = render(<Sidebar view="folders" />);
+  const list = page.container.querySelector<HTMLElement>(".file-tree")!;
+  const footer = page.container.querySelector<HTMLElement>(".sidebar-bottom")!;
+  const create = page.container.querySelector<HTMLElement>(".new-doc")!;
+  assert.notEqual(getComputedStyle(footer).display, "none");
+  assert.notEqual(getComputedStyle(create).display, "none");
+  document.documentElement.setAttribute("data-keyboard-open", "");
+  assert.equal(getComputedStyle(footer).display, "none");
+  assert.equal(getComputedStyle(create).display, "none");
+  assert.equal(getComputedStyle(list).display, "flex");
+  assert.equal(getComputedStyle(list).overflowY, "auto");
+  document.documentElement.removeAttribute("data-keyboard-open");
+  assert.notEqual(getComputedStyle(footer).display, "none", "closing restores the footer");
+  assert.notEqual(getComputedStyle(create).display, "none");
 });
 
 test("the list keeps its scroll offset when an edited document moves to the top of By date", () => {

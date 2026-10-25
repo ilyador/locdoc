@@ -44,7 +44,8 @@ function picks(path: string) {
 
 // Rows a chunk holds are kept as the elements they are: a new document's or
 // a rename's name field, which holds the caret and grows with its message,
-// and a dragged row, whose element the drag started from.
+// a dragged row, whose element the drag started from, and a menu's opener,
+// whose rows stay painted while focus is in the menu outside the tree.
 export const NEW_ROW = "\0new";
 
 export function treeChunks(

@@ -78,14 +78,16 @@ export function ContextMenu({
   useLayoutEffect(() => {
     const element = menu.current;
     if (!element) return;
-    const box = element.getBoundingClientRect();
+    // The entrance scales the painted box; positioning uses its full size.
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
     const margin = 8;
-    let left = at.align === "end" ? at.x - box.width : at.x;
+    let left = at.align === "end" ? at.x - width : at.x;
     let top = at.y;
-    if (left + box.width > window.innerWidth - margin)
-      left = window.innerWidth - margin - box.width;
-    if (top + box.height > window.innerHeight - margin)
-      top = Math.max(margin, at.y - box.height);
+    if (left + width > window.innerWidth - margin)
+      left = window.innerWidth - margin - width;
+    if (top + height > window.innerHeight - margin)
+      top = Math.max(margin, at.y - height);
     setPosition({ left: Math.max(margin, left), top: Math.max(margin, top) });
   }, [at.x, at.y, at.align, stack.length]);
   useLayoutEffect(() => {

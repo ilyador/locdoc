@@ -351,7 +351,8 @@ export function FileTree({
   // A focused row that moves to another chunk mounts again; it takes the
   // focus back as it does.
   const refocus = useRef<string | null>(null);
-  // The keys of chunks holding a name field or a dragged row.
+  // Chunks holding a field, a dragged row or a menu's opener keep their
+  // layout and elements until that interaction ends.
   const kept = useRef(new Map<string, string>()).current;
   const entryRows = rows.filter(
     (row): row is Extract<TreeRow, { type: "entry" }> => row.type === "entry",
@@ -936,6 +937,7 @@ export function FileTree({
     treeChunks(rows, view, [
       files?.edit?.mode === "rename" ? files.edit.path : null,
       dragging,
+      menu?.path,
     ]),
     kept,
   );

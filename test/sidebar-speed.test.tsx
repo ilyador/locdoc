@@ -653,6 +653,31 @@ test("a focused row that moves into another chunk keeps the focus", () => {
   assert.ok(document.activeElement === moved, "and it has the focus");
 });
 
+test("a folder menu keeps its opener rendered while a listing changes around it", () => {
+  const entries = workspace(300);
+  const page = render(<Sidebar entries={entries} view="folders" />);
+  const row = (path: string) =>
+    [...page.container.querySelectorAll<HTMLElement>('[role="treeitem"]')].find(
+      (element) => element.dataset.path === path,
+    )!;
+  const path = "Folder 4";
+  const opener = row(path);
+  const chunk = opener.closest(".tree-chunk")!;
+  const other = [...chunk.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+    .find((element) => element.dataset.path !== path)!.dataset.path;
+  fireEvent.click(opener.querySelector(".tree-more"));
+  assert.ok(document.querySelector('[role="menu"]'), "folder actions open");
+  assert.ok(chunk.classList.contains("live"), "the menu's rows stay painted");
+  page.rerender(
+    <Sidebar entries={entries.filter((entry) => entry.path !== other)} view="folders" />,
+  );
+  assert.ok(row(path) === opener, "polling keeps the menu's original row");
+  assert.ok(opener.closest(".tree-chunk") === chunk, "its layout is retained");
+  fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+  assert.equal(document.querySelector('[role="menu"]'), null);
+  assert.equal((document.activeElement as HTMLElement).dataset.path, path);
+});
+
 test("a dragged row stays the element the drag started from while listings change around it", () => {
   const entries = workspace(300);
   const page = render(<Sidebar entries={entries} view="folders" />);

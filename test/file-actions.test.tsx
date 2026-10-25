@@ -195,6 +195,39 @@ test("the folder tree is an ARIA tree with roving focus, arrow keys, Enter and t
   assert.equal(row("Notes").getAttribute("aria-expanded"), "true");
 });
 
+test("menu positioning uses the full layout size during its entrance animation", async () => {
+  const { ContextMenu } = await import("../src/context-menu");
+  const proto = window.HTMLElement.prototype;
+  const width = Object.getOwnPropertyDescriptor(proto, "offsetWidth")!;
+  const height = Object.getOwnPropertyDescriptor(proto, "offsetHeight")!;
+  const bounds = proto.getBoundingClientRect;
+  Object.defineProperty(proto, "offsetWidth", {
+    configurable: true,
+    get() { return this.classList.contains("context-menu") ? 220 : width.get!.call(this); },
+  });
+  Object.defineProperty(proto, "offsetHeight", {
+    configurable: true,
+    get() { return this.classList.contains("context-menu") ? 400 : height.get!.call(this); },
+  });
+  proto.getBoundingClientRect = function () {
+    return this.classList.contains("context-menu")
+      ? new window.DOMRect(0, 0, 110, 200)
+      : bounds.call(this);
+  };
+  try {
+    render(<ContextMenu label="Actions" items={[{ label: "Rename" }]}
+      at={{ x: window.innerWidth - 8, y: window.innerHeight - 8, align: "end" }}
+      focusFirst={false} onClose={() => {}} />);
+    const menu = screen.getByRole("menu");
+    assert.equal(menu.style.left, `${window.innerWidth - 8 - 220}px`);
+    assert.equal(menu.style.top, `${window.innerHeight - 8 - 400}px`);
+  } finally {
+    proto.getBoundingClientRect = bounds;
+    Object.defineProperty(proto, "offsetWidth", width);
+    Object.defineProperty(proto, "offsetHeight", height);
+  }
+});
+
 test("Shift+F10, the menu key and the row button open one menu that returns focus", async () => {
   await open(workspaceFiles, { expanded: ["Notes"] });
   row("Notes/Plan.md").focus();

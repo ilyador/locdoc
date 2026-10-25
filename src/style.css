@@ -633,6 +633,12 @@ button:hover {
 :root[data-keyboard-open] .statusbar {
   display: none;
 }
+/* The phone keyboard leaves little height below the sidebar's search and
+   tabs. Keep that space for its scrollable files and the focused name field. */
+:root[data-keyboard-open] .sidebar > .new-doc,
+:root[data-keyboard-open] .sidebar-bottom {
+  display: none;
+}
 .dialog.name-dialog {
   width: min(400px, calc(100vw - 28px));
 }
