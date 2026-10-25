@@ -41,6 +41,8 @@ npm run owner
 
 This opens your browser as the owner using a one-use ticket. Your API key stays in `.locdoc/owner.key` on this computer. If the browser cannot open automatically, select **Open workspace** and enter the key locally.
 
+On another device, open your Locdoc HTTPS address, select **Open workspace** and enter the same owner key. A shared document has an **Open workspace** button in its header (a key icon on smaller screens). If it asks for a guest name first, select **Owner login** to open your workspace instead. Each browser remembers its own owner session.
+
 By default, documents live in `./docs` and application state in `./.locdoc`. Both are created automatically and excluded from Git. The running server is one Rust process; Node is used to build the interface and open owner access.
 
 ### Use an existing folder

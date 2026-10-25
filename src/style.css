@@ -3097,10 +3097,12 @@ button:hover {
   .presence {
     display: none;
   }
-  .comments-toggle span {
+  .comments-toggle span,
+  .owner-login span {
     display: none;
   }
-  .comments-toggle {
+  .comments-toggle,
+  .owner-login {
     padding: 0 8px;
     width: 40px;
   }

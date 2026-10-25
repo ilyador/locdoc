@@ -44,6 +44,9 @@ export function NamePrompt({ onChoose }: { onChoose: (name: string) => void }) {
         />
         <p className="field-help">Shown beside your cursor and comments.</p>
         <div className="dialog-actions">
+          <a className="text-button" href="/">
+            Owner login
+          </a>
           <button className="button primary" disabled={!safeName}>
             Continue
           </button>

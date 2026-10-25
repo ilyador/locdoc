@@ -1050,6 +1050,56 @@ test("opening the root restores the selected document URL without adding a histo
   }
 });
 
+test("a signed-out browser with a remembered document can open owner login instead of waiting for the document", async () => {
+  const fetchBefore = globalThis.fetch;
+  const previousUrl = location.href;
+  const remembered = localStorage.getItem("locdoc.document");
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const path = String(input);
+    calls.push(path);
+    return response(
+      path === "/api/config"
+        ? { owner: false, root: "", guest: "test", publicUrl: location.origin }
+        : { fonts: [] },
+    );
+  };
+  function SignedOut() {
+    return <WorkspaceView workspace={useWorkspace()} />;
+  }
+  history.replaceState(null, "", "/");
+  localStorage.setItem("locdoc.document", "b");
+  try {
+    render(<SignedOut />);
+    const open = await screen.findByRole("button", { name: "Open workspace" });
+    assert.equal(
+      screen.queryByRole("status", { name: "Opening document" }),
+      null,
+    );
+    assert.equal(
+      calls.some((path) => path.startsWith("/api/docs/")),
+      false,
+    );
+    fireEvent.click(open);
+    assert.ok(screen.getByLabelText("Owner API key"));
+    assert.equal(
+      document.querySelector("dialog[open]")?.getAttribute("aria-labelledby"),
+      "panel-title",
+    );
+    assert.equal(
+      localStorage.getItem("locdoc.document"),
+      "b",
+      "login preserves the remembered document",
+    );
+  } finally {
+    cleanup();
+    globalThis.fetch = fetchBefore;
+    history.replaceState(null, "", previousUrl);
+    if (remembered) localStorage.setItem("locdoc.document", remembered);
+    else localStorage.removeItem("locdoc.document");
+  }
+});
+
 test("root URL restoration preserves an owner ticket until bootstrap redeems it", async () => {
   const fetchBefore = globalThis.fetch;
   const previousUrl = location.href;
@@ -3083,6 +3133,11 @@ test("a shared visitor chooses a nonempty name without email or losing keyboard 
   const input = screen.getByLabelText("Your name");
   assert.ok(document.activeElement === input, "Name field receives focus");
   assert.equal(screen.getByRole("button", { name: "Continue" }).disabled, true);
+  assert.equal(
+    screen.getByRole("link", { name: "Owner login" }).getAttribute("href"),
+    "/",
+    "the owner can leave the guest name prompt and enter their key",
+  );
   const event = new window.Event("cancel", { cancelable: true });
   document.querySelector(".name-dialog")!.dispatchEvent(event);
   assert.equal(event.defaultPrevented, true);

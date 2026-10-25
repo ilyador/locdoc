@@ -7,7 +7,7 @@ import * as Y from "yjs";
 
 // A link to one shared document. Its sidebar lists no tree; the document's
 // own workspace says what the link lets its visitor do.
-let render, screen, waitFor, cleanup, act;
+let render, screen, waitFor, cleanup, act, fireEvent;
 let WorkspaceView, useWorkspace;
 
 before(async () => {
@@ -79,7 +79,7 @@ before(async () => {
     onclose;
   } as any;
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-  ({ render, screen, waitFor, cleanup, act } =
+  ({ render, screen, waitFor, cleanup, act, fireEvent } =
     await import("@testing-library/react"));
   ({ WorkspaceView } = await import("../src/app.tsx"));
   ({ useWorkspace } = await import("../src/workspace.ts"));
@@ -156,6 +156,18 @@ test("a shared document's sidebar says what its link lets the visitor do", async
   assert.equal(document.querySelectorAll(".file-tree").length, 0, "no tree");
   // Nothing lists the document's time here to keep it current.
   assert.equal(document.querySelector(".document-modified"), null);
+  const login = screen.getByRole("button", { name: "Open workspace" });
+  assert.ok(
+    login.closest(".topbar"),
+    "owner login is available on a shared document",
+  );
+  fireEvent.click(login);
+  assert.ok(screen.getByLabelText("Owner API key"));
+  assert.equal(
+    screen.getByRole("textbox", { name: "Markdown document" }).textContent,
+    "Plan text",
+    "opening login leaves the shared document intact",
+  );
 });
 
 test("a folder link's visitor sees when the open document last changed, as the folder's listing gives it", async () => {

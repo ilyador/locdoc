@@ -1,6 +1,7 @@
 import {
   CaretRight,
   ChatCircle,
+  Key,
   LockSimple,
   PencilSimple,
   ShareNetwork,
@@ -24,6 +25,7 @@ export function DocumentTopbar({
   commentsOpen,
   toggleComments,
   share,
+  openWorkspace,
 }: {
   doc: Document | null;
   // The document's current path, which follows renames.
@@ -41,6 +43,7 @@ export function DocumentTopbar({
   toggleComments: () => void;
   // Absent while the document is in the trash: its links are suspended.
   share?: () => void;
+  openWorkspace?: () => void;
 }) {
   const changed = headerTimestamp(modified);
   return (
@@ -89,6 +92,17 @@ export function DocumentTopbar({
         </p>
       )}
       <div className="top-actions">
+        {openWorkspace && (
+          <button
+            className="button quiet owner-login"
+            aria-label="Open workspace"
+            title="Open workspace"
+            onClick={openWorkspace}
+          >
+            <Key size={17} />
+            <span>Open workspace</span>
+          </button>
+        )}
         {doc && (
           <>
             <div className="presence">
@@ -111,10 +125,7 @@ export function DocumentTopbar({
             </button>
             {doc.owner ? (
               share && (
-                <button
-                  className="button primary share-button"
-                  onClick={share}
-                >
+                <button className="button primary share-button" onClick={share}>
                   <ShareNetwork size={17} />
                   <span>Share</span>
                 </button>

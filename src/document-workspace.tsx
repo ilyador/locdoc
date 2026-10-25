@@ -367,6 +367,11 @@ export function DocumentWorkspace({
           commentsOpen={thread.commentsOpen}
           toggleComments={thread.toggle}
           share={trashed ? undefined : () => setPanel("share")}
+          openWorkspace={
+            sharedToken && config && !config.owner
+              ? () => setPanel("login")
+              : undefined
+          }
         />
         {storageWarning && (
           <div className="storage-notice" role="status">
@@ -421,13 +426,14 @@ export function DocumentWorkspace({
               item={trashed.item}
               path={trashed.path}
             />
-          ) : !config ||
-            (!doc &&
-              !error &&
-              Boolean((sharedToken && !config.folder) || id)) ? (
+          ) : !config ? (
             <OpeningDocument />
           ) : !config.owner && !sharedToken ? (
             <OwnerWelcome onOpen={() => setPanel("login")} />
+          ) : !doc &&
+            !error &&
+            Boolean((sharedToken && !config.folder) || id) ? (
+            <OpeningDocument />
           ) : !doc ? (
             <EmptyWorkspace
               config={config}

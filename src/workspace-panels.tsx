@@ -107,9 +107,8 @@ export function OwnerLoginForm({
       }}
     >
       <p className="dialog-description">
-        Use the API key from this computer’s <code>.locdoc/owner.key</code>. Run{" "}
-        <code>npm run owner</code> in the Locdoc folder to open it
-        automatically.
+        Enter your owner API key. It’s stored in <code>.locdoc/owner.key</code>{" "}
+        on the computer running Locdoc.
       </p>
       <label className="field-label" htmlFor="owner-key">
         Owner API key
