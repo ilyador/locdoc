@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Locdoc trash cleanup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=locdoc-trash-cleanup.service
+
+[Install]
+WantedBy=timers.target

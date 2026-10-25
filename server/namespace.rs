@@ -7,8 +7,9 @@
 use super::documents::{FORMATS, format, relative_path, retire, retire_trashed};
 use super::*;
 use std::hash::Hash;
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::time::{Duration, Instant};
 
 /// Retry after a busy room, a concurrent change or an engine request.
@@ -3634,6 +3635,67 @@ impl Store {
         Ok(())
     }
 
+    /// Expire whole trash items by deletion date, never by a file's mtime.
+    /// The same lock as restore keeps an item from leaving while it is removed.
+    /// Existing retirement handles a crash or a partial removal on the next pass.
+    pub(super) fn cleanup_trash(&self, before: i64) -> Result<(usize, usize)> {
+        let _files = self.document_files.lock().unwrap();
+        if !self.root_identity.matches(&self.root) {
+            return Err(bad("The documents folder is unavailable or changed."));
+        }
+        let folder = self.root.join(TRASH);
+        let directory = match open_trash_directory(&folder) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.settle_trash()?;
+                return Ok((0, 0));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Anchor operations to the opened directory, even if its name changes.
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        let pending: HashSet<String> = self
+            .pending_entries()?
+            .into_iter()
+            .map(|movement| movement.id)
+            .collect();
+        let expired: HashSet<String> = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare("SELECT id FROM trash WHERE deleted < ?")?
+            .query_map([before], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut items = 0;
+        let mut folders = 0;
+        for entry in fs::read_dir(&anchored)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let id = name.to_string_lossy();
+            if pending.contains(id.as_ref()) {
+                continue;
+            }
+            if !self.root_identity.matches(&self.root) {
+                return Err(bad("The documents folder changed during trash cleanup."));
+            }
+            if expired.contains(id.as_ref()) {
+                // read_dir supplies a single component; remove_dir_all does not
+                // follow symlinks, including ones inside an expired item.
+                if entry.file_type()?.is_dir() {
+                    fs::remove_dir_all(entry.path())?;
+                } else {
+                    fs::remove_file(entry.path())?;
+                }
+                items += 1;
+            } else {
+                folders += prune_empty_trash_folders(&entry.path())?;
+            }
+        }
+        directory.sync_all()?;
+        self.settle_trash()?;
+        Ok((items, folders))
+    }
+
     /// A trashed document whose file a desktop application removed from the
     /// trash retires as any missing document does: its links end and its
     /// text stays in Removed document recovery. An item with nothing left
@@ -3978,6 +4040,49 @@ fn rebase_rows(tx: &Connection, table: &str, from: &str, to: &str) -> Result<()>
         )?;
     }
     Ok(())
+}
+
+// Only called below .locdoc-trash. Symlinks are leaves, never traversal roots.
+fn open_trash_directory(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+fn prune_empty_trash_folders(path: &Path) -> std::io::Result<usize> {
+    let directory = match open_trash_directory(path) {
+        Ok(directory) => directory,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotADirectory | std::io::ErrorKind::NotFound
+            ) || error.raw_os_error() == Some(libc::ELOOP) =>
+        {
+            return Ok(0);
+        }
+        Err(error) => return Err(error),
+    };
+    let anchored = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let mut removed = 0;
+    for entry in fs::read_dir(anchored)? {
+        removed += prune_empty_trash_folders(&entry?.path())?;
+    }
+    match fs::remove_dir(path) {
+        Ok(()) => {
+            fs::File::open(path.parent().unwrap())?.sync_all()?;
+            Ok(removed + 1)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::DirectoryNotEmpty | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            Ok(removed)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn changed_during_rename() -> ApiError {

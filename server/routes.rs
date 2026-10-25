@@ -320,6 +320,7 @@ pub(super) fn router(s: App) -> Router {
             patch(actions::move_folder).delete(actions::delete_folder),
         )
         .route("/api/trash", get(actions::trash))
+        .route("/api/trash/cleanup", post(actions::cleanup))
         .route("/api/trash/{id}/restore", post(actions::restore))
         .route("/api/tree", get(tree))
         .route("/api/files", post(create))

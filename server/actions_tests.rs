@@ -125,6 +125,7 @@ async fn link_visitors_folder_visitors_and_mcp_connections_cannot_use_file_actio
             Some(json!({"path": "Shared"})),
         ),
         ("GET", "/api/trash".to_owned(), None),
+        ("POST", "/api/trash/cleanup".to_owned(), None),
         ("POST", format!("/api/trash/{trash}/restore"), None),
     ];
     let document_link = |request: reqwest::RequestBuilder| {
@@ -162,6 +163,42 @@ async fn link_visitors_folder_visitors_and_mcp_connections_cannot_use_file_actio
     assert!(!s.root.join("Moved").exists());
     assert_eq!(actions::items(&s).unwrap().len(), 1);
     assert!(s.doc(&gone.id).is_err());
+}
+
+#[tokio::test]
+async fn cleanup_expires_old_trash_without_changing_recent_or_active_files() {
+    let (_directory, s) = store();
+    let active = s.create_document("active.md").unwrap();
+    let old = s.create_document("old.md").unwrap();
+    let recent = s.create_document("recent.md").unwrap();
+    let old_item = s.trash_document(&old.id).unwrap();
+    let recent_item = s.trash_document(&recent.id).unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute(
+            "UPDATE trash SET deleted=? WHERE id=?",
+            params![now() - 31 * 24 * 60 * 60, old_item],
+        )
+        .unwrap();
+    let (base, server) = serve(&s).await;
+    let key = s.key.clone();
+    let owner = move |request: reqwest::RequestBuilder| request.bearer_auth(&key);
+    let (status, result) = call(&base, "POST", "/api/trash/cleanup", None, &owner).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result, json!({"ok": true, "items": 1, "folders": 0}));
+    assert_eq!(s.doc(&active.id).unwrap().path, "active.md");
+    assert!(!s.root.join(namespace::TRASH).join(&old_item).exists());
+    assert!(
+        s.root
+            .join(namespace::TRASH)
+            .join(&recent_item)
+            .join("recent.md")
+            .exists()
+    );
+    assert_eq!(items(&s).unwrap().len(), 1);
+    s.restore_trash(&recent_item).unwrap();
+    assert!(s.root.join("recent.md").exists());
+    server.abort();
 }
 
 #[tokio::test]

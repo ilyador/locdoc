@@ -20,7 +20,9 @@
     "icons:build": "node scripts/build-icons.mjs",
     "social:build": "node scripts/build-social.mjs",
     "verify": "npm run check && npm test",
-    "install:service": "node scripts/install-service.mjs"
+    "install:service": "node scripts/install-service.mjs",
+    "install:trash-cleanup": "node scripts/install-service.mjs --trash-cleanup",
+    "trash:cleanup": "node --env-file-if-exists=.env scripts/clean-trash.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.3",

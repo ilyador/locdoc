@@ -152,6 +152,17 @@ pub(super) async fn trash(State(s): State<App>, _owner: security::Owner) -> Resu
     job(s, |s| Ok(Json(json!({"items": items(s)?})))).await
 }
 
+/// Daily retention is fixed here; callers cannot shorten the grace period.
+pub(super) async fn cleanup(State(s): State<App>, _owner: security::Owner) -> Result<Json<Value>> {
+    job(s, |s| {
+        let (items, folders) = s.cleanup_trash(now() - 30 * 24 * 60 * 60)?;
+        Ok(Json(
+            json!({"ok": true, "items": items, "folders": folders}),
+        ))
+    })
+    .await
+}
+
 pub(super) async fn restore(
     State(s): State<App>,
     AxPath(id): AxPath<String>,

@@ -25,6 +25,130 @@ fn journaled(s: &Store) -> i64 {
         .unwrap()
 }
 
+#[test]
+fn trash_cleanup_uses_deletion_dates_keeps_recent_items_and_retains_recovery() {
+    let (_dir, s) = store();
+    let old = s.create_document("old.md").unwrap();
+    let accepted = room_text(
+        &accept(&s, &old, "Accepted text kept for recovery\n")
+            .lock()
+            .unwrap(),
+    );
+    let recent = s.create_document("recent.md").unwrap();
+    let boundary = s.create_document("boundary.md").unwrap();
+    let old_item = s.trash_document(&old.id).unwrap();
+    let recent_item = s.trash_document(&recent.id).unwrap();
+    let boundary_item = s.trash_document(&boundary.id).unwrap();
+    for (item, date) in [(&old_item, 99), (&recent_item, 101), (&boundary_item, 100)] {
+        s.db.lock()
+            .unwrap()
+            .execute("UPDATE trash SET deleted=? WHERE id=?", params![date, item])
+            .unwrap();
+    }
+    let old_path = s.root.join(TRASH).join(&old_item).join("old.md");
+    let recent_path = s.root.join(TRASH).join(&recent_item).join("recent.md");
+    // A file's age says nothing about how long it has been in the trash.
+    fs::File::open(&old_path)
+        .unwrap()
+        .set_modified(SystemTime::now())
+        .unwrap();
+    fs::File::open(&recent_path)
+        .unwrap()
+        .set_modified(UNIX_EPOCH)
+        .unwrap();
+    assert_eq!(durable_text(&s, &old.id), accepted);
+    let (items, _) = s.cleanup_trash(100).unwrap();
+    assert_eq!(items, 1);
+    assert!(!old_path.exists());
+    assert!(recent_path.exists());
+    assert!(s.root.join(TRASH).join(&boundary_item).exists());
+    assert_eq!(active(&s, &old.id), 0);
+    assert_eq!(durable_text(&s, &old.id), accepted);
+    assert_eq!(s.cleanup_trash(100).unwrap(), (0, 0));
+    s.restore_trash(&recent_item).unwrap();
+    assert!(s.root.join("recent.md").exists());
+}
+
+#[test]
+fn trash_cleanup_prunes_empty_folders_only_inside_the_trash() {
+    let (_dir, s) = store();
+    fs::create_dir_all(s.root.join("active-empty/nested")).unwrap();
+    fs::create_dir_all(s.root.join("empty/nested")).unwrap();
+    let item = s.trash_folder("empty").unwrap();
+    fs::create_dir_all(s.root.join(TRASH).join("leftover/empty")).unwrap();
+    let (_, folders) = s.cleanup_trash(0).unwrap();
+    assert_eq!(folders, 5);
+    assert!(s.root.join("active-empty/nested").exists());
+    assert!(!s.root.join(TRASH).join(&item).exists());
+    assert!(actions::items(&s).unwrap().is_empty());
+}
+
+#[test]
+fn trash_cleanup_never_follows_symlinks_or_an_unavailable_root() {
+    use std::os::unix::fs::symlink;
+    let (dir, s) = store();
+    let page = s.create_document("kept.md").unwrap();
+    let item = s.trash_document(&page.id).unwrap();
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(outside.join("empty")).unwrap();
+    fs::write(outside.join("keep.txt"), "untouched").unwrap();
+    symlink(&outside, s.root.join(TRASH).join("alias")).unwrap();
+    s.cleanup_trash(0).unwrap();
+    assert!(outside.join("empty").exists());
+    // An expired item may contain links, but its targets are never removed.
+    symlink(&outside, s.root.join(TRASH).join(&item).join("alias")).unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute("UPDATE trash SET deleted=0", [])
+        .unwrap();
+    s.cleanup_trash(1).unwrap();
+    assert_eq!(
+        fs::read_to_string(outside.join("keep.txt")).unwrap(),
+        "untouched"
+    );
+    assert!(outside.join("empty").exists());
+    let moved_trash = dir.path().join("original-trash");
+    fs::rename(s.root.join(TRASH), &moved_trash).unwrap();
+    symlink(&outside, s.root.join(TRASH)).unwrap();
+    assert!(s.cleanup_trash(i64::MAX).is_err());
+    assert!(outside.join("empty").exists());
+    fs::remove_file(s.root.join(TRASH)).unwrap();
+    fs::rename(&moved_trash, s.root.join(TRASH)).unwrap();
+    let original = dir.path().join("original-docs");
+    fs::rename(&s.root, &original).unwrap();
+    fs::create_dir_all(s.root.join(TRASH).join("keep-empty")).unwrap();
+    assert!(s.cleanup_trash(i64::MAX).is_err());
+    assert!(s.root.join(TRASH).join("keep-empty").exists());
+}
+
+#[test]
+fn trash_cleanup_leaves_an_item_with_a_pending_restore_alone() {
+    let (_dir, s) = store();
+    let page = s.create_document("page.md").unwrap();
+    let item = s.trash_document(&page.id).unwrap();
+    let location = format!("{TRASH}/{item}/page.md");
+    let metadata = fs::metadata(s.root.join(&location)).unwrap();
+    let movement = EntryMove::new(
+        item.clone(),
+        Action::Restore,
+        EntryKind::Document,
+        Some(page.id.clone()),
+        (location, "restored.md".into()),
+        &metadata,
+    );
+    s.journal_entry(&movement).unwrap();
+    fs::create_dir_all(s.root.join(TRASH).join(&item).join("empty")).unwrap();
+    s.db.lock()
+        .unwrap()
+        .execute("UPDATE trash SET deleted=0", [])
+        .unwrap();
+    assert_eq!(s.cleanup_trash(1).unwrap(), (0, 0));
+    assert!(s.root.join(TRASH).join(&item).join("page.md").exists());
+    assert!(s.root.join(TRASH).join(&item).join("empty").exists());
+    assert_eq!(journaled(&s), 1);
+    assert_eq!(active(&s, &page.id), 2);
+}
+
 fn trash_items(s: &Store) -> Vec<(String, String, String)> {
     s.db.lock()
         .unwrap()
