@@ -1425,7 +1425,8 @@ button:hover {
 }
 @container workspace (max-width: 760px) {
   .formatbar {
-    padding-inline: 12px;
+    min-height: 0;
+    padding: 12px;
     column-gap: 6px;
   }
   .formatbar .toolbar-secondary {
@@ -1437,7 +1438,7 @@ button:hover {
 }
 @container workspace (max-width: 600px) {
   .formatbar {
-    padding-inline: 8px;
+    padding: 8px;
   }
   .format-left {
     gap: 4px;
