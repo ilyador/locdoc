@@ -65,6 +65,14 @@ before(async () => {
 afterEach(() => cleanup());
 after(() => dom.window.close());
 
+async function finishFrame() {
+  await act(async () => {
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+  });
+}
+
 // A document as Locdoc opens it: the editor has no focus, and its caret sits
 // at the start of the document, where nobody placed it.
 function open(source: string, path = "Writing/Plot.md", inPane = false) {
@@ -198,8 +206,190 @@ test("touch selection preserves Markdown layout and native callouts until typing
   }
 });
 
-for (const resume of ["typing", "arrow", "mouse"] as const)
-  test(`resuming with ${resume} hides the old touch-held Markdown block`, () => {
+for (const [path, source, selector, revealed] of [
+  ["Page.md", "## A heading\n\nA **bold passage**.", ".md-h2", "## A heading"],
+  [
+    "Scene.fountain",
+    ".INT. ROOM - DAY\n\nAn action.",
+    ".fountain-scene",
+    ".INT. ROOM - DAY",
+  ],
+] as const)
+  test(`a completed touch tap reveals ${path} source without requiring an edit`, async () => {
+    const doc = open(source, path);
+    try {
+      const touch = (type: string) => {
+        const event = new window.Event(type, { bubbles: true });
+        Object.defineProperty(event, "pointerType", { value: "touch" });
+        act(() => doc.view.contentDOM.dispatchEvent(event));
+      };
+      touch("pointerdown");
+      await act(async () => {
+        doc.view.focus();
+        doc.view.dispatch({
+          selection: { anchor: 5 },
+          userEvent: "select.pointer",
+        });
+      });
+      assert.ok(
+        doc.line(selector) !== revealed,
+        "the preview stays stable while placing the native caret",
+      );
+      touch("pointerup");
+      act(() =>
+        doc.view.contentDOM.dispatchEvent(
+          new window.MouseEvent("click", { bubbles: true }),
+        ),
+      );
+      await waitFor(() =>
+        assert.equal(
+          doc.line(selector),
+          revealed,
+          "a settled tap reveals source at its caret",
+        ),
+      );
+      assert.equal(
+        doc.text.toString(),
+        source,
+        "revealing source never edits the file",
+      );
+    } finally {
+      doc.close();
+    }
+  });
+
+for (const selected of [false, true])
+  test(`a touch click waits for the native caret after ${selected ? "a range" : "a caret"} before revealing source`, async () => {
+    const source = "## First heading\n\nA paragraph.\n\n## Second heading";
+    const doc = open(source);
+    try {
+      const touch = new window.Event("pointerdown", { bubbles: true });
+      Object.defineProperty(touch, "pointerType", { value: "touch" });
+      act(() => doc.view.contentDOM.dispatchEvent(touch));
+      await act(async () => {
+        doc.view.focus();
+        doc.view.dispatch({
+          selection: { anchor: 0, head: selected ? 5 : 0 },
+          userEvent: "select.pointer",
+        });
+      });
+      const caret = source.indexOf("Second");
+      const point = doc.view.domAtPos(caret);
+      act(() => {
+        window.getSelection()!.collapse(point.node, point.offset);
+        doc.view.contentDOM.dispatchEvent(
+          new window.MouseEvent("click", { bubbles: true }),
+        );
+      });
+      assert.equal(
+        doc.view.state.selection.main.head,
+        selected ? 5 : 0,
+        "the editor has not read the native caret yet",
+      );
+      assert.equal(
+        doc.line(".md-h2"),
+        "First heading",
+        "a late native selection must not reveal the old caret's source",
+      );
+      await act(async () => {
+        document.dispatchEvent(new window.Event("selectionchange"));
+      });
+      assert.equal(
+        doc.view.state.selection.main.head,
+        caret,
+        "CodeMirror reads the original native caret",
+      );
+      await waitFor(() => {
+        const headings = [
+          ...doc.view.contentDOM.querySelectorAll(".md-h2"),
+        ].map((line) => line.textContent);
+        assert.deepEqual(headings, ["First heading", "## Second heading"]);
+      });
+      assert.equal(doc.text.toString(), source);
+    } finally {
+      doc.close();
+    }
+  });
+
+test("a touch click preserves a native range even before the editor has read it", async () => {
+  const source = "A **bold passage** to copy.";
+  const doc = open(source);
+  try {
+    const touch = new window.Event("pointerdown", { bubbles: true });
+    Object.defineProperty(touch, "pointerType", { value: "touch" });
+    act(() => doc.view.contentDOM.dispatchEvent(touch));
+    await act(async () => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: { anchor: 0 },
+        userEvent: "select.pointer",
+      });
+    });
+    const start = doc.view.domAtPos(source.indexOf("bold"));
+    const end = doc.view.domAtPos(source.indexOf(" passage"));
+    const shown = doc.shown();
+    act(() => {
+      window
+        .getSelection()!
+        .setBaseAndExtent(start.node, start.offset, end.node, end.offset);
+      doc.view.contentDOM.dispatchEvent(
+        new window.MouseEvent("click", { bubbles: true }),
+      );
+    });
+    assert.equal(
+      doc.view.state.selection.main.empty,
+      true,
+      "the editor has not read the native range yet",
+    );
+    await finishFrame();
+    assert.equal(
+      doc.shown(),
+      shown,
+      "native word selection keeps the same preview geometry",
+    );
+    assert.equal(window.getSelection()!.toString(), "bold");
+  } finally {
+    doc.close();
+  }
+});
+
+test("a native text selection keeps its preview and word DOM when a touch click arrives", async () => {
+  const source = "## A heading\n\nA **bold passage** to copy.";
+  const doc = open(source);
+  try {
+    const bold = doc.view.contentDOM.querySelector(".md-strong");
+    const touch = new window.Event("pointerdown", { bubbles: true });
+    Object.defineProperty(touch, "pointerType", { value: "touch" });
+    act(() => doc.view.contentDOM.dispatchEvent(touch));
+    act(() => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: {
+          anchor: source.indexOf("bold"),
+          head: source.indexOf(" passage"),
+        },
+        userEvent: "select.pointer",
+      });
+    });
+    const shown = doc.shown();
+    act(() =>
+      doc.view.contentDOM.dispatchEvent(
+        new window.MouseEvent("click", { bubbles: true }),
+      ),
+    );
+    await finishFrame();
+    assert.equal(doc.shown(), shown);
+    assert.ok(
+      doc.view.contentDOM.querySelector(".md-strong") === bold,
+      "native range selection keeps its word DOM",
+    );
+  } finally {
+    doc.close();
+  }
+});
+
+for (const resume of ["typing", "arrow", "mouse", "tap"] as const)
+  test(`resuming with ${resume} hides the old touch-held Markdown block`, async () => {
     // A short document reparses together and can conceal a stale decoration.
     // Keep the two selections in separate, reusable parser fragments.
     const source = Array.from(
@@ -268,7 +458,15 @@ for (const resume of ["typing", "arrow", "mouse"] as const)
             }),
           ),
         );
-      else pointer("mouse");
+      else if (resume === "mouse") pointer("mouse");
+      else {
+        act(() =>
+          doc.view.contentDOM.dispatchEvent(
+            new window.MouseEvent("click", { bubbles: true }),
+          ),
+        );
+        await finishFrame();
+      }
       assert.equal(
         headingMarkersHidden(),
         true,
