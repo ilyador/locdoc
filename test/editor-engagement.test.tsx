@@ -389,7 +389,7 @@ test("a native text selection keeps its preview and word DOM when a touch click 
 });
 
 for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
-  test(`${path} keeps the selected passage highlighted when a menu takes focus`, async () => {
+  test(`${path} keeps the selected passage highlighted across native and app menus`, async () => {
     const source = "A selected passage to format.";
     const doc = open(source, path);
     const field = document.createElement("input");
@@ -402,7 +402,7 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
     });
     const highlight = () =>
       doc.page.container.querySelector<HTMLElement>(
-        ".cm-inactiveSelectionLayer .cm-selectionBackground",
+        ".cm-documentSelectionLayer .cm-selectionBackground",
       );
     try {
       await act(async () => {
@@ -413,10 +413,23 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
         });
       });
       await finishFrame();
-      assert.equal(
+      assert.ok(
         highlight(),
-        null,
-        "the focused editor uses its normal selection renderer",
+        "a focused editor must not depend on native selection painting",
+      );
+      const line = doc.view.contentDOM.querySelector(".cm-line");
+      const callout = new window.MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => doc.view.contentDOM.dispatchEvent(callout));
+      await finishFrame();
+      assert.equal(callout.defaultPrevented, false);
+      assert.equal(doc.view.hasFocus, true);
+      assert.ok(highlight(), "a native menu must not hide the selection");
+      assert.ok(
+        doc.view.contentDOM.querySelector(".cm-line") === line,
+        "the selection layer must not replace the text DOM",
       );
       act(() => field.focus());
       await waitFor(() =>
@@ -450,13 +463,7 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
         "remote edits leave the menu focused",
       );
       await act(async () => doc.view.focus());
-      await waitFor(() =>
-        assert.equal(
-          highlight(),
-          null,
-          "native selection resumes when focus returns",
-        ),
-      );
+      await waitFor(() => assert.ok(highlight()));
       assert.equal(doc.view.state.selection.main.from, 9);
       assert.equal(doc.view.state.selection.main.to, 25);
       act(() => field.focus());

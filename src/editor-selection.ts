@@ -5,34 +5,33 @@ import {
   RectangleMarker,
 } from "@codemirror/view";
 
-// iOS draws the primary selection natively, so its color vanishes when a menu
-// takes focus. Draw the editor's retained ranges behind its text while unfocused,
-// without changing native selection, moving focus or decorating the text DOM.
+// Own the selection background independently of focus: iOS can hide its native
+// highlight for a context menu without blurring the editor. Keep CodeMirror's
+// caret and iOS handles, and leave the native selection and text DOM untouched.
 export const documentSelection = [
   drawSelection(),
   layer({
     above: false,
-    class: "cm-inactiveSelectionLayer",
+    class: "cm-documentSelectionLayer",
     markers(view) {
-      return view.hasFocus
-        ? []
-        : view.state.selection.ranges.flatMap((range) =>
-            range.empty
-              ? []
-              : RectangleMarker.forRange(view, "cm-selectionBackground", range),
-          );
+      return view.state.selection.ranges.flatMap((range) =>
+        range.empty
+          ? []
+          : RectangleMarker.forRange(view, "cm-selectionBackground", range),
+      );
     },
     update: (update) =>
-      update.docChanged ||
-      update.selectionSet ||
-      update.viewportChanged ||
-      update.focusChanged,
+      update.docChanged || update.selectionSet || update.viewportChanged,
   }),
   EditorView.baseTheme({
-    // One selection background per range on desktop as well as iOS.
-    "&:not(.cm-focused) > .cm-scroller > .cm-selectionLayer .cm-selectionBackground":
-      {
-        visibility: "hidden",
-      },
+    // One painter for backgrounds; the built-in layer still owns iOS handles.
+    ".cm-selectionLayer .cm-selectionBackground": { visibility: "hidden" },
+    ".cm-line::selection, .cm-line ::selection": {
+      backgroundColor: "transparent !important",
+    },
+    // Inputs embedded in widgets retain their own native selection styling.
+    ".cm-content :focus::selection, .cm-content :focus ::selection": {
+      backgroundColor: "Highlight !important",
+    },
   }),
 ];
