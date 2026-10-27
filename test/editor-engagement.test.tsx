@@ -388,6 +388,94 @@ test("a native text selection keeps its preview and word DOM when a touch click 
   }
 });
 
+for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
+  test(`${path} keeps the selected passage highlighted when a menu takes focus`, async () => {
+    const source = "A selected passage to format.";
+    const doc = open(source, path);
+    const field = document.createElement("input");
+    document.body.append(field);
+    doc.view.coordsAtPos = (pos) => ({
+      top: 0,
+      bottom: 20,
+      left: pos * 8,
+      right: pos * 8 + 1,
+    });
+    const highlight = () =>
+      doc.page.container.querySelector<HTMLElement>(
+        ".cm-inactiveSelectionLayer .cm-selectionBackground",
+      );
+    try {
+      await act(async () => {
+        doc.view.focus();
+        doc.view.dispatch({
+          selection: { anchor: 2, head: 18 },
+          userEvent: "select.pointer",
+        });
+      });
+      await finishFrame();
+      assert.equal(
+        highlight(),
+        null,
+        "the focused editor uses its normal selection renderer",
+      );
+      act(() => field.focus());
+      await waitFor(() =>
+        assert.ok(
+          highlight(),
+          "a menu field must not hide the retained selection",
+        ),
+      );
+      assert.equal(
+        doc.view.state.sliceDoc(
+          doc.view.state.selection.main.from,
+          doc.view.state.selection.main.to,
+        ),
+        "selected passage",
+      );
+      assert.ok(
+        document.activeElement === field,
+        "the selection layer must leave focus in the menu",
+      );
+      act(() => doc.text.insert(0, "Before "));
+      await waitFor(() => assert.equal(doc.view.state.selection.main.from, 9));
+      assert.equal(doc.view.state.selection.main.to, 25);
+      assert.equal(
+        doc.view.state.sliceDoc(9, 25),
+        "selected passage",
+        "remote changes map the existing selection",
+      );
+      await waitFor(() => assert.ok(highlight()));
+      assert.ok(
+        document.activeElement === field,
+        "remote edits leave the menu focused",
+      );
+      await act(async () => doc.view.focus());
+      await waitFor(() =>
+        assert.equal(
+          highlight(),
+          null,
+          "native selection resumes when focus returns",
+        ),
+      );
+      assert.equal(doc.view.state.selection.main.from, 9);
+      assert.equal(doc.view.state.selection.main.to, 25);
+      act(() => field.focus());
+      await waitFor(() => assert.ok(highlight()));
+      act(() => doc.view.dispatch({ selection: { anchor: 25 } }));
+      await waitFor(() =>
+        assert.equal(
+          highlight(),
+          null,
+          "a collapsed range leaves no stale highlight",
+        ),
+      );
+      assert.equal(doc.text.toString(), "Before " + source);
+    } finally {
+      field.remove();
+      doc.close();
+    }
+  });
+
 for (const resume of ["typing", "arrow", "mouse", "tap"] as const)
   test(`resuming with ${resume} hides the old touch-held Markdown block`, async () => {
     // A short document reparses together and can conceal a stale decoration.

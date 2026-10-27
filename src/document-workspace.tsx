@@ -172,6 +172,19 @@ export function DocumentWorkspace({
   const error = documentError || workspace.error;
   const [apiKey, setApiKey] = useState("");
   const editor = useRef<EditorHandle>(null);
+  // Appearance changes happen outside CodeMirror's DOM. Measure after the
+  // updated CSS applies, keeping selection and caret geometry in sync.
+  useLayoutEffect(() => {
+    editor.current?.measure();
+  }, [
+    font,
+    fontCategory,
+    fontSize,
+    lineHeight,
+    pageWidth,
+    paragraphSpacing,
+    scrollPastEnd,
+  ]);
   const [linkSelection, setLinkSelection] = useState<Selection | null>(null);
   const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
   const closeLink = useCallback(() => setLinkTarget(null), []);

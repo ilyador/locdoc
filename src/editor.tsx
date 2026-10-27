@@ -9,7 +9,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { EditorState, Compartment } from "@codemirror/state";
-import { EditorView, keymap, drawSelection } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { defaultKeymap, indentWithTab } from "@codemirror/commands";
 import { highlightSelectionMatches } from "@codemirror/search";
 import { yCollab } from "y-codemirror.next";
@@ -34,6 +34,7 @@ import {
   wrapSelection,
 } from "./editor-commands";
 import { userEngagement } from "./editor-engagement";
+import { documentSelection } from "./editor-selection";
 import { fileDropEvents, linkEvents } from "./editor-events";
 import {
   editorAccess,
@@ -224,6 +225,9 @@ export const MarkdownEditor = forwardRef<
       focus() {
         view.current?.focus();
       },
+      measure() {
+        view.current?.requestMeasure();
+      },
       revealComment(id) {
         if (view.current) commentExtension.current?.reveal(view.current, id);
       },
@@ -274,7 +278,7 @@ export const MarkdownEditor = forwardRef<
             "data-gramm": "false",
           }),
           perLineDirection,
-          drawSelection(),
+          documentSelection,
           highlightSelectionMatches(),
           findExtension(),
           layer.extension,

@@ -22,4 +22,5 @@ export type EditorHandle = {
   locate: (anchor: Anchor) => void;
   revealComment: (id?: string) => void;
   focus: () => void;
+  measure: () => void;
 };
