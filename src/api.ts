@@ -47,9 +47,38 @@ function rememberSession(value: string) {
   }
 }
 
-function request(path: string, init?: RequestInit) {
+// A proxy can answer before the restarted server begins listening. Its empty
+// or HTML error is distinct from a structured refusal sent by Locdoc itself.
+function proxyFailure(response: Response) {
+  return (
+    [502, 503, 504].includes(response.status) &&
+    !response.headers
+      .get("Content-Type")
+      ?.toLowerCase()
+      .startsWith("application/json")
+  );
+}
+
+// Retry only reads, with a short, bounded backoff: replaying a write could
+// repeat an action whose response was lost. Cancellation also ends the wait.
+function retryDelay(ms: number, signal?: AbortSignal | null) {
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function request(path: string, init?: RequestInit) {
   const session = ownerSession();
-  return fetch(path, {
+  const options: RequestInit = {
     ...init,
     headers: {
       ...(session ? { Authorization: `Bearer ${session}` } : {}),
@@ -58,7 +87,27 @@ function request(path: string, init?: RequestInit) {
         : {}),
       ...init?.headers,
     },
-  });
+  };
+  const read = ["GET", "HEAD"].includes((init?.method || "GET").toUpperCase());
+  const delays = [250, 1000];
+  for (let attempt = 0; ; attempt++) {
+    let response: Response | undefined;
+    try {
+      response = await fetch(path, options);
+    } catch (error) {
+      if (!(error instanceof TypeError) || options.signal?.aborted || !read)
+        throw error;
+      if (attempt === delays.length) throw error;
+    }
+    if (
+      response &&
+      (!read || !proxyFailure(response) || attempt === delays.length)
+    )
+      return response;
+    // Release an unused response before asking again, including proxy HTML.
+    await response?.body?.cancel().catch(() => {});
+    await retryDelay(delays[attempt], options.signal);
+  }
 }
 
 export async function api<T = unknown>(
@@ -118,9 +167,17 @@ export async function revalidate<T>(
 }
 
 async function answer<T>(path: string, response: Response): Promise<T> {
-  const body = await response
-    .json()
-    .catch(() => ({ error: "The server returned an unexpected response." }));
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new ApiError(
+      [502, 503, 504].includes(response.status)
+        ? "The server is temporarily unavailable. Please try again."
+        : `The server returned an unexpected response (${response.status}).`,
+      response.status,
+    );
+  }
   // OAuth endpoints answer {error: code, error_description: message}.
   // A trashed document answers 410 with the code "trashed" and its trash item.
   if (!response.ok)

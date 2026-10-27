@@ -163,6 +163,7 @@ before(async () => {
     if (failBootstrap && path === "/api/config")
       return new Response(JSON.stringify({ error: "Config unavailable" }), {
         status: 503,
+        headers: { "Content-Type": "application/json" },
       });
     if (/^\/api\/docs\/[ab]$/.test(path))
       return response(docs[path.split("/").pop()!]);

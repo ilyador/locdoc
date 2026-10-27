@@ -109,6 +109,88 @@ afterEach(async () => {
 });
 after(() => dom.window.close());
 
+test("opening a document recovers from a restart's empty proxy response without a page reload", async () => {
+  const doc = fixture();
+  respond(doc);
+  const healthy = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async (...args) =>
+    ++attempts === 1 ? new Response("", { status: 502 }) : healthy(...args);
+  const { result } = renderHook(() => useDocument(doc.id, true, null));
+  await waitFor(() => assert.ok(result.current.session));
+  assert.equal(attempts, 2);
+  assert.equal(result.current.error, "");
+  assert.equal(result.current.doc?.id, doc.id);
+  assert.equal(
+    result.current.session!.ydoc.getText("content").toString(),
+    doc.content,
+  );
+});
+
+test("switching documents cancels an opening request waiting to retry", async () => {
+  const first = fixture();
+  const next = fixture();
+  respond(next);
+  const healthy = globalThis.fetch;
+  let attempts = 0;
+  let signal: AbortSignal | null | undefined;
+  globalThis.fetch = async (path, init) => {
+    if (path === `/api/docs/${first.id}`) {
+      attempts++;
+      signal = init?.signal;
+      return new Response("", { status: 502 });
+    }
+    return healthy(path, init);
+  };
+  const { result, rerender } = renderHook(
+    ({ id }) => useDocument(id, true, null),
+    { initialProps: { id: first.id } },
+  );
+  await act(async () => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  rerender({ id: next.id });
+  await waitFor(() => assert.ok(result.current.session));
+  assert.equal(signal?.aborted, true);
+  assert.equal(result.current.doc?.id, next.id);
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  });
+  assert.equal(attempts, 1);
+  assert.equal(result.current.error, "");
+});
+
+test("a reconnect's temporary HTTP failure keeps the live editor and its pending draft", async () => {
+  const doc = fixture();
+  respond(doc);
+  const healthy = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async (...args) =>
+    ++attempts === 1 ? new Response("", { status: 502 }) : healthy(...args);
+  const { result } = renderHook(() => useDocument(doc.id, true, doc));
+  await waitFor(() => assert.ok(result.current.session?.provider.wsconnected));
+  const session = result.current.session!;
+  await act(async () => {
+    session.ydoc.getText("content").insert(17, " pending");
+    await session.drafts.flush();
+    session.provider.ws!.close();
+  });
+  await waitFor(() => assert.equal(attempts, 2));
+  assert.ok(
+    result.current.session === session,
+    "reconnect keeps the draft session",
+  );
+  assert.equal(
+    session.ydoc.getText("content").toString(),
+    "Accepted document pending",
+  );
+  assert.equal(session.drafts.pending, true);
+  assert.equal(result.current.error, "");
+  await act(async () => {
+    await session.drafts.acknowledge(session.drafts.checkpoint()!);
+  });
+});
+
 test("read-only document opens with IndexedDB blocked without creating a storage request", async () => {
   const doc = fixture(false);
   respond(doc);

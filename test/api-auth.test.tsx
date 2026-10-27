@@ -220,3 +220,141 @@ test("a document's collaboration state decodes byte for byte", async () => {
   );
   assert.equal(decodeState("").length, 0);
 });
+
+test("reads recover from a brief proxy or network failure, and revalidation keeps its request identity", async () => {
+  const dom = new JSDOM("", { url: "http://localhost/" });
+  Object.defineProperties(globalThis, {
+    location: { value: dom.window.location, configurable: true },
+    localStorage: { value: dom.window.localStorage, configurable: true },
+  });
+  const saved = globalThis.fetch;
+  const { api, revalidate } = await import("../src/api");
+  try {
+    for (const failure of [502, 503, 504, "network"] as const) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        if (++calls === 1) {
+          if (failure === "network") throw new TypeError("Failed to fetch");
+          return new Response("", { status: failure });
+        }
+        return Response.json({ opened: true });
+      };
+      assert.deepEqual(await api("/api/docs/fixture"), { opened: true });
+      assert.equal(calls, 2);
+    }
+    const kept = { path: "/api/tree", tag: 'W/"one"', body: { entries: [] } };
+    const offered: (string | null)[] = [];
+    globalThis.fetch = async (_path, init) => {
+      offered.push(new Headers(init?.headers).get("If-None-Match"));
+      return new Response(null, { status: offered.length === 1 ? 502 : 304 });
+    };
+    assert.ok(
+      (await revalidate("/api/tree", kept)) === kept,
+      "a retried 304 still confirms the response held for that request",
+    );
+    assert.deepEqual(offered, [kept.tag, kept.tag]);
+  } finally {
+    globalThis.fetch = saved;
+    dom.window.close();
+  }
+});
+
+test("a persistent proxy failure ends after three reads and retains its HTTP status", async () => {
+  const saved = globalThis.fetch;
+  const { api, ApiError } = await import("../src/api");
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response("<h1>Bad Gateway</h1>", { status: 502 });
+  };
+  try {
+    await assert.rejects(
+      api("/api/docs/fixture"),
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 502 &&
+        /temporarily unavailable/.test(error.message),
+    );
+    assert.equal(calls, 3, "an unavailable server must not start a retry loop");
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("writes and structured application refusals are never replayed", async () => {
+  const saved = globalThis.fetch;
+  const { api, ApiError } = await import("../src/api");
+  try {
+    for (const method of ["POST", "PATCH", "DELETE"]) {
+      for (const failure of [502, "network"] as const) {
+        let calls = 0;
+        globalThis.fetch = async () => {
+          calls++;
+          if (failure === "network") throw new TypeError("Failed to fetch");
+          return new Response("", { status: failure });
+        };
+        await assert.rejects(api("/api/action", { method }));
+        assert.equal(calls, 1, "a lost response must not repeat a mutation");
+      }
+    }
+    for (const status of [400, 403, 404, 409, 410, 429, 500, 502, 503, 504]) {
+      let calls = 0;
+      globalThis.fetch = async () => {
+        calls++;
+        return Response.json({ error: "Refused" }, { status });
+      };
+      await assert.rejects(
+        api("/api/docs/fixture"),
+        (error: unknown) =>
+          error instanceof ApiError && error.status === status,
+      );
+      assert.equal(calls, 1);
+    }
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("cancelling a read during backoff prevents its next request", async () => {
+  const saved = globalThis.fetch;
+  const { api } = await import("../src/api");
+  const controller = new AbortController();
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response("", { status: 502 });
+  };
+  try {
+    const pending = api("/api/docs/fixture", { signal: controller.signal });
+    const cancelled = assert.rejects(pending, { name: "AbortError" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    controller.abort();
+    await cancelled;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
+test("a malformed successful response is rejected instead of becoming document data", async () => {
+  const saved = globalThis.fetch;
+  const { api, ApiError } = await import("../src/api");
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return new Response("<html>A proxy page</html>", { status: 200 });
+  };
+  try {
+    await assert.rejects(
+      api("/api/docs/fixture"),
+      (error: unknown) =>
+        error instanceof ApiError &&
+        error.status === 200 &&
+        /unexpected response \(200\)/.test(error.message),
+    );
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});

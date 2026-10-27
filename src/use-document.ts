@@ -61,6 +61,7 @@ export function useDocument(
   useEffect(() => {
     if (!id || !authorized) return;
     let active = true;
+    const opening = new AbortController();
     let connection: DocumentSession | null = null;
     let cancelRetry: (() => void) | undefined;
     let stopPresence: (() => void) | undefined;
@@ -81,7 +82,7 @@ export function useDocument(
       !reload && initialDocument?.id === id ? initialDocument : null;
     (loaded
       ? Promise.resolve(loaded)
-      : api<Doc>(`/api/docs/${id}${accessQuery}`)
+      : api<Doc>(`/api/docs/${id}${accessQuery}`, { signal: opening.signal })
     )
       .then(async (d) => {
         if (!active) return;
@@ -375,6 +376,7 @@ export function useDocument(
       });
     return () => {
       active = false;
+      opening.abort();
       cancelRetry?.();
       stopPresence?.();
       connection?.leave();
