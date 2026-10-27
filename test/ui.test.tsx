@@ -4,6 +4,7 @@ import { JSDOM } from "jsdom";
 import "fake-indexeddb/auto";
 import React, { useState } from "react";
 import * as Y from "yjs";
+import { EditorView } from "@codemirror/view";
 import { countMarkdownWords } from "../src/word-count";
 import { sourceComments } from "../src/comment-syntax";
 import { documentFormat } from "../src/document-format";
@@ -801,17 +802,18 @@ test("the latest version selection owns both its preview and restore target", as
   render(
     <VersionHistory
       endpoint={(suffix) => `/api/docs/a${suffix}`}
+      documentId="a"
+      path="a.md"
+      onClose={() => {}}
       onRestore={() => {}}
     />,
   );
-  await screen.findAllByRole("option", { name: /3 bytes/ });
-  fireEvent.change(screen.getByLabelText("Saved version"), {
-    target: { value: "old" },
-  });
+  await waitFor(() =>
+    assert.ok(document.querySelector('[data-version-id="old"]')),
+  );
+  fireEvent.click(document.querySelector('[data-version-id="old"]')!);
   await waitFor(() => assert.equal(held.has("old"), true));
-  fireEvent.change(screen.getByLabelText("Saved version"), {
-    target: { value: "new" },
-  });
+  fireEvent.click(document.querySelector('[data-version-id="new"]')!);
   await screen.findByText("NEW CONTENT");
   held.get("old")!();
   await waitFor(() =>
@@ -820,7 +822,7 @@ test("the latest version selection owns both its preview and restore target", as
       "NEW CONTENT",
     ),
   );
-  fireEvent.click(screen.getByText("Restore this version"));
+  fireEvent.click(screen.getByRole("button", { name: "Restore this version" }));
   await waitFor(() =>
     assert.ok(
       requests.some(
@@ -828,6 +830,45 @@ test("the latest version selection owns both its preview and restore target", as
       ),
     ),
   );
+});
+test("browsing history preserves the live editor, its draft, caret, scroll and connection", async () => {
+  await openWorkspace();
+  const content = screen.getByRole("textbox", { name: "Markdown document" });
+  const editor = EditorView.findFromDOM(content)!;
+  const pane = content.closest(".writing-pane") as HTMLElement;
+  const socket = sockets.at(-1);
+  act(() =>
+    editor.dispatch({
+      changes: { from: 1, insert: " pending" },
+      selection: { anchor: 9 },
+      userEvent: "input.type",
+    }),
+  );
+  pane.scrollTop = 120;
+  const source = editor.state.doc.toString();
+  const caret = editor.state.selection.main.head;
+  fireEvent.click(screen.getByRole("button", { name: "Document options" }));
+  fireEvent.click(screen.getByRole("button", { name: "Version history" }));
+  await screen.findByRole("region", { name: "Version history" });
+  assert.equal(content.closest("main")!.getAttribute("aria-hidden"), "true");
+  assert.equal(content.closest("main")!.hasAttribute("inert"), true);
+  assert.ok(
+    EditorView.findFromDOM(content) === editor,
+    "history keeps the live editor mounted",
+  );
+  assert.ok(
+    sockets.at(-1) === socket,
+    "historical previews never create a collaboration connection",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Back to document" }));
+  await screen.findByRole("textbox", { name: "Markdown document" });
+  assert.ok(
+    EditorView.findFromDOM(content) === editor,
+    "returning reuses the original editor",
+  );
+  assert.equal(editor.state.doc.toString(), source);
+  assert.equal(editor.state.selection.main.head, caret);
+  assert.equal(pane.scrollTop, 120);
 });
 test("a failed comment can retry without double-posting or losing its text", async () => {
   const submitted: string[] = [];

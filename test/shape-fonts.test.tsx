@@ -155,7 +155,10 @@ test("every document, interface and code stack starts with the shapes face", () 
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .split(/[;{}]/)
     .filter((declaration) => declaration.includes('"Locdoc Hebrew'));
-  assert.ok(declarations.length >= 4, "interface, reading, code and versions");
+  assert.ok(
+    declarations.length >= 3,
+    "interface, reading and code; versions inherit the selected document font",
+  );
   for (const declaration of declarations)
     assert.match(
       declaration,

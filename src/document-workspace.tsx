@@ -198,6 +198,16 @@ export function DocumentWorkspace({
   const dialog = useRef<HTMLDialogElement>(null);
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
+  const surface = useRef<HTMLElement>(null);
+  const closeHistory = () => {
+    setPanel(null);
+    requestAnimationFrame(() => {
+      editor.current?.measure();
+      surface.current
+        ?.querySelector<HTMLButtonElement>('[aria-label="Document options"]')
+        ?.focus({ preventScroll: true });
+    });
+  };
   const accessQuery = sharedToken
     ? `?token=${encodeURIComponent(sharedToken)}`
     : "";
@@ -238,7 +248,8 @@ export function DocumentWorkspace({
   // closed a dialog and opened a conversation would take focus from the
   // composer. No dialog control opens a conversation.
   useEffect(() => {
-    if (panel && panel !== "appearance") dialog.current?.showModal();
+    if (panel && panel !== "appearance" && panel !== "history")
+      dialog.current?.showModal();
     else dialog.current?.close();
   }, [panel]);
   const openDocument = async (next: string | null) => {
@@ -367,7 +378,13 @@ export function DocumentWorkspace({
           frame.note,
         )}
       {/* While the drawer covers the document, the document is out of reach. */}
-      <main className="workspace" style={style} inert={frame.covered}>
+      <main
+        ref={surface}
+        className="workspace"
+        style={style}
+        inert={frame.covered || panel === "history"}
+        aria-hidden={panel === "history" || undefined}
+      >
         <DocumentTopbar
           doc={doc}
           path={path}
@@ -606,17 +623,6 @@ export function DocumentWorkspace({
                 }
               />
             )}
-            {panel === "history" && doc && (
-              <VersionHistory
-                endpoint={endpoint}
-                onRestore={() => {
-                  setPanel(null);
-                  tell(
-                    "Version restored. Your previous text was kept in history.",
-                  );
-                }}
-              />
-            )}
             {panel === "document" && doc && (
               <DocumentOptions
                 doc={doc}
@@ -638,6 +644,21 @@ export function DocumentWorkspace({
           </div>
         </dialog>
       </main>
+      {panel === "history" && doc && (
+        <VersionHistory
+          endpoint={endpoint}
+          path={doc.path}
+          documentId={doc.id}
+          token={doc.mediaToken || sharedToken}
+          covered={frame.covered}
+          style={style}
+          onClose={closeHistory}
+          onRestore={() => {
+            closeHistory();
+            tell("Version restored. Your previous text was kept in history.");
+          }}
+        />
+      )}
       {linkTarget && doc && (
         <LinkPreview
           key={linkTarget.url}

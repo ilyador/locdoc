@@ -1138,7 +1138,34 @@ async fn version(
     AxPath((id, revision)): AxPath<(String, String)>,
     _owner: security::Owner,
 ) -> Result<Json<Value>> {
-    version_content(&s, &id, &revision).map(|content| Json(json!({"content": content})))
+    version_preview(&s, &id, &revision).map(Json)
+}
+// Insertion order distinguishes snapshots created within the same second.
+// Read the chosen version and its predecessor under one DB lock.
+fn version_preview(s: &Store, id: &str, revision: &str) -> Result<Value> {
+    s.doc(id)?;
+    let db = s.db.lock().unwrap();
+    let (row, content): (i64, String) = db
+        .query_row(
+            "SELECT rowid,content FROM revisions WHERE id=? AND doc=?",
+            params![revision, id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| bad("Version not found."))?;
+    let previous = db
+        .query_row(
+            "SELECT id,created,content FROM revisions WHERE doc=? AND rowid<? ORDER BY rowid DESC LIMIT 1",
+            params![id, row],
+            |r| {
+                let id: String = r.get(0)?;
+                let created: i64 = r.get(1)?;
+                let content: String = r.get(2)?;
+                Ok(json!({"id": id, "created": created, "content": content}))
+            },
+        )
+        .optional()?;
+    Ok(json!({"content": content, "previous": previous}))
 }
 fn version_content(s: &Store, id: &str, revision: &str) -> Result<String> {
     s.doc(id)?;
@@ -1261,6 +1288,43 @@ async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn version_preview_pairs_only_the_same_documents_previous_snapshot() {
+        let (_dir, s) = store();
+        fs::write(s.root.join("history.md"), "Current").unwrap();
+        fs::write(s.root.join("other.md"), "Other").unwrap();
+        let d = s.index_document("history.md").unwrap();
+        let other = s.index_document("other.md").unwrap();
+        {
+            let db = s.db.lock().unwrap();
+            for (id, doc, content) in [
+                ("old", &d.id, "Old"),
+                ("unrelated", &other.id, "Private other document"),
+                ("middle", &d.id, "Middle"),
+                ("latest", &d.id, "Latest"),
+            ] {
+                db.execute(
+                    "INSERT INTO revisions(id,doc,content,created,kind) VALUES(?,?,?,100,'auto')",
+                    params![id, doc, content],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            version_preview(&s, &d.id, "old").unwrap()["previous"],
+            Value::Null
+        );
+        let middle = version_preview(&s, &d.id, "middle").unwrap();
+        assert_eq!(middle["content"], "Middle");
+        assert_eq!(middle["previous"]["id"], "old");
+        assert_eq!(middle["previous"]["content"], "Old");
+        assert_eq!(
+            version_preview(&s, &d.id, "latest").unwrap()["previous"]["id"],
+            "middle"
+        );
+        assert!(version_preview(&s, &d.id, "unrelated").is_err());
+        assert!(version_preview(&s, &other.id, "latest").is_err());
+    }
     pub(super) fn peer_update(room: &Arc<Mutex<Room>>, append: &str) -> Vec<u8> {
         let peer = Doc::with_options(Options {
             offset_kind: OffsetKind::Utf16,

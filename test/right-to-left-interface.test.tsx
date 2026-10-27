@@ -490,18 +490,21 @@ test("dialogs isolate Hebrew names and paths, and their fields follow typed text
   const history = render(
     <VersionHistory
       endpoint={(suffix) => `/api/docs/x${suffix}`}
+      documentId="x"
+      path="x.md"
+      onClose={() => {}}
       onRestore={() => {}}
     />,
   );
   await waitFor(() =>
-    assert.ok(history.container.querySelector("option[value=v1]")),
+    assert.ok(history.container.querySelector('[data-version-id="v1"]')),
   );
-  fireEvent.change(history.getByLabelText("Saved version"), {
-    target: { value: "v1" },
-  });
+  fireEvent.click(history.container.querySelector('[data-version-id="v1"]')!);
   await waitFor(() =>
     assert.equal(
-      history.container.querySelector(".version-preview")?.textContent,
+      EditorView.findFromDOM(
+        history.container.querySelector(".version-preview .cm-content")!,
+      )?.state.doc.toString(),
       "שורה בעברית\nEnglish line",
     ),
   );
