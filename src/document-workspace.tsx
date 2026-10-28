@@ -29,6 +29,7 @@ import { IconButton } from "./ui";
 import { documentFormat, documentName } from "./document-format";
 import { CommentConversation, useConversation } from "./document-conversation";
 import { DocumentFooter } from "./document-footer";
+import { displayReport } from "./display-report";
 import { DocumentFormatbar } from "./document-formatbar";
 import { DocumentTopbar } from "./document-topbar";
 import { uploadAttachment } from "./document-upload";
@@ -199,6 +200,7 @@ export function DocumentWorkspace({
   const appearanceTrigger = useRef<HTMLButtonElement>(null);
   const sidebarTrigger = useRef<HTMLButtonElement>(null);
   const surface = useRef<HTMLElement>(null);
+  const capturedDisplay = useRef("");
   const closeHistory = () => {
     setPanel(null);
     requestAnimationFrame(() => {
@@ -301,7 +303,10 @@ export function DocumentWorkspace({
     choose,
     prepare: prepareNavigation,
     shareFolder,
-    settings: () => setPanel("settings"),
+    settings: () => {
+      capturedDisplay.current = config?.owner ? displayReport(document) : "";
+      setPanel("settings");
+    },
     trigger: sidebarTrigger,
     focusesEditor: () => !!id && files.focusesEditor(id),
   };
@@ -606,6 +611,7 @@ export function DocumentWorkspace({
             )}
             {panel === "settings" && (
               <WorkspaceSettings
+                displayReport={capturedDisplay.current}
                 config={config}
                 id={id}
                 doc={doc}

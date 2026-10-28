@@ -537,6 +537,105 @@ test("workspace settings hand off to nonmodal appearance and other dialogs still
   );
   assert.ok(screen.getByRole("dialog", { name: "Share document" }).open);
 });
+test("the display report is captured before Settings and keeps that geometry when copied or selected", async () => {
+  await openWorkspace();
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const copied: string[] = [];
+  let top = 700;
+  HTMLElement.prototype.getBoundingClientRect = function () {
+    return this.classList.contains("statusbar")
+      ? new DOMRect(0, top, 840, 36)
+      : rect.call(this);
+  };
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      async writeText(text: string) {
+        copied.push(text);
+      },
+    },
+  });
+  try {
+    fireEvent.click(document.querySelector(".profile")!);
+    // A focused dialog/keyboard can alter geometry after the original capture.
+    top = 400;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy display report" }),
+    );
+    await screen.findByText(/Display measurements copied/);
+    assert.equal(copied.length, 1);
+    assert.equal(JSON.parse(copied[0]).elements[".statusbar"].y, 700);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        async writeText() {
+          throw new Error("Not allowed");
+        },
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy display report" }),
+    );
+    const field = await screen.findByRole("textbox", {
+      name: "Display report",
+    });
+    assert.equal(field.readOnly, true);
+    assert.equal(
+      field.value,
+      copied[0],
+      "manual copying retains the same captured report",
+    );
+  } finally {
+    HTMLElement.prototype.getBoundingClientRect = rect;
+    if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+    else Reflect.deleteProperty(navigator, "clipboard");
+  }
+});
+test("display reports include bounded layout data without document content, URLs, names or credentials", async () => {
+  const { displayReport } = await import("../src/display-report");
+  const secret = "PRIVATE_TEXT_LINK_NAME_KEY";
+  const title = document.title,
+    href = location.href;
+  const element = document.createElement("div");
+  element.className = "workspace";
+  element.textContent = secret;
+  element.setAttribute("data-path", secret);
+  const field = document.createElement("input");
+  field.type = "password";
+  field.value = secret;
+  element.append(field);
+  const script = document.createElement("script");
+  script.type = "module";
+  script.src = `/assets/index-fixture.js?token=${secret}`;
+  document.body.append(element, script);
+  document.title = secret;
+  localStorage.setItem("locdoc.report-test", secret);
+  history.replaceState(null, "", `/d/${secret}?key=${secret}#${secret}`);
+  const children = document.body.childElementCount;
+  try {
+    const report = displayReport(document),
+      parsed = JSON.parse(report);
+    assert.ok(
+      !report.includes(secret),
+      "display reports never copy private text or credentials",
+    );
+    assert.ok(report.length < 10000, "report output stays bounded");
+    assert.equal(parsed.bundle, "/assets/index-fixture.js");
+    assert.equal(parsed.version, 1);
+    assert.equal(
+      document.body.childElementCount,
+      children,
+      "measurement probes are removed",
+    );
+  } finally {
+    history.replaceState(null, "", href);
+    document.title = title;
+    localStorage.removeItem("locdoc.report-test");
+    element.remove();
+    script.remove();
+  }
+});
 test("paragraph spacing is adjustable and resettable in each writing profile", async () => {
   const { AppearancePanel } = await import("../src/appearance.tsx");
   const previous = new Map(Object.entries(localStorage));
@@ -3042,10 +3141,6 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
   const rect = HTMLElement.prototype.getBoundingClientRect;
   const computed = window.getComputedStyle;
   const width = window.innerWidth;
-  const clientHeight = Object.getOwnPropertyDescriptor(
-    document.documentElement,
-    "clientHeight",
-  );
   try {
     for (const profile of [
       {
@@ -3056,18 +3151,8 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       },
       { full: 812, top: 0, bottom: 0, visible: 812 },
       { full: 844, top: 0, bottom: 0, visible: 844 },
-      // Model a fixed gauge shorter than the tablet's layout viewport: the
-      // app must cover the remaining region instead of leaving a bottom gap.
-      {
-        width: 840,
-        full: 1244,
-        layout: 1280,
-        top: 24,
-        bottom: 20,
-        visible: 1280,
-      },
     ]) {
-      window.innerWidth = profile.width ?? 390;
+      window.innerWidth = 390;
       const viewport = Object.assign(new window.EventTarget(), {
         height: profile.visible,
         offsetTop: 0,
@@ -3078,10 +3163,6 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       });
       Object.defineProperty(navigator, "standalone", {
         value: true,
-        configurable: true,
-      });
-      Object.defineProperty(document.documentElement, "clientHeight", {
-        get: () => profile.layout ?? profile.full,
         configurable: true,
       });
       HTMLElement.prototype.getBoundingClientRect = function () {
@@ -3103,7 +3184,7 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       try {
         assert.equal(
           root.style.getPropertyValue("--app-viewport-height"),
-          `${profile.layout ?? profile.full}px`,
+          `${profile.full}px`,
         );
         assert.ok(!root.hasAttribute("data-keyboard-open"));
         input.focus();
@@ -3118,7 +3199,6 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
         assert.ok(root.hasAttribute("data-keyboard-open"));
         // Rotating with an open content-resizing keyboard still hides the footer.
         window.innerWidth = 844;
-        profile.layout = undefined;
         profile.full = 250;
         profile.top = profile.bottom = 0;
         viewport.height = 250;
@@ -3146,13 +3226,6 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
     }
   } finally {
     window.innerWidth = width;
-    if (clientHeight)
-      Object.defineProperty(
-        document.documentElement,
-        "clientHeight",
-        clientHeight,
-      );
-    else Reflect.deleteProperty(document.documentElement, "clientHeight");
     HTMLElement.prototype.getBoundingClientRect = rect;
     window.getComputedStyle = computed;
     if (vv) Object.defineProperty(window, "visualViewport", vv);

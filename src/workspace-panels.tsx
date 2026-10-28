@@ -30,6 +30,7 @@ import type { Config, Document } from "./model";
 import { normalizePresence } from "./presence";
 import { RecentlyDeleted } from "./trash";
 import { PathText } from "./ui";
+import { CopyDisplayReport } from "./display-report";
 
 export function panelTitle(panel: string | null) {
   return {
@@ -211,6 +212,7 @@ function DisplayName({
 }
 
 export function WorkspaceSettings({
+  displayReport,
   config,
   id,
   doc,
@@ -222,6 +224,7 @@ export function WorkspaceSettings({
   toggleAppearance,
   lock,
 }: {
+  displayReport: string;
   config: Config | null;
   id: string | null;
   doc: Document | null;
@@ -262,6 +265,7 @@ export function WorkspaceSettings({
       {config?.owner && <RecentlyDeleted files={files} />}
       {config?.owner && <RemovedDocumentRecovery />}
       {config?.owner && <McpConnections publicUrl={config.publicUrl} />}
+      {config?.owner && <CopyDisplayReport report={displayReport} />}
       {config?.owner && (
         <button className="menu-action" onClick={lock}>
           <LockSimple />

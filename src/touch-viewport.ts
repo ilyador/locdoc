@@ -69,13 +69,7 @@ export function protectTouchViewport(target: Document) {
       (idle.usable - visible > 1 || rotatedKeyboardHeight !== null);
     root.toggleAttribute("data-keyboard-open", keyboardOpen);
     if (standalone && !keyboardOpen) {
-      // A standalone fixed gauge can be shorter than the layout viewport.
-      // At rest the app must cover at least that full page height. Keep
-      // this out of keyboard detection and its smaller visual-viewport size.
-      root.style.setProperty(
-        "--app-viewport-height",
-        `${Math.max(full, root.clientHeight)}px`,
-      );
+      root.style.setProperty("--app-viewport-height", `${full}px`);
       root.style.removeProperty("--app-viewport-top");
       return;
     }
