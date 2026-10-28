@@ -3042,6 +3042,10 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
   const rect = HTMLElement.prototype.getBoundingClientRect;
   const computed = window.getComputedStyle;
   const width = window.innerWidth;
+  const clientHeight = Object.getOwnPropertyDescriptor(
+    document.documentElement,
+    "clientHeight",
+  );
   try {
     for (const profile of [
       {
@@ -3052,8 +3056,18 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       },
       { full: 812, top: 0, bottom: 0, visible: 812 },
       { full: 844, top: 0, bottom: 0, visible: 844 },
+      // Model a fixed gauge shorter than the tablet's layout viewport: the
+      // app must cover the remaining region instead of leaving a bottom gap.
+      {
+        width: 840,
+        full: 1244,
+        layout: 1280,
+        top: 24,
+        bottom: 20,
+        visible: 1280,
+      },
     ]) {
-      window.innerWidth = 390;
+      window.innerWidth = profile.width ?? 390;
       const viewport = Object.assign(new window.EventTarget(), {
         height: profile.visible,
         offsetTop: 0,
@@ -3064,6 +3078,10 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       });
       Object.defineProperty(navigator, "standalone", {
         value: true,
+        configurable: true,
+      });
+      Object.defineProperty(document.documentElement, "clientHeight", {
+        get: () => profile.layout ?? profile.full,
         configurable: true,
       });
       HTMLElement.prototype.getBoundingClientRect = function () {
@@ -3085,7 +3103,7 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
       try {
         assert.equal(
           root.style.getPropertyValue("--app-viewport-height"),
-          `${profile.full}px`,
+          `${profile.layout ?? profile.full}px`,
         );
         assert.ok(!root.hasAttribute("data-keyboard-open"));
         input.focus();
@@ -3100,6 +3118,7 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
         assert.ok(root.hasAttribute("data-keyboard-open"));
         // Rotating with an open content-resizing keyboard still hides the footer.
         window.innerWidth = 844;
+        profile.layout = undefined;
         profile.full = 250;
         profile.top = profile.bottom = 0;
         viewport.height = 250;
@@ -3127,6 +3146,13 @@ test("measured viewport and footer visibility survive keyboard resize, rotation 
     }
   } finally {
     window.innerWidth = width;
+    if (clientHeight)
+      Object.defineProperty(
+        document.documentElement,
+        "clientHeight",
+        clientHeight,
+      );
+    else Reflect.deleteProperty(document.documentElement, "clientHeight");
     HTMLElement.prototype.getBoundingClientRect = rect;
     window.getComputedStyle = computed;
     if (vv) Object.defineProperty(window, "visualViewport", vv);
