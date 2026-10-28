@@ -2174,6 +2174,97 @@ test("keyboard link selection stays visible in a long result list", async () => 
   }
 });
 
+test("installed iPad uses the full CSS viewport when fixed insets stop above it", async () => {
+  const { protectTouchViewport } = await import("../src/touch-viewport.ts");
+  const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");
+  const standalone = Object.getOwnPropertyDescriptor(navigator, "standalone");
+  const rect = HTMLElement.prototype.getBoundingClientRect;
+  const computed = window.getComputedStyle;
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  const viewport = Object.assign(new window.EventTarget(), {
+    height: 1101,
+    offsetTop: 0,
+  });
+  const input = document.createElement("textarea");
+  document.body.append(input);
+  let stop: (() => void) | undefined;
+  try {
+    window.innerWidth = 744;
+    window.innerHeight = 1101;
+    Object.defineProperty(window, "visualViewport", {
+      value: viewport,
+      configurable: true,
+    });
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (!this.hasAttribute("data-viewport-gauge")) return rect.call(this);
+      // Actual iPad report: fixed inset:0 = 1101, but 100vh/100lvh = 1133.
+      const full = /^(100vh|100lvh)$/.test(this.style.height);
+      return new DOMRect(0, 0, 744, full ? 1133 : 1101);
+    };
+    window.getComputedStyle = function (element, pseudo) {
+      return element.hasAttribute("data-viewport-gauge")
+        ? ({ paddingTop: "32px", paddingBottom: "20px" } as CSSStyleDeclaration)
+        : computed.call(window, element, pseudo);
+    };
+    for (const installed of [true, false]) {
+      Object.defineProperty(navigator, "standalone", {
+        value: installed,
+        configurable: true,
+      });
+      const root = document.documentElement;
+      stop = protectTouchViewport(document);
+      const expected = installed ? "1133px" : "1101px";
+      assert.equal(
+        root.style.getPropertyValue("--app-viewport-height"),
+        expected,
+      );
+      input.focus();
+      assert.ok(!root.hasAttribute("data-keyboard-open"));
+      assert.equal(
+        root.style.getPropertyValue("--app-viewport-height"),
+        expected,
+      );
+      viewport.height = 700;
+      viewport.offsetTop = 12;
+      viewport.dispatchEvent(new window.Event("resize"));
+      assert.ok(root.hasAttribute("data-keyboard-open"));
+      assert.equal(
+        root.style.getPropertyValue("--app-viewport-height"),
+        "700px",
+      );
+      assert.equal(root.style.getPropertyValue("--app-viewport-top"), "12px");
+      // Done dismisses the keyboard without necessarily blurring the editor.
+      viewport.height = 1101;
+      viewport.offsetTop = 0;
+      viewport.dispatchEvent(new window.Event("resize"));
+      assert.ok(!root.hasAttribute("data-keyboard-open"));
+      assert.equal(
+        root.style.getPropertyValue("--app-viewport-height"),
+        expected,
+      );
+      assert.equal(
+        root.style.getPropertyValue("--app-viewport-top"),
+        installed ? "" : "0px",
+      );
+      input.blur();
+      stop();
+      stop = undefined;
+    }
+  } finally {
+    stop?.();
+    input.remove();
+    window.innerWidth = width;
+    window.innerHeight = height;
+    HTMLElement.prototype.getBoundingClientRect = rect;
+    window.getComputedStyle = computed;
+    if (vv) Object.defineProperty(window, "visualViewport", vv);
+    else Reflect.deleteProperty(window, "visualViewport");
+    if (standalone) Object.defineProperty(navigator, "standalone", standalone);
+    else Reflect.deleteProperty(navigator, "standalone");
+  }
+});
+
 test("standalone safe-area height differences cannot shorten the shell or survive keyboard dismissal", async () => {
   const { protectTouchViewport } = await import("../src/touch-viewport.ts");
   const vvDescriptor = Object.getOwnPropertyDescriptor(

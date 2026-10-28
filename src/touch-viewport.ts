@@ -13,14 +13,17 @@ export function protectTouchViewport(target: Document) {
   const previousStandalone = root.hasAttribute("data-standalone");
   const previousKeyboard = root.hasAttribute("data-keyboard-open");
   root.toggleAttribute("data-standalone", standalone);
-  // Measure the full viewport without a painted fixed app ancestor, which can
-  // influence iOS's native status-bar treatment. Explicit pixels also avoid
-  // WebKit subtracting safe areas from an absolutely positioned shell's insets.
+  // Measure without a painted fixed app ancestor, which can influence iOS's
+  // native status bar. In installed iPad apps even fixed inset:0 can stop short
+  // of the full CSS viewport; use its large viewport height while idle instead.
+  // The keyboard still uses the visual viewport below.
   const gauge = target.createElement("div");
   gauge.setAttribute("data-viewport-gauge", "");
   gauge.setAttribute("aria-hidden", "true");
   gauge.style.cssText =
     "position:fixed;inset:0;pointer-events:none;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box;";
+  if (standalone)
+    gauge.style.cssText += "bottom:auto;height:100vh;height:100lvh;";
   (target.body || root).appendChild(gauge);
   let idle: { width: number; usable: number } | null = null;
   let keyboardOpen = false;
