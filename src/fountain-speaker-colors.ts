@@ -14,21 +14,21 @@ export function fountainSpeakerName(text: string) {
 const distance = (a: number, b: number) =>
   180 - Math.abs(Math.abs(a - b) - 180);
 
-// Coordinated text inks, not a ring of equally gray pastels. Each row is
-// hue, light-mode L/C, dark-mode L/C; both themes keep normal-text contrast.
+// Muted text inks: enough color to identify a speaker without competing with
+// dialogue. Each row is hue, light-mode L/C, dark-mode L/C.
 const palette = [
-  [255, 0.48, 0.19, 0.78, 0.12], // cobalt
-  [65, 0.53, 0.14, 0.82, 0.14], // amber
-  [180, 0.47, 0.1, 0.75, 0.13], // teal
-  [15, 0.53, 0.18, 0.79, 0.16], // crimson
-  [305, 0.48, 0.19, 0.78, 0.15], // violet
-  [120, 0.52, 0.13, 0.83, 0.16], // olive
-  [40, 0.51, 0.16, 0.79, 0.14], // copper
-  [220, 0.53, 0.1, 0.81, 0.12], // cyan
-  [340, 0.5, 0.18, 0.77, 0.15], // magenta
-  [150, 0.51, 0.14, 0.8, 0.16], // green
-  [280, 0.54, 0.17, 0.75, 0.14], // indigo
-  [90, 0.48, 0.1, 0.77, 0.12], // ochre
+  [255, 0.48, 0.133, 0.78, 0.084], // cobalt
+  [65, 0.53, 0.098, 0.82, 0.098], // amber
+  [180, 0.47, 0.07, 0.75, 0.091], // teal
+  [15, 0.53, 0.126, 0.79, 0.112], // crimson
+  [305, 0.48, 0.133, 0.78, 0.105], // violet
+  [120, 0.52, 0.091, 0.83, 0.112], // olive
+  [40, 0.51, 0.112, 0.79, 0.098], // copper
+  [220, 0.53, 0.07, 0.81, 0.084], // cyan
+  [340, 0.5, 0.126, 0.77, 0.105], // magenta
+  [150, 0.51, 0.098, 0.8, 0.112], // green
+  [280, 0.54, 0.119, 0.75, 0.098], // indigo
+  [90, 0.48, 0.07, 0.77, 0.084], // ochre
 ] as const;
 
 function tone(hue: number) {

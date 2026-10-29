@@ -134,7 +134,7 @@ test("unavailable or invalid color storage never blocks the screenplay", () => {
   }
 });
 
-test("a twelve-person cast has perceptually separated inks in both themes, including after upgrading old colors", () => {
+test("a twelve-person cast has muted, separated inks in both themes, including after upgrading old colors", () => {
   let saved = '[["LEAD",30],["FRIEND",31]]';
   const palette = new FountainSpeakerColors("script", {
     getItem: () => saved,
@@ -159,6 +159,7 @@ test("a twelve-person cast has perceptually separated inks in both themes, inclu
         .match(pattern)![1]
         .split(" ")
         .map(Number);
+      assert.ok(c <= 0.135, `${theme}: speaker accents stay restrained`);
       return [
         l,
         c * Math.cos((h * Math.PI) / 180),
@@ -168,7 +169,10 @@ test("a twelve-person cast has perceptually separated inks in both themes, inclu
     for (let i = 0; i < inks.length; i++)
       for (let j = i + 1; j < inks.length; j++)
         assert.ok(
-          Math.hypot(...inks[i].map((v, k) => v - inks[j][k])) > 0.06,
+          // A quieter palette trades some separation among minor roles for
+          // restrained color. The first roles retain much wider separation.
+          Math.hypot(...inks[i].map((v, k) => v - inks[j][k])) >
+            (j < 3 ? 0.13 : 0.045),
           `${theme}: distinguishable cast inks`,
         );
   }
