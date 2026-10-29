@@ -34,7 +34,7 @@
   --syntax-mark: #cb156f;
   --fountain-heading: #000;
   --fountain-speaker: #566f8b;
-  --fountain-parenthetical: #806b88;
+  --fountain-parenthetical: var(--muted);
   /* Each stack starts with the shapes face from shape-fonts.css, and each
      family is followed by its Hebrew partner from hebrew-fonts.css. */
   --ui-font:
@@ -3030,7 +3030,7 @@ button:hover {
   --syntax-mark: #e892ba;
   --fountain-heading: var(--text);
   --fountain-speaker: #9eb3ca;
-  --fountain-parenthetical: #b8a5c0;
+  --fountain-parenthetical: var(--muted);
   --float-shadow: 0 10px 30px #0000006b;
   color-scheme: dark;
 }

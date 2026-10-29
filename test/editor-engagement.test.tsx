@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { JSDOM } from "jsdom";
 import React from "react";
 import * as Y from "yjs";
-import { EditorView } from "@codemirror/view";
+import { Decoration, EditorView, WidgetType } from "@codemirror/view";
 import { Awareness } from "y-protocols/awareness";
-import { EditorState } from "@codemirror/state";
+import { EditorState, StateEffect } from "@codemirror/state";
 import { ensureSyntaxTree } from "@codemirror/language";
 import { keyboardCaretScroll } from "../src/editor-scroll";
 
@@ -394,6 +394,12 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
     const doc = open(source, path);
     const field = document.createElement("input");
     document.body.append(field);
+    const previousRects = window.Range.prototype.getClientRects;
+    window.Range.prototype.getClientRects = function () {
+      return this.collapsed
+        ? ([] as any)
+        : ([new window.DOMRect(16, 0, 128, 20)] as any);
+    };
     doc.view.coordsAtPos = (pos) => ({
       top: 0,
       bottom: 20,
@@ -478,10 +484,169 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
       );
       assert.equal(doc.text.toString(), "Before " + source);
     } finally {
+      window.Range.prototype.getClientRects = previousRects;
       field.remove();
       doc.close();
     }
   });
+
+test("wrapped selection follows its own text boxes, not an earlier line's indentation", async () => {
+  const source =
+    "@ANA\nA line.\n\n/* Selected note with enough words to wrap. */\n\nAnother paragraph.";
+  const doc = open(source, "Scene.fountain");
+  const previousRects = window.Range.prototype.getClientRects;
+  window.Range.prototype.getClientRects = function () {
+    return this.toString().startsWith("/* Selected")
+      ? ([
+          new window.DOMRect(0, 60, 200, 20),
+          new window.DOMRect(0, 80, 144, 20),
+        ] as any)
+      : ([] as any);
+  };
+  const box = () => new window.DOMRect(0, 0, 300, 200);
+  doc.view.scrollDOM.getBoundingClientRect = box;
+  doc.view.contentDOM.getBoundingClientRect = box;
+  doc.view.coordsAtPos = (pos) => {
+    const line = doc.view.state.doc.lineAt(pos);
+    const x = (pos - line.from) * 8;
+    return {
+      left: x,
+      right: x,
+      top: (line.number - 1) * 20,
+      bottom: line.number * 20,
+    };
+  };
+  const first = doc.view.contentDOM.querySelector<HTMLElement>(".cm-line")!;
+  first.style.paddingLeft = "80px";
+  const geometry = () =>
+    [
+      ...doc.page.container.querySelectorAll<HTMLElement>(
+        ".cm-documentSelectionLayer .cm-selectionBackground",
+      ),
+    ].map((node) => [
+      node.style.left,
+      node.style.top,
+      node.style.width,
+      node.style.height,
+    ]);
+  const expected = [
+    ["0px", "60px", "200px", "20px"],
+    ["0px", "80px", "144px", "20px"],
+  ];
+  try {
+    await act(async () => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: {
+          anchor: source.indexOf("/* Selected"),
+          head: source.indexOf("*/") + 2,
+        },
+        userEvent: "select.pointer",
+      });
+    });
+    await waitFor(() => assert.deepEqual(geometry(), expected));
+    first.style.paddingLeft = "120px";
+    await act(async () => doc.view.requestMeasure());
+    await finishFrame();
+    assert.deepEqual(geometry(), expected);
+    assert.equal(doc.text.toString(), source);
+  } finally {
+    window.Range.prototype.getClientRects = previousRects;
+    doc.close();
+  }
+});
+
+test("a selection crossing an inline conversation paints text, never the conversation", async () => {
+  const source = "Before a conversation and after it.";
+  const doc = open(source, "Notes.txt");
+  const previousRects = window.Range.prototype.getClientRects;
+  let conversation: HTMLElement;
+  class Conversation extends WidgetType {
+    toDOM() {
+      conversation = document.createElement("div");
+      conversation.className = "inline-comment-host";
+      conversation.contentEditable = "false";
+      conversation.textContent = "A conversation";
+      return conversation;
+    }
+  }
+  window.Range.prototype.getClientRects = function () {
+    if (this.collapsed) return [] as any;
+    return [
+      conversation && this.intersectsNode(conversation)
+        ? new window.DOMRect(0, 40, 200, 90)
+        : new window.DOMRect(0, 0, 100, 20),
+    ] as any;
+  };
+  try {
+    await act(async () => {
+      doc.view.dispatch({
+        effects: StateEffect.appendConfig.of(
+          EditorView.decorations.of(
+            Decoration.set([
+              Decoration.widget({
+                widget: new Conversation(),
+                block: true,
+              }).range(9),
+            ]),
+          ),
+        ),
+      });
+      doc.view.focus();
+      doc.view.dispatch({ selection: { anchor: 0, head: source.length } });
+    });
+    await waitFor(() => {
+      const backgrounds = doc.page.container.querySelectorAll<HTMLElement>(
+        ".cm-documentSelectionLayer .cm-selectionBackground",
+      );
+      assert.equal(backgrounds.length, 2, "both text fragments are painted");
+      assert.ok(
+        [...backgrounds].every((node) => node.style.height === "20px"),
+        "the conversation's 90px rectangle must not be painted",
+      );
+    });
+    assert.equal(doc.text.toString(), source);
+  } finally {
+    window.Range.prototype.getClientRects = previousRects;
+    doc.close();
+  }
+});
+
+test("selecting only newlines keeps a visible highlight on each selected line", async () => {
+  const doc = open("One\n\nTwo", "Notes.txt");
+  doc.view.coordsAtPos = (pos) => {
+    const line = doc.view.state.doc.lineAt(pos);
+    const x = (pos - line.from) * 8;
+    return {
+      left: x,
+      right: x,
+      top: (line.number - 1) * 20,
+      bottom: line.number * 20,
+    };
+  };
+  try {
+    await act(async () => {
+      doc.view.focus();
+      doc.view.dispatch({
+        selection: { anchor: 3, head: 5 },
+        userEvent: "select.pointer",
+      });
+    });
+    await waitFor(() => {
+      const backgrounds = doc.page.container.querySelectorAll<HTMLElement>(
+        ".cm-documentSelectionLayer .cm-selectionBackground",
+      );
+      assert.equal(backgrounds.length, 2);
+      assert.ok(
+        [...backgrounds].every((node) => parseFloat(node.style.width) > 0),
+        "selected line breaks remain visible even without selected letters",
+      );
+    });
+    assert.equal(doc.text.toString(), "One\n\nTwo");
+  } finally {
+    doc.close();
+  }
+});
 
 for (const resume of ["typing", "arrow", "mouse", "tap"] as const)
   test(`resuming with ${resume} hides the old touch-held Markdown block`, async () => {
