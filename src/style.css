@@ -32,7 +32,7 @@
   --syntax-violet: #5658b9;
   --syntax-amber: #946800;
   --syntax-mark: #cb156f;
-  --fountain-scene: #971e70;
+  --fountain-heading: #000;
   --fountain-speaker: #566f8b;
   --fountain-parenthetical: #806b88;
   /* Each stack starts with the shapes face from shape-fonts.css, and each
@@ -1310,9 +1310,13 @@ button:hover {
   min-height: 0.8em !important;
   line-height: 0.8 !important;
 }
+.fountain-title > .cm-line,
+.fountain-section > .cm-line,
 .fountain-scene > .cm-line {
-  color: var(--fountain-scene);
+  color: var(--fountain-heading);
   font-weight: var(--weight-bold);
+}
+.fountain-scene > .cm-line {
   text-transform: uppercase;
 }
 .fountain-character > .cm-line {
@@ -1342,16 +1346,12 @@ button:hover {
 .fountain-credit > .cm-line {
   text-align: center;
 }
-.fountain-title > .cm-line {
+.fountain-title > .cm-line,
+.fountain-section > .cm-line {
   font-size: 1.25em;
-  font-weight: var(--weight-semibold);
 }
 .fountain-metadata > .cm-line {
   color: var(--secondary);
-}
-.fountain-section > .cm-line {
-  color: var(--syntax-heading);
-  font-weight: var(--weight-semibold);
 }
 .fountain-synopsis > .cm-line,
 .fountain-note-ink,
@@ -3028,7 +3028,7 @@ button:hover {
   --syntax-violet: #a9a2e5;
   --syntax-amber: #d6b76b;
   --syntax-mark: #e892ba;
-  --fountain-scene: #fffac0;
+  --fountain-heading: var(--text);
   --fountain-speaker: #9eb3ca;
   --fountain-parenthetical: #b8a5c0;
   --float-shadow: 0 10px 30px #0000006b;
