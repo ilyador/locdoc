@@ -30,6 +30,7 @@ import {
 import { emphasisContentRange } from "./emphasis-range";
 import { directionSyntax } from "./text-direction";
 import { previewSelection } from "./editor-engagement";
+import { FountainSpeakerColors } from "./fountain-speaker-colors";
 
 // Reuse the established delimiter parser, with Fountain's underscore semantics.
 // Prefixing each isolated line prevents Markdown block rules from reclassifying it.
@@ -40,6 +41,9 @@ export const fountainScript = Facet.define<
   FountainScript,
   FountainScript | null
 >({ combine: (values) => values[0] ?? null });
+const speakerColorKey = Facet.define<string, string>({
+  combine: (values) => values[0] ?? "",
+});
 
 // One value for each kind of decoration, which every line of that kind
 // shares: a long script allocates and compares a few values, not one or more
@@ -92,6 +96,7 @@ function decorate(
   state: EditorState,
   script: FountainScript,
   focused: boolean,
+  colors: FountainSpeakerColors,
   indices?: number[],
 ) {
   const marks: ReturnType<Decoration["range"]>[] = [];
@@ -100,6 +105,7 @@ function decorate(
     from: state.doc.lineAt(r.from).from,
     to: state.doc.lineAt(r.to).to,
   }));
+  const editing = editingLine(state, focused);
   // A line whose text shows in a record's line reveals its markers as
   // that one displayed line.
   const visibleLineStarts = shownLines(state).at;
@@ -107,6 +113,13 @@ function decorate(
     const start = visibleLineStarts.get(from) ?? from;
     return !active.some((r) => r.from <= to && r.to >= start);
   };
+  // Register complete cues before drawing any of them: a pasted cast may
+  // include the active cue again later. Draft prefixes do not fill storage.
+  for (const index of indices ?? script.lines.keys()) {
+    const line = script.lines[index];
+    if (line.kind === "character" && index !== editing)
+      colors.wrapper(line.text);
+  }
   for (const index of indices ?? script.lines.keys()) {
     const line = script.lines[index];
     // Standalone comments hide their trailing newline. An empty wrapper at
@@ -129,7 +142,12 @@ function decorate(
       line.text.trim()
     )
       marks.push(blockEnd.range(from));
-    blocks.push(wrapper(line.kind).range(from, line.to));
+    blocks.push(
+      (line.kind === "character"
+        ? colors.wrapper(line.text, false)
+        : wrapper(line.kind)
+      ).range(from, line.to),
+    );
     if (line.markers.length && inactive(line.from, line.to))
       for (const range of line.markers)
         if (!(line.kind === "character" && range === line.suffix))
@@ -184,10 +202,12 @@ function decorate(
     for (const range of script.omissions)
       marks.push(omittedInk.range(range.from, range.to));
   }
+  colors.flush();
   return { marks, blocks };
 }
 
 type Preview = {
+  colors: FountainSpeakerColors;
   script: FountainScript;
   focused: boolean;
   editingLine: number | undefined;
@@ -201,9 +221,11 @@ function build(
   state: EditorState,
   script: FountainScript,
   focused: boolean,
+  colors: FountainSpeakerColors,
 ): Preview {
-  const { marks, blocks } = decorate(state, script, focused);
+  const { marks, blocks } = decorate(state, script, focused, colors);
   return {
+    colors,
     script,
     focused,
     editingLine: editingLine(state, focused),
@@ -281,8 +303,9 @@ function relayout(
     }
   }
   if (run) clear(run.from, run.to);
-  const fresh = decorate(state, script, focused, indices);
+  const fresh = decorate(state, script, focused, value.colors, indices);
   return {
+    colors: value.colors,
     script,
     focused,
     editingLine: editingLine(state, focused),
@@ -294,7 +317,13 @@ function relayout(
 }
 
 const field = StateField.define<Preview>({
-  create: (state) => build(state, parseFountain(state.doc.toString()), false),
+  create: (state) =>
+    build(
+      state,
+      parseFountain(state.doc.toString()),
+      false,
+      new FountainSpeakerColors(state.facet(speakerColorKey)),
+    ),
   update(value, tr) {
     const focused =
       tr.effects.find((effect) => effect.is(focus))?.value ?? value.focused;
@@ -323,6 +352,7 @@ const field = StateField.define<Preview>({
             tr.state,
             parseFountain(tr.state.doc.toString(), context),
             focused,
+            value.colors,
           );
     }
     // The records that hide text decide what every line shows.
@@ -333,6 +363,7 @@ const field = StateField.define<Preview>({
           ? value.script
           : parseFountain(tr.state.doc.toString(), context),
         focused,
+        value.colors,
       );
     // A caret on another line reads again only the lines that its old and
     // new lines change; a selection elsewhere, focus in a read-only view or
@@ -346,6 +377,7 @@ const field = StateField.define<Preview>({
           tr.state,
           parseFountain(tr.state.doc.toString(), context),
           focused,
+          value.colors,
         );
       ({ script, lines: changed } = moved);
     }
@@ -374,6 +406,6 @@ const preview: Extension = [
   ),
 ];
 
-export function fountainPreview() {
-  return preview;
+export function fountainPreview(id?: string) {
+  return id ? [preview, speakerColorKey.of(id)] : preview;
 }

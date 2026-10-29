@@ -19,6 +19,7 @@ import {
   type FountainScript,
 } from "../src/fountain";
 import { fountainPreview, fountainScript } from "../src/fountain-preview";
+import { FountainSpeakerColors } from "../src/fountain-speaker-colors";
 import {
   documentFormat,
   documentName,
@@ -26,6 +27,147 @@ import {
 } from "../src/document-format";
 import { countDocumentWords } from "../src/word-count";
 import { resolveDocumentLink } from "../src/document-links";
+
+const speakerHue = (wrapper: { attributes: { [key: string]: string } }) =>
+  Number(wrapper.attributes.style.split(":")[1]);
+
+test("speaker hues are distinct, cue extensions share them, and source stays inert", () => {
+  const colors = new FountainSpeakerColors();
+  const names = [
+    "SARA",
+    "IBRAHIM",
+    "ZE'EV",
+    "ANA",
+    "MAYA",
+    "BEN",
+    "LEE",
+    "MORGAN",
+  ];
+  const hues = names.map((name) => speakerHue(colors.wrapper(name)));
+  assert.equal(new Set(hues).size, names.length);
+  for (let i = 0; i < hues.length; i++)
+    for (let j = i + 1; j < hues.length; j++)
+      assert.ok(
+        180 - Math.abs(Math.abs(hues[i] - hues[j]) - 180) >= 20,
+        "A small cast gets separated hues",
+      );
+  const sara = hues[0];
+  for (const cue of ["SARA (V.O.)", "SARA (CONT'D) ^", "@Sara", "  SARA  "])
+    assert.equal(speakerHue(colors.wrapper(cue)), sara);
+  assert.equal(
+    speakerHue(colors.wrapper("@מאיה")),
+    speakerHue(colors.wrapper("מאיה (O.S.)")),
+  );
+  const hostile = colors.wrapper('<script>alert("x")</script>');
+  assert.deepEqual(Object.keys(hostile.attributes).sort(), ["class", "style"]);
+  assert.ok(
+    Number.isFinite(speakerHue(hostile)),
+    "Only a numeric hue enters the style",
+  );
+});
+
+test("speaker colors survive reordering and reopening without storing unfinished names", () => {
+  const saved = new Map<string, string>();
+  let writes = 0;
+  const storage = {
+    getItem: (key: string) => saved.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      writes++;
+      saved.set(key, value);
+    },
+  };
+  const colors = new FountainSpeakerColors("script", storage);
+  const sara = speakerHue(colors.wrapper("SARA"));
+  const ben = speakerHue(colors.wrapper("BEN"));
+  colors.flush();
+  assert.equal(writes, 1);
+  for (const prefix of ["MA", "MAY", "MAYA"]) colors.wrapper(prefix, false);
+  colors.flush();
+  assert.equal(writes, 1);
+  const reopened = new FountainSpeakerColors("script", storage);
+  reopened.wrapper("ANA");
+  assert.equal(speakerHue(reopened.wrapper("BEN (O.S.)")), ben);
+  assert.equal(speakerHue(reopened.wrapper("SARA")), sara);
+  reopened.flush();
+  const third = new FountainSpeakerColors("script", storage);
+  assert.equal(
+    speakerHue(third.wrapper("ANA")),
+    speakerHue(reopened.wrapper("ANA")),
+  );
+  third.flush();
+  assert.equal(writes, 2);
+  assert.equal(JSON.parse(saved.get("locdoc.speakerColors.script")!).length, 3);
+});
+
+test("unavailable or invalid color storage never blocks the screenplay", () => {
+  const blocked = {
+    getItem: () => {
+      throw new Error("blocked");
+    },
+    setItem: () => {
+      throw new Error("full");
+    },
+  };
+  const colors = new FountainSpeakerColors("script", blocked);
+  const first = speakerHue(colors.wrapper("SARA"));
+  colors.flush();
+  assert.equal(speakerHue(colors.wrapper("SARA")), first);
+  for (const saved of [
+    "not json",
+    "{}",
+    '[["SARA",null],["BEN",999],["LEE",20],["MAYA",20]]',
+  ]) {
+    const palette = new FountainSpeakerColors("script", {
+      getItem: () => saved,
+      setItem: () => {},
+    });
+    const hues = ["SARA", "BEN", "LEE", "MAYA"].map((name) =>
+      speakerHue(palette.wrapper(name)),
+    );
+    assert.equal(new Set(hues).size, 4);
+    assert.ok(
+      hues.every((hue) => Number.isFinite(hue) && hue >= 0 && hue < 360),
+    );
+  }
+});
+
+test("a pasted cast and later cue edits reuse the same speaker wrappers", () => {
+  let state = EditorState.create({
+    doc: "SARA\nHello.\n",
+    extensions: fountainPreview(),
+  });
+  const cues = () => {
+    const result: { text: string; hue: number }[] = [];
+    for (const set of state.facet(EditorView.blockWrappers))
+      set.between(0, state.doc.length, (from, to, wrapper) => {
+        if (wrapper.attributes.class.includes("fountain-character"))
+          result.push({
+            text: state.sliceDoc(from, to),
+            hue: speakerHue(wrapper),
+          });
+      });
+    return result;
+  };
+  const original = cues()[0].hue;
+  state = state.update({ changes: { from: 0, insert: "BEN\nHi.\n\n" } }).state;
+  assert.equal(cues().find((c) => c.text === "SARA")!.hue, original);
+  state = state.update({
+    selection: { anchor: 0 },
+    effects: state
+      .facet(EditorView.focusChangeEffect)
+      .flatMap((effect) => effect(state, true) ?? []),
+  }).state;
+  const source =
+    "MAYA\nHi.\n\nANA\nHello.\n\nMAYA (V.O.)\nAgain.\n\nSARA\nGoodbye.";
+  state = state.update({
+    changes: { from: 0, to: state.doc.length, insert: source },
+    selection: { anchor: 2 },
+  }).state;
+  const cast = cues();
+  assert.equal(cast[0].hue, cast[2].hue);
+  assert.equal(cast[3].hue, original);
+  assert.equal(state.doc.toString(), source);
+});
 
 test("Fountain classifies screenplay elements without changing source positions", () => {
   const source =

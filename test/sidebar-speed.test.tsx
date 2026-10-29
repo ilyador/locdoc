@@ -274,7 +274,9 @@ function counted(entry: any, renders: { count: number }) {
   });
 }
 
-test("the sidebar renders again only the rows whose document or place changed", () => {
+test("the sidebar renders again only the rows whose document or place changed", (t) => {
+  // This checks props changing, not an age label legitimately ticking over.
+  t.mock.timers.enable({ apis: ["Date"], now: now * 1000 });
   for (const view of ["date", "folders"] as const) {
     const renders = { count: 0 };
     const entries = workspace(300).map((entry) => counted(entry, renders));

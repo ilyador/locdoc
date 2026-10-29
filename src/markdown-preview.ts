@@ -508,7 +508,7 @@ export function documentPreview(
   const fountain = format === "fountain";
   return [
     fountain
-      ? [fountainPreview(), fountainSpeakerCompletion()]
+      ? [fountainPreview(id), fountainSpeakerCompletion()]
       : [markdownSupport, livePreview(id, token, path, entries)],
     EditorView.editorAttributes.of({
       class: fountain ? "fountain-editor" : "",
