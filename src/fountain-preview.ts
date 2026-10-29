@@ -317,13 +317,16 @@ function relayout(
 }
 
 const field = StateField.define<Preview>({
-  create: (state) =>
-    build(
-      state,
-      parseFountain(state.doc.toString()),
-      false,
-      new FountainSpeakerColors(state.facet(speakerColorKey)),
-    ),
+  create(state) {
+    const script = parseFountain(state.doc.toString());
+    const colors = new FountainSpeakerColors(state.facet(speakerColorKey));
+    colors.prime(
+      script.lines
+        .filter((line) => line.kind === "character")
+        .map((line) => line.text),
+    );
+    return build(state, script, false, colors);
+  },
   update(value, tr) {
     const focused =
       tr.effects.find((effect) => effect.is(focus))?.value ?? value.focused;

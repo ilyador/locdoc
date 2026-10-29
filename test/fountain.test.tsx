@@ -29,7 +29,7 @@ import { countDocumentWords } from "../src/word-count";
 import { resolveDocumentLink } from "../src/document-links";
 
 const speakerHue = (wrapper: { attributes: { [key: string]: string } }) =>
-  Number(wrapper.attributes.style.split(":")[1]);
+  parseFloat(wrapper.attributes.style.split(":")[1]);
 
 test("speaker hues are distinct, cue extensions share them, and source stays inert", () => {
   const colors = new FountainSpeakerColors();
@@ -96,7 +96,10 @@ test("speaker colors survive reordering and reopening without storing unfinished
   );
   third.flush();
   assert.equal(writes, 2);
-  assert.equal(JSON.parse(saved.get("locdoc.speakerColors.script")!).length, 3);
+  assert.equal(
+    JSON.parse(saved.get("locdoc.speakerColors.script")!).hues.length,
+    3,
+  );
 });
 
 test("unavailable or invalid color storage never blocks the screenplay", () => {
@@ -115,7 +118,7 @@ test("unavailable or invalid color storage never blocks the screenplay", () => {
   for (const saved of [
     "not json",
     "{}",
-    '[["SARA",null],["BEN",999],["LEE",20],["MAYA",20]]',
+    '{"version":2,"hues":[["SARA",null],["BEN",999],["LEE",20],["MAYA",20]]}',
   ]) {
     const palette = new FountainSpeakerColors("script", {
       getItem: () => saved,
@@ -129,6 +132,76 @@ test("unavailable or invalid color storage never blocks the screenplay", () => {
       hues.every((hue) => Number.isFinite(hue) && hue >= 0 && hue < 360),
     );
   }
+});
+
+test("a twelve-person cast has perceptually separated inks in both themes, including after upgrading old colors", () => {
+  let saved = '[["LEAD",30],["FRIEND",31]]';
+  const palette = new FountainSpeakerColors("script", {
+    getItem: () => saved,
+    setItem: (_key, value) => {
+      saved = value;
+    },
+  });
+  const names = [
+    "LEAD",
+    "FRIEND",
+    ...Array.from({ length: 10 }, (_, i) => `SPEAKER ${i}`),
+  ];
+  const wrappers = names.map((name) => palette.wrapper(name));
+  assert.ok(
+    Math.abs(speakerHue(wrappers[0]) - speakerHue(wrappers[1])) > 60,
+    "Old crowded hues are replaced automatically",
+  );
+  for (const theme of ["light", "dark"]) {
+    const inks = wrappers.map((wrapper) => {
+      const pattern = new RegExp(`--speaker-${theme}:oklch\\(([^)]+)\\)`);
+      const [l, c, h] = wrapper.attributes.style
+        .match(pattern)![1]
+        .split(" ")
+        .map(Number);
+      return [
+        l,
+        c * Math.cos((h * Math.PI) / 180),
+        c * Math.sin((h * Math.PI) / 180),
+      ];
+    });
+    for (let i = 0; i < inks.length; i++)
+      for (let j = i + 1; j < inks.length; j++)
+        assert.ok(
+          Math.hypot(...inks[i].map((v, k) => v - inks[j][k])) > 0.06,
+          `${theme}: distinguishable cast inks`,
+        );
+  }
+  palette.flush();
+  assert.equal(JSON.parse(saved).version, 2);
+  const reopened = new FountainSpeakerColors("script", {
+    getItem: () => saved,
+    setItem: () => {},
+  });
+  for (let i = 0; i < names.length; i++)
+    assert.equal(
+      speakerHue(reopened.wrapper(names[i])),
+      speakerHue(wrappers[i]),
+    );
+  const extra = palette.wrapper("EXTRA SPEAKER");
+  assert.ok(
+    !wrappers.some((wrapper) => speakerHue(wrapper) === speakerHue(extra)),
+    "Larger casts still get new hues",
+  );
+});
+
+test("main speakers receive the widest palette separation before minor roles, without changing saved assignments", () => {
+  const palette = new FountainSpeakerColors();
+  palette.prime(["EXTRA", "LEAD", "COLEAD", "LEAD", "COLEAD", "LEAD"]);
+  const expected = new FountainSpeakerColors();
+  for (const name of ["LEAD", "COLEAD", "EXTRA"])
+    assert.equal(
+      speakerHue(palette.wrapper(name)),
+      speakerHue(expected.wrapper(name)),
+    );
+  const before = speakerHue(palette.wrapper("EXTRA"));
+  palette.prime(["EXTRA", "EXTRA", "NEW ROLE", "EXTRA"]);
+  assert.equal(speakerHue(palette.wrapper("EXTRA")), before);
 });
 
 test("a pasted cast and later cue edits reuse the same speaker wrappers", () => {

@@ -14,6 +14,46 @@ export function fountainSpeakerName(text: string) {
 const distance = (a: number, b: number) =>
   180 - Math.abs(Math.abs(a - b) - 180);
 
+// Coordinated text inks, not a ring of equally gray pastels. Each row is
+// hue, light-mode L/C, dark-mode L/C; both themes keep normal-text contrast.
+const palette = [
+  [255, 0.48, 0.19, 0.78, 0.12], // cobalt
+  [65, 0.53, 0.14, 0.82, 0.14], // amber
+  [180, 0.47, 0.1, 0.75, 0.13], // teal
+  [15, 0.53, 0.18, 0.79, 0.16], // crimson
+  [305, 0.48, 0.19, 0.78, 0.15], // violet
+  [120, 0.52, 0.13, 0.83, 0.16], // olive
+  [40, 0.51, 0.16, 0.79, 0.14], // copper
+  [220, 0.53, 0.1, 0.81, 0.12], // cyan
+  [340, 0.5, 0.18, 0.77, 0.15], // magenta
+  [150, 0.51, 0.14, 0.8, 0.16], // green
+  [280, 0.54, 0.17, 0.75, 0.14], // indigo
+  [90, 0.48, 0.1, 0.77, 0.12], // ochre
+] as const;
+
+function tone(hue: number) {
+  return palette.reduce((nearest, ink) =>
+    distance(ink[0], hue) < distance(nearest[0], hue) ? ink : nearest,
+  );
+}
+
+// Compare perceived separation in both themes, rather than just hue angles.
+function separation(a: number, b: number) {
+  const first = tone(a),
+    second = tone(b);
+  const radians = ((a - b) * Math.PI) / 180;
+  return Math.min(
+    ...[1, 3].map((i) =>
+      Math.sqrt(
+        (first[i] - second[i]) ** 2 +
+          first[i + 1] ** 2 +
+          second[i + 1] ** 2 -
+          2 * first[i + 1] * second[i + 1] * Math.cos(radians),
+      ),
+    ),
+  );
+}
+
 function chooseHue(name: string, used: number[]) {
   // A name-seeded random starting point also keeps a new, unfinished cue steady
   // when its line is laid out again. No document text is rewritten for color.
@@ -21,9 +61,16 @@ function chooseHue(name: string, used: number[]) {
   for (const letter of name)
     hash = Math.imul(hash ^ letter.codePointAt(0)!, 16777619);
   const preferred = ((hash >>> 0) / 2 ** 32) * 360;
-  if (used.every((hue) => distance(hue, preferred) >= 35)) return preferred;
-  // When the preferred hue is crowded, bisect the largest available gap.
-  // Existing speakers never move; a large cast gradually shares the wheel.
+  const available = palette.filter((ink) => !used.includes(ink[0]));
+  if (!used.length) return tone(preferred)[0];
+  if (available.length) {
+    const score = (hue: number) =>
+      Math.min(...used.map((other) => separation(hue, other)));
+    return available.reduce((best, ink) =>
+      score(ink[0]) > score(best[0]) ? ink : best,
+    )[0];
+  }
+  // A larger cast shares the remaining gaps; existing speakers never move.
   const sorted = [...used].sort((a, b) => a - b);
   let gap = -1,
     hue = preferred;
@@ -52,11 +99,13 @@ export class FountainSpeakerColors {
     if (!this.key) return;
     try {
       this.storage = storage ?? globalThis.localStorage;
-      const saved: unknown = JSON.parse(
-        this.storage?.getItem(this.key) || "null",
-      );
-      if (!Array.isArray(saved)) return;
-      for (const pair of saved) {
+      const saved = JSON.parse(this.storage?.getItem(this.key) || "null") as {
+        version?: unknown;
+        hues?: unknown;
+      } | null;
+      // Replace the old low-chroma palette once, including saved browser hues.
+      if (saved?.version !== 2 || !Array.isArray(saved.hues)) return;
+      for (const pair of saved.hues) {
         if (
           Array.isArray(pair) &&
           pair.length === 2 &&
@@ -75,6 +124,18 @@ export class FountainSpeakerColors {
     }
   }
 
+  prime(cues: Iterable<string>) {
+    const counts = new Map<string, number>();
+    for (const cue of cues) {
+      const name = fountainSpeakerName(cue).toUpperCase();
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    // Main roles get the widest separation first. Saved assignments never move
+    // when dialogue counts change or somebody adds another speaker later.
+    for (const [name] of [...counts].sort((a, b) => b[1] - a[1]))
+      this.wrapper(name);
+  }
+
   wrapper(text: string, remember = true) {
     const name = fountainSpeakerName(text).toUpperCase();
     let hue = this.hues.get(name);
@@ -87,11 +148,12 @@ export class FountainSpeakerColors {
     }
     let wrapper = this.wrappers.get(hue);
     if (!wrapper) {
+      const [, lightness, chroma, darkLightness, darkChroma] = tone(hue);
       wrapper = BlockWrapper.create({
         tagName: "div",
         attributes: {
           class: "fountain-line fountain-character",
-          style: `--speaker-hue:${hue}`,
+          style: `--speaker-hue:${hue};--speaker-light:oklch(${lightness} ${chroma} ${hue});--speaker-dark:oklch(${darkLightness} ${darkChroma} ${hue})`,
         },
       });
       this.wrappers.set(hue, wrapper);
@@ -103,7 +165,10 @@ export class FountainSpeakerColors {
     if (!this.dirty || !this.key) return;
     this.dirty = false;
     try {
-      this.storage?.setItem(this.key, JSON.stringify([...this.hues]));
+      this.storage?.setItem(
+        this.key,
+        JSON.stringify({ version: 2, hues: [...this.hues] }),
+      );
     } catch {
       /* Keep the colors in memory if storage is unavailable. */
     }

@@ -1318,7 +1318,10 @@ button:hover {
 .fountain-character > .cm-line {
   padding-inline-start: 33.333% !important;
   color: var(--fountain-speaker);
-  color: oklch(from var(--fountain-speaker) l c var(--speaker-hue, h));
+  color: light-dark(
+    var(--speaker-light, var(--fountain-speaker)),
+    var(--speaker-dark, var(--fountain-speaker))
+  );
   font-weight: var(--weight-semibold);
 }
 .fountain-dialogue > .cm-line,
