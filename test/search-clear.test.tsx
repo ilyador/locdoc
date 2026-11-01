@@ -534,6 +534,30 @@ test("Insert link puts the caret in the link chooser's field, so typing goes the
   assert.equal(screen.queryAllByRole("option").length, 10);
 });
 
+test("the owner key field takes focus as the sign-in dialog opens", async () => {
+  const { OwnerLoginForm } = await import("../src/workspace-panels.tsx");
+  const page = render(
+    <dialog>
+      <button>Close dialog</button>
+      <OwnerLoginForm
+        apiKey=""
+        setApiKey={() => {}}
+        busy={false}
+        onSubmit={() => {}}
+      />
+    </dialog>,
+  );
+  try {
+    page.container.querySelector("dialog")!.showModal();
+    assert.ok(
+      document.activeElement === page.container.querySelector("#owner-key"),
+      "The key field has focus as the dialog opens, not its Close button",
+    );
+  } finally {
+    page.unmount();
+  }
+});
+
 test("the sidebar search's box takes the accent outline while the search has focus", async () => {
   await open("Doc 47.md", { narrow: false });
   await styled(stylesheet, async () => {

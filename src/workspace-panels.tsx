@@ -1,4 +1,6 @@
 import {
+  useLayoutEffect,
+  useRef,
   useState,
   type Dispatch,
   type ReactNode,
@@ -100,6 +102,13 @@ export function OwnerLoginForm({
   busy: boolean;
   onSubmit: () => void;
 }) {
+  const keyField = useRef<HTMLInputElement>(null);
+  // As in SearchField: the sign-in dialog is not open yet when React's
+  // autoFocus runs, and showModal() then focuses its first control with the
+  // autofocus attribute, which autoFocus never writes, or else Close.
+  useLayoutEffect(() => {
+    keyField.current?.setAttribute("autofocus", "");
+  }, []);
   return (
     <form
       onSubmit={(e) => {
@@ -115,6 +124,7 @@ export function OwnerLoginForm({
         Owner API key
       </label>
       <input
+        ref={keyField}
         id="owner-key"
         type="password"
         autoComplete="off"
