@@ -4422,3 +4422,27 @@ button:hover {
     font-size: var(--ui-caption-size);
   }
 }
+/* One quiet readiness line beside the existing local-storage information. */
+.offline-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  text-align: start;
+  cursor: pointer;
+}
+.offline-note svg { flex: none; }
+.offline-note:hover { color: var(--text); }
+.offline-note:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.offline-note { list-style: none; }
+.offline-note::-webkit-details-marker { display: none; }
+.offline-notice-content { max-block-size: 34dvh; overflow: auto; padding: 4px 0 10px 23px; font-size: 0.8125rem; color: var(--muted); }
+.offline-notice-content p { margin: 0 0 8px; line-height: 1.5; }
+.offline-problem { padding-block: 8px; border-block-start: 1px solid var(--line); }
+.offline-problem strong { display: block; color: var(--text); overflow-wrap: anywhere; font-weight: 500; }
+.offline-problem-actions { display: flex; flex-wrap: wrap; gap: 4px 12px; }

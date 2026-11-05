@@ -3,15 +3,9 @@ import { SIDEBAR_MIN, SIDEBAR_MAX } from "./sidebar-resize";
 import { hasUnstoredDrafts } from "./drafts";
 import { useAppearance } from "./appearance";
 import { protectTouchViewport } from "./touch-viewport";
-import {
-  api,
-  ownerSession,
-  revalidate,
-  send,
-  type Changes,
-  type Kept,
-} from "./api";
+import { api, revalidate, send, type Changes, type Kept } from "./api";
 import { normalizePresence } from "./presence";
+import { useOfflineWorkspace } from "./offline-workspace";
 import { useFileActions } from "./file-actions";
 import {
   sharedToken,
@@ -378,13 +372,10 @@ export function useWorkspace() {
       setError((error as Error).message);
     }
   }, []);
-  const patchEntries = useCallback(
-    (update: (entries: Entry[]) => Entry[]) => {
-      treeChanged.current++;
-      setEntries(update);
-    },
-    [],
-  );
+  const patchEntries = useCallback((update: (entries: Entry[]) => Entry[]) => {
+    treeChanged.current++;
+    setEntries(update);
+  }, []);
   const files = useFileActions({
     owner: !!config?.owner && !sharedToken,
     root: config?.root || "",
@@ -420,19 +411,9 @@ export function useWorkspace() {
     const open = async () => {
       if (sharedToken) {
         const asked = openFolders.current;
-        const response = ownerSession()
-          ? null
-          : await (window.__locdocOpen ||
-              fetch(
-                `/api/open/${encodeURIComponent(sharedToken)}${location.search}`,
-              ));
-        const data = response
-          ? await response.json()
-          : await api<Config & { document: Document | null; entries: Entry[] }>(
-              `/api/open/${encodeURIComponent(sharedToken)}${location.search}`,
-            );
-        if (response && !response.ok)
-          throw new Error(data.error || "This sharing link is unavailable.");
+        const data = await api<
+          Config & { document: Document | null; entries: Entry[] }
+        >(`/api/open/${encodeURIComponent(sharedToken)}${location.search}`);
         setInitialDocument(data.document);
         folderView.current = !!data.folder;
         setConfig(data);
@@ -504,6 +485,12 @@ export function useWorkspace() {
     const timer = setInterval(loadTree, 4000);
     return () => clearInterval(timer);
   }, [config?.owner, config?.folder, loadTree]);
+  const offline = useOfflineWorkspace(
+    config,
+    entries,
+    loadTree,
+    initialDocument,
+  );
   return {
     appearance,
     config,
@@ -530,6 +517,7 @@ export function useWorkspace() {
     loadTree,
     patchEntries,
     files,
+    offline,
   };
 }
 export type Workspace = ReturnType<typeof useWorkspace>;

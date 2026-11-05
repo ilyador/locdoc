@@ -5,6 +5,7 @@ use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, header, request::Parts},
 };
+use rusqlite::OptionalExtension;
 use yrs::{Any, Doc, GetString, Map, OffsetKind, Out, ReadTxn, Text, Transact};
 
 /// Owner-only handlers must opt into this extractor rather than copying checks.
@@ -551,6 +552,57 @@ impl super::Store {
                 )?;
             }
         }
+        Ok(())
+    }
+
+    /// A retry can arrive after the original insertion window expired.
+    /// Re-reserve the same asset, never its bytes a second time. The caller
+    /// has verified its exact bytes and holds this document's work queue.
+    pub(super) fn renew_upload(
+        &self,
+        doc: &super::Document,
+        path: &str,
+        reference: &str,
+        content: &str,
+        bytes: usize,
+    ) -> Result<()> {
+        let full = self.media_path(doc, reference)?;
+        let referenced = Self::references(content)
+            .iter()
+            .any(|item| self.media_path(doc, item).ok().as_ref() == Some(&full));
+        let old: Option<(i64, i64)> = self
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT bytes,pending_until FROM assets WHERE doc=? AND path=?",
+                super::params![doc.id, path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((size, pending)) = old else {
+            return Err(bad("This upload reservation no longer exists."));
+        };
+        if size != bytes as i64
+            || !referenced
+                && pending <= super::now()
+                && self.usage(doc, content) + bytes > super::DOC_LIMIT
+        {
+            return Err(bad(
+                "This document would exceed its 50 MB attachment limit.",
+            ));
+        }
+        let mut db = self.db.lock().unwrap();
+        let tx = db.transaction()?;
+        tx.execute(
+            "UPDATE assets SET pending_until=? WHERE doc=? AND path=?",
+            super::params![super::now() + 600, doc.id, path],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO active_media(doc,reference) VALUES(?,?)",
+            super::params![doc.id, reference],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

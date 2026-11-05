@@ -2772,6 +2772,14 @@ impl Store {
     /// still while it moves, so accepted edits waiting for projection reach
     /// their files at the new paths. Returns the new path.
     pub(super) fn rename_folder(&self, from: &str, to: &str) -> Result<String> {
+        self.rename_folder_checked(from, to, |_| Ok(()))
+    }
+    pub(super) fn rename_folder_checked(
+        &self,
+        from: &str,
+        to: &str,
+        check: impl FnOnce(&fs::Metadata) -> Result<()>,
+    ) -> Result<String> {
         let _files = self.document_files.lock().unwrap();
         let from = relative_path(from, false)?;
         let to = relative_path(to, false)?;
@@ -2818,6 +2826,7 @@ impl Store {
             .collect();
         self.refresh_media_identities(&rows)?;
         let metadata = fs::symlink_metadata(&source)?;
+        check(&metadata)?;
         let movement = EntryMove::new(
             uuid::Uuid::new_v4().to_string(),
             Action::Rename,
@@ -2912,6 +2921,13 @@ impl Store {
     /// and its MCP folder grants are suspended until it is restored.
     /// Returns the trash item.
     pub(super) fn trash_folder(&self, input: &str) -> Result<String> {
+        self.trash_folder_checked(input, |_, _| Ok(()))
+    }
+    pub(super) fn trash_folder_checked(
+        &self,
+        input: &str,
+        check: impl FnOnce(&fs::Metadata, &[Document]) -> Result<()>,
+    ) -> Result<String> {
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
         let unplaced = self.reconcile(Pass::Discover)?;
@@ -2920,6 +2936,7 @@ impl Store {
         let documents = self.documents_below(&path)?;
         self.settled_below(&path, &documents, &unplaced)?;
         let metadata = fs::symlink_metadata(&source)?;
+        check(&metadata, &documents)?;
         let trash = uuid::Uuid::new_v4().to_string();
         let name = Path::new(&path)
             .file_name()

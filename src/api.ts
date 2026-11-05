@@ -1,3 +1,27 @@
+import {
+  offlineCacheEnabled,
+  cachedRead,
+  cacheRead,
+  cacheableRead,
+  invalidateRead,
+  logoutOffline,
+  storageFailed,
+  offlineGeneration,
+  stampOffline,
+  offlineStamp,
+} from "./offline-cache.ts";
+import {
+  localDocument,
+  localDeletion,
+  projectRead,
+  queueFileRequest,
+} from "./offline-files.ts";
+import {
+  queueComment,
+  queueUpload,
+  projectComments,
+} from "./offline-actions.ts";
+
 export class ApiError extends Error {
   readonly status: number;
   // The parsed error response, for callers that need more than its message.
@@ -77,6 +101,7 @@ function retryDelay(ms: number, signal?: AbortSignal | null) {
 }
 
 async function request(path: string, init?: RequestInit) {
+  const generation = offlineGeneration();
   const session = ownerSession();
   const options: RequestInit = {
     ...init,
@@ -93,7 +118,19 @@ async function request(path: string, init?: RequestInit) {
   for (let attempt = 0; ; attempt++) {
     let response: Response | undefined;
     try {
-      response = await fetch(path, options);
+      const preloaded =
+        attempt === 0 &&
+        read &&
+        !session &&
+        path.startsWith("/api/open/") &&
+        typeof window !== "undefined"
+          ? window.__locdocOpen
+          : undefined;
+      if (preloaded) {
+        window.__locdocOpen = undefined;
+        response = (await preloaded)?.clone() || (await fetch(path, options));
+      } else response = await fetch(path, options);
+      stampOffline(response, generation);
     } catch (error) {
       if (!(error instanceof TypeError) || options.signal?.aborted || !read)
         throw error;
@@ -109,12 +146,96 @@ async function request(path: string, init?: RequestInit) {
     await retryDelay(delays[attempt], options.signal);
   }
 }
+// Reconnection must get a real permission/epoch answer. These callers must
+// never mistake a cached response for the server accepting a command.
+export async function onlineApi<T = unknown>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return answer<T>(path, await request(path, init));
+}
 
 export async function api<T = unknown>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  return answer<T>(path, await request(path, init));
+  const network = apiRequest<T>(path, init);
+  if (
+    (init?.method || "GET").toUpperCase() !== "GET" ||
+    !cacheableRead(path) ||
+    navigator.onLine === false
+  )
+    return network;
+  const local = cachedRead<T>(path)
+    .catch(() => undefined)
+    .then(async (cached) => {
+      if (!cached) return network;
+      // Wi-Fi can remain connected while the server is unreachable. Do not
+      // make opening a downloaded document wait for a TCP timeout.
+      await retryDelay(650, init?.signal);
+      return projectRead(path, await projectComments(path, cached.body));
+    });
+  return Promise.race([network, local]);
+}
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const read = (init?.method || "GET").toUpperCase() === "GET";
+  if (!read && offlineCacheEnabled()) {
+    const form =
+      (await queueUpload(path, init)) || (await queueComment(path, init));
+    if (form?.handled) return form.result as T;
+    const queued = await queueFileRequest(path, init, (command) =>
+      request("/api/offline/file", send("POST", command)).then((response) =>
+        answer("/api/offline/file", response),
+      ),
+    );
+    if (queued?.handled) return queued.result as T;
+  } else if (read && offlineCacheEnabled()) {
+    const removed = await localDeletion(path).catch(() => undefined);
+    if (removed)
+      throw new ApiError("This document is in Recently deleted.", 410, {
+        error: "trashed",
+        ...removed,
+      });
+    const local = await localDocument(path).catch(() => undefined);
+    if (local) return local as T;
+  }
+  try {
+    if (
+      read &&
+      typeof navigator !== "undefined" &&
+      navigator.onLine === false
+    ) {
+      const cached = await cachedRead<T>(path).catch(() => undefined);
+      if (cached)
+        return projectRead(path, await projectComments(path, cached.body));
+    }
+    const response = await request(path, init);
+    if (read && proxyFailure(response)) {
+      const cached = await cachedRead<T>(path).catch(() => undefined);
+      if (cached)
+        return projectRead(path, await projectComments(path, cached.body));
+    }
+    const body = await answer<T>(path, response);
+    if (read)
+      void cacheRead(path, body, response.headers.get("ETag") || "").catch(
+        storageFailed,
+      );
+    return read && offlineCacheEnabled()
+      ? projectRead(path, await projectComments(path, body))
+      : body;
+  } catch (error) {
+    if (read && error instanceof TypeError && !init?.signal?.aborted) {
+      const cached = await cachedRead<T>(path).catch(() => undefined);
+      if (cached)
+        return projectRead(path, await projectComments(path, cached.body));
+    }
+    if (
+      error instanceof ApiError &&
+      [401, 403, 404, 410].includes(error.status)
+    )
+      void invalidateRead(path).catch(storageFailed);
+    throw error;
+  }
 }
 
 // A response kept with the tag the server gave it.
@@ -138,7 +259,39 @@ export async function revalidate<T>(
   kept: Kept<T> | null,
   { signal, changes }: { signal?: AbortSignal; changes?: Changes<T> } = {},
 ): Promise<Kept<T>> {
+  try {
+    const network = revalidateOnline(path, kept, { signal, changes });
+    const local = cachedRead<T>(path)
+      .catch(() => undefined)
+      .then(async (cached) => {
+        if (!cached) return network;
+        await retryDelay(650, signal);
+        return { path, tag: cached.tag, body: cached.body };
+      });
+    const held = await Promise.race([network, local]);
+    const body = await projectRead(
+      path,
+      await projectComments(path, held.body),
+    );
+    return body === held.body ? held : { ...held, body, tag: "" };
+  } catch (error) {
+    if (error instanceof TypeError && !signal?.aborted) {
+      const cached = await cachedRead<T>(path).catch(() => undefined);
+      if (cached) return { path, tag: cached.tag, body: cached.body };
+    }
+    throw error;
+  }
+}
+async function revalidateOnline<T>(
+  path: string,
+  kept: Kept<T> | null,
+  { signal, changes }: { signal?: AbortSignal; changes?: Changes<T> },
+): Promise<Kept<T>> {
   const held = kept?.path === path && kept.tag ? kept : null;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    const cached = await cachedRead<T>(path).catch(() => undefined);
+    if (cached) return { path, tag: cached.tag, body: cached.body };
+  }
   const response = await request(path, {
     // The page keeps the copy itself; the HTTP cache stores nothing.
     cache: "no-store",
@@ -151,6 +304,10 @@ export async function revalidate<T>(
       : {},
   });
   if (held && response.status === 304) return held;
+  if (proxyFailure(response)) {
+    const cached = await cachedRead<T>(path).catch(() => undefined);
+    if (cached) return { path, tag: cached.tag, body: cached.body };
+  }
   if (response.status === 226) {
     const body =
       held &&
@@ -160,9 +317,15 @@ export async function revalidate<T>(
         ? changes.apply(held.body, await response.json().catch(() => null))
         : null;
     if (body === null) return revalidate(path, null, { signal });
-    return { path, tag: response.headers.get("ETag") || "", body };
+    stampOffline(body, offlineStamp(response));
+    const tag = response.headers.get("ETag") || "";
+    void cacheRead(path, body, tag).catch(storageFailed);
+    return { path, tag, body };
   }
   const body = await answer<T>(path, response);
+  void cacheRead(path, body, response.headers.get("ETag") || "").catch(
+    storageFailed,
+  );
   return { path, tag: response.headers.get("ETag") || "", body };
 }
 
@@ -170,6 +333,7 @@ async function answer<T>(path: string, response: Response): Promise<T> {
   let body;
   try {
     body = await response.json();
+    stampOffline(body, offlineStamp(response));
   } catch {
     throw new ApiError(
       [502, 503, 504].includes(response.status)
@@ -192,7 +356,10 @@ async function answer<T>(path: string, response: Response): Promise<T> {
     );
   if ((path === "/api/login" || path === "/api/redeem") && body.session)
     rememberSession(body.session);
-  if (path === "/api/logout") rememberSession("");
+  if (path === "/api/logout") {
+    rememberSession("");
+    await logoutOffline().catch(storageFailed);
+  }
   return body;
 }
 export function send(method: string, body?: unknown): RequestInit {

@@ -9,6 +9,7 @@ import {
   SidebarSimple,
 } from "@phosphor-icons/react";
 import { DocumentSidebar } from "./document-sidebar";
+import { OfflineNotice } from "./offline-notice";
 import { SidebarResize } from "./sidebar-resize";
 import { SearchField } from "./search-field";
 import { documentExtension } from "./document-format";
@@ -202,6 +203,7 @@ export function WorkspaceSidebar({
               : "Stored on your computer"}
           </span>
         </div>
+        {config?.offlineScope && <OfflineNotice workspace={workspace} />}
         {config?.owner && (
           <span className="root-path" title={config.root}>
             <PathText path={config.root} separator="/" />

@@ -12,6 +12,18 @@ import { api, ApiError, decodeState, ownerSession } from "./api";
 import { DraftJournal, textHash, type DraftRecovery } from "./drafts";
 import { documentSession, type DocumentSession } from "./document-session";
 import { normalizePresence, pagePresence } from "./presence";
+import {
+  cachedRead,
+  cacheRead,
+  currentOfflineScope,
+  documentReadPath,
+  offlineCacheEnabled,
+  waitForOfflineCache,
+  storageFailed,
+} from "./offline-cache";
+import { holdDocumentCache, offlineGet, scopedKey } from "./offline-db";
+import { OfflineReplica } from "./offline-replica";
+import { offlineDocumentBusy, offlineDocumentPending } from "./offline-actions";
 import { trashItem } from "./file-actions";
 import { sharedToken, type Document as Doc, type TrashItem } from "./model";
 type Projection = "synced" | "pending" | "blocked" | "conflict";
@@ -21,11 +33,7 @@ type Projection = "synced" | "pending" | "blocked" | "conflict";
 export type Trashed = { item: TrashItem; path: string };
 
 // A trashed document answers 410 with its trash item and its former path.
-const trashedDocument = (
-  error: ApiError,
-  id: string,
-  known = "",
-): Trashed => {
+const trashedDocument = (error: ApiError, id: string, known = ""): Trashed => {
   const body = error.body as { trash?: unknown; path?: unknown } | undefined;
   const item = trashItem(body?.trash);
   const path =
@@ -65,6 +73,8 @@ export function useDocument(
     let connection: DocumentSession | null = null;
     let cancelRetry: (() => void) | undefined;
     let stopPresence: (() => void) | undefined;
+    let stopOffline: (() => void) | undefined;
+    let releaseCache: (() => void) | undefined;
     setDoc(null);
     setSession(null);
     setError("");
@@ -93,6 +103,45 @@ export function useDocument(
         const ydoc = new Y.Doc();
         ydoc.getText("content");
         Y.applyUpdate(ydoc, decodeState(d.state));
+        if (offlineCacheEnabled()) await waitForOfflineCache();
+        const offlineScope = offlineCacheEnabled()
+          ? await currentOfflineScope().catch(() => undefined)
+          : undefined;
+        if (offlineScope) {
+          const lease = holdDocumentCache(offlineScope.scope, d.id);
+          releaseCache = lease.release;
+          await lease.ready;
+          ydoc.on("destroy", lease.release);
+          if (!active) {
+            ydoc.destroy();
+            return;
+          }
+          // Cleanup may have expired a downloaded file while opening it.
+          // Restore its accepted bootstrap before an editable view is exposed.
+          if (
+            !(await offlineGet(
+              "reads",
+              scopedKey(offlineScope.scope, documentReadPath(d.id)),
+            ))
+          )
+            await cacheRead(documentReadPath(d.id), d).catch(storageFailed);
+        }
+        const stored = await cachedRead<Doc>(documentReadPath(d.id)).catch(
+          () => undefined,
+        );
+        const replica =
+          offlineScope &&
+          stored &&
+          stored.body.collaborationEpoch === d.collaborationEpoch
+            ? new OfflineReplica(
+                offlineScope,
+                documentReadPath(d.id),
+                d.collaborationEpoch || "",
+                decodeState(stored.body.state),
+              )
+            : null;
+        if (replica)
+          await replica.remote(decodeState(d.state)).catch(storageFailed);
         const provider = new WebsocketProvider(
           `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`,
           id,
@@ -121,6 +170,7 @@ export function useDocument(
         let resetting = false;
         let inTrash = false;
         let transientWarning = "";
+        let pendingForms = false;
         let retryTimer: ReturnType<typeof setTimeout> | undefined;
         let retryDelay = 500;
         cancelRetry = () => clearTimeout(retryTimer);
@@ -149,21 +199,28 @@ export function useDocument(
               ? "In Recently deleted"
               : projection === "conflict"
                 ? "Recovery needed"
-                : drafts.pending
-                  ? provider.wsconnected
-                    ? projection === "blocked"
+                : pendingForms
+                  ? navigator.onLine === false
+                    ? "Offline · changes saved here"
+                    : "Syncing offline changes…"
+                  : drafts.pending
+                    ? provider.wsconnected
+                      ? projection === "blocked"
+                        ? "Waiting for desktop file"
+                        : "Saving…"
+                      : drafts.stored
+                        ? "Offline · draft saved here"
+                        : "Saving draft…"
+                    : projection === "blocked"
                       ? "Waiting for desktop file"
-                      : "Saving…"
-                    : drafts.stored
-                      ? "Offline · draft saved here"
-                      : "Saving draft…"
-                  : projection === "blocked"
-                    ? "Waiting for desktop file"
-                    : provider.synced
-                      ? projection === "pending"
-                        ? "Saving…"
-                        : "Saved to disk"
-                      : "Connecting";
+                      : provider.synced
+                        ? projection === "pending"
+                          ? "Saving…"
+                          : "Saved to disk"
+                        : typeof navigator !== "undefined" &&
+                            navigator.onLine === false
+                          ? "Offline · saved on this device"
+                          : "Connecting";
             if (status !== notifiedStatus) {
               notifiedStatus = status;
               setStatus(status);
@@ -177,6 +234,7 @@ export function useDocument(
           () => {
             if (active) setStorageWarning(drafts.storageWarning);
           },
+          replica ? () => replica.accepted(ydoc) : undefined,
         );
         recoveryJournal.current = drafts;
         await drafts.restore(d.edit && projection !== "conflict", {
@@ -184,6 +242,7 @@ export function useDocument(
           collaborationEpoch: d.collaborationEpoch,
         });
         if (!active) {
+          replica?.destroy();
           drafts.dispose();
           provider.destroy();
           ydoc.destroy();
@@ -203,6 +262,17 @@ export function useDocument(
           provider.ws.send(toUint8Array(encoder));
           return true;
         });
+        if (replica) {
+          const remember = (update: Uint8Array, origin: unknown) => {
+            if (origin === provider)
+              void replica.remote(update).catch(storageFailed);
+          };
+          ydoc.on("update", remember);
+          ydoc.on("destroy", () => {
+            ydoc.off("update", remember);
+            replica.destroy();
+          });
+        }
         setDoc(projection === "conflict" ? { ...d, edit: false } : d);
         // The text stays readable; local drafts stay journaled for a restore.
         const moveToTrash = (error: ApiError) => {
@@ -361,7 +431,46 @@ export function useDocument(
         stopPresence = pagePresence(provider.awareness, window);
         connection = documentSession(d.id, ydoc, provider, drafts);
         setSession(connection);
-        provider.connect();
+        const pause = (event: Event) => {
+          if ((event as CustomEvent<string>).detail === d.id) {
+            provider.disconnect();
+            drafts.disconnected();
+            updateStatus();
+          }
+        };
+        const resume = () => {
+          void Promise.all([
+            offlineDocumentBusy(d.id),
+            offlineDocumentPending(d.id),
+          ])
+            .then(([busy, pending]) => {
+              if (!active || resetting || inTrash || projection === "conflict")
+                return;
+              pendingForms = pending;
+              if (busy) provider.disconnect();
+              else if (!provider.shouldConnect) provider.connect();
+              updateStatus();
+            })
+            .catch(() => {});
+        };
+        window.addEventListener("locdoc-offline-pause", pause);
+        window.addEventListener("locdoc-offline-files", resume);
+        stopOffline = () => {
+          window.removeEventListener("locdoc-offline-pause", pause);
+          window.removeEventListener("locdoc-offline-files", resume);
+        };
+        if (offlineScope) resume();
+        else provider.connect();
+        if (!d.edit && !d.diskConflict && offlineScope)
+          void drafts
+            .preserveReadOnly(
+              "Editing access changed while you were offline. Your draft is kept for download.",
+              {
+                collaborationEpoch: d.collaborationEpoch,
+                lineEndingMigrated: d.lineEndingMigrated,
+              },
+            )
+            .catch(storageFailed);
       })
       .catch((e) => {
         if (active && e instanceof ApiError && e.status === 410) {
@@ -379,7 +488,9 @@ export function useDocument(
       opening.abort();
       cancelRetry?.();
       stopPresence?.();
+      stopOffline?.();
       connection?.leave();
+      if (!connection) releaseCache?.();
       setPeople([]);
     };
   }, [id, authorized, accessQuery, initialDocument, reload]);

@@ -80,7 +80,7 @@ async fn guard(
             ("fonts", 6)
         } else if path.ends_with("/link-preview") || path.starts_with("/s/") {
             ("previews", 30)
-        } else if path.ends_with("/upload") {
+        } else if path.ends_with("/upload") || path.contains("/upload/") {
             ("uploads", 40)
         } else if path.starts_with("/ws/") {
             ("socket", 80)
@@ -324,6 +324,13 @@ pub(super) fn router(s: App) -> Router {
         .route("/api/trash/{id}/restore", post(actions::restore))
         .route("/api/tree", get(tree))
         .route("/api/files", post(create))
+        .route("/api/offline/file", post(offline::file))
+        .route(
+            "/api/docs/{id}/offline",
+            get(offline::metadata)
+                .post(offline::sync)
+                .layer(DefaultBodyLimit::max(8 * MB)),
+        )
         .route("/api/shared/{token}", get(shared))
         .route(
             "/api/docs/{id}",
@@ -344,6 +351,10 @@ pub(super) fn router(s: App) -> Router {
         .route(
             "/api/docs/{id}/upload",
             post(upload).layer(DefaultBodyLimit::max(21 * MB)),
+        )
+        .route(
+            "/api/docs/{id}/upload/{upload}",
+            post(media::upload_id).layer(DefaultBodyLimit::max(21 * MB)),
         )
         .route("/api/docs/{id}/media", get(media::media))
         .route("/api/docs/{id}/media/share", post(media::share_media))

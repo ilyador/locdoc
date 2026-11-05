@@ -52,10 +52,11 @@ export async function uploadAttachment(
     : captureInsertion(origin.ydoc);
   const release = origin.retain();
   try {
-    const result = await api<{ path: string; usage: number }>(
+    const result = await api<{ path: string; usage: number; queued?: boolean }>(
       `/api/docs/${origin.id}/upload${accessQuery}`,
       {
         method: "POST",
+        headers: { "X-Locdoc-Usage": String(doc.usage) },
         body: data,
       },
     );
@@ -63,7 +64,11 @@ export async function uploadAttachment(
     insertAttachment(origin.ydoc, position, `\n![${alt}](${result.path})\n`);
     await origin.drafts.flush();
     setDoc((d) => (d?.id === origin.id ? { ...d, usage: result.usage } : d));
-    tell(`${video ? "Video" : "Image"} saved to ${doc.path.split("/").pop()}.`);
+    tell(
+      result.queued
+        ? `${video ? "Video" : "Image"} stored. It will sync when connected.`
+        : `${video ? "Video" : "Image"} saved to ${doc.path}.`,
+    );
   } finally {
     release();
   }

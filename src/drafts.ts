@@ -172,7 +172,9 @@ async function records(key: string): Promise<Draft[]> {
 async function mutate(change: (store: IDBObjectStore) => void) {
   const database = await db();
   return new Promise<void>((resolve, reject) => {
-    const tx = database.transaction("drafts", "readwrite");
+    const tx = database.transaction("drafts", "readwrite", {
+      durability: "strict",
+    });
     tx.oncomplete = () => resolve();
     tx.onabort = tx.onerror = () =>
       reject(tx.error || new Error("Draft storage failed"));
@@ -301,6 +303,7 @@ export class DraftJournal {
     key: string,
     changed: () => void = () => {},
     failure: () => void = () => {},
+    keepAccepted?: () => Promise<void>,
   ) {
     this.ydoc = ydoc;
     this.key = key;
@@ -309,6 +312,7 @@ export class DraftJournal {
     this.baseline = Y.encodeStateVector(ydoc);
     this.changed = changed;
     this.failure = failure;
+    this.keepAccepted = keepAccepted;
     journals.add(this);
   }
   async restore(
@@ -512,6 +516,24 @@ export class DraftJournal {
     recoveryMemory.delete(id);
     this.changed();
   }
+  async preserveReadOnly(
+    reason: string,
+    options: { lineEndingMigrated?: boolean; collaborationEpoch?: string },
+  ) {
+    const saved = await records(this.key);
+    if (!saved.length) return;
+    const shadow = new Y.Doc();
+    Y.applyUpdate(shadow, Y.encodeStateAsUpdate(this.ydoc));
+    const journal = new DraftJournal(shadow, this.key);
+    try {
+      await journal.restore(true, options);
+      if (journal.pending) await journal.reject(reason);
+      this.changed();
+    } finally {
+      journal.dispose();
+      shadow.destroy();
+    }
+  }
   bind(remote: unknown, sendReceipt?: (id: string) => boolean) {
     this.remote = remote;
     this.sendReceipt = sendReceipt;
@@ -581,6 +603,16 @@ export class DraftJournal {
       this.requestSave();
       return false;
     }
+    try {
+      if (this.keepAccepted) await this.keepAccepted();
+    } catch {
+      this.storageFailed();
+      return false;
+    }
+    if (this.revision !== revision) {
+      this.requestSave();
+      return false;
+    }
     // Queue before changing pending: a subsequent local edit must enqueue after
     // this conditional delete, and an earlier write must finish before it.
     clearTimeout(this.timer);
@@ -606,4 +638,48 @@ export class DraftJournal {
     this.ydoc.off("update", this.onUpdate);
     journals.delete(this);
   }
+  private keepAccepted?: () => Promise<void>;
+}
+
+export async function pendingDraftDocuments(
+  prefix: string,
+  includeRecovery = false,
+) {
+  const database = await db();
+  const documents = await new Promise<string[]>((resolve, reject) => {
+    const tx = database.transaction("drafts");
+    const read = tx.objectStore("drafts").openCursor();
+    const ids: string[] = [];
+    read.onsuccess = () => {
+      const cursor = read.result;
+      if (!cursor) return;
+      const record = cursor.value as Draft;
+      const id = record.key.startsWith(`${prefix}/`)
+        ? record.key.slice(prefix.length + 1)
+        : "";
+      if ((includeRecovery || !record.recovery) && /^[\da-f-]{36}$/.test(id))
+        ids.push(id);
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve(ids);
+    tx.onabort = tx.onerror = () => reject(tx.error);
+  });
+  return [...new Set(documents)];
+}
+export async function flushOpenDrafts() {
+  await Promise.all([...journals].map((journal) => journal.flush()));
+}
+export const hasOpenDraft = (key: string) =>
+  [...journals].some((journal) => journal.key === key);
+export async function hasStoredDocumentDraft(key: string) {
+  const database = await db();
+  return new Promise<boolean>((resolve, reject) => {
+    const tx = database.transaction("drafts");
+    const read = tx
+      .objectStore("drafts")
+      .index("document")
+      .count(IDBKeyRange.only(key));
+    tx.oncomplete = () => resolve(read.result > 0);
+    tx.onabort = tx.onerror = () => reject(tx.error);
+  });
 }

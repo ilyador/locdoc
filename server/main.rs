@@ -19,6 +19,7 @@ mod media;
 #[cfg(test)]
 mod media_reference_tests;
 mod namespace;
+mod offline;
 mod peers;
 #[cfg(test)]
 mod persistence_adversarial_tests;
@@ -177,6 +178,7 @@ struct Room {
     engine: engine::DocumentEngine,
 }
 struct Store {
+    offline_scope: String,
     root: PathBuf,
     web_root: PathBuf,
     root_identity: documents::RootIdentity,
@@ -347,12 +349,14 @@ impl Store {
         mcp_access::migrate(&db)?;
         mcp_auth::migrate(&db)?;
         profile::migrate(&db)?;
+        let offline_scope = offline::migrate(&db)?;
         let notices = Arc::new(listings::Notices::default());
         listings::watch_rows(&db, notices.clone())?;
         let sessions = browser_auth::Sessions::load(&db)?;
         let owner_name = profile::OwnerName::load(&db, std::env::var("LOCDOC_OWNER_NAME").ok())?;
         let mcp_credentials = mcp_auth::Credentials::load(&db)?;
         let store = Arc::new(Self {
+            offline_scope,
             root,
             web_root: std::env::var_os("LOCDOC_WEB")
                 .map(PathBuf::from)
@@ -702,6 +706,8 @@ fn configuration_extra(s: &Store, h: &HeaderMap, extra: Value) -> Response {
     if owner {
         value["ownerName"] = json!(s.owner_name.get());
     }
+    // A namespace for local device caches, never an authentication credential.
+    value["offlineScope"] = json!(s.offline_scope);
     value
         .as_object_mut()
         .unwrap()
@@ -786,11 +792,15 @@ struct Entry {
     id: Option<String>,
     shared: bool,
     modified: u64,
+    #[serde(rename = "offlineVersion", skip_serializing_if = "Option::is_none")]
+    offline_version: Option<String>,
     title: String,
     url: Option<String>,
     /// A document's format; folders have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<String>,
     /// A document's file, by device and inode, for the notices that name it.
     #[serde(skip)]
     file: Option<(u64, u64)>,
@@ -879,9 +889,15 @@ fn scan_folder(
                 id: None,
                 shared: false,
                 modified: 0,
+                offline_version: None,
                 title: name.to_string_lossy().into_owned(),
                 url: None,
                 format: None,
+                identity: folders::directory_identity(
+                    s,
+                    &p.strip_prefix(&s.root).unwrap().to_string_lossy(),
+                )
+                .ok(),
                 file: None,
             });
             // Another filesystem mounted here.
@@ -923,6 +939,7 @@ fn scan_folder(
                 id: Some(d.id.clone()),
                 shared: d.permission != "private",
                 modified: listings::modified(&metadata),
+                offline_version: Some(listings::offline_version(&metadata)),
                 title: p.file_stem().unwrap().to_string_lossy().into_owned(),
                 url: Some(if d.permission != "private" {
                     format!(
@@ -934,6 +951,7 @@ fn scan_folder(
                     format!("{}/d/{}", s.public_url, d.id)
                 }),
                 format: Some(format.name()),
+                identity: None,
                 file: Some((metadata.dev(), metadata.ino())),
             });
         }
@@ -992,6 +1010,15 @@ async fn create(
     }
 }
 fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> Result<Value> {
+    document_payload_mode(s, h, d, access, false)
+}
+fn document_payload_mode(
+    s: &Store,
+    h: &HeaderMap,
+    d: &Document,
+    access: &Access,
+    metadata_only: bool,
+) -> Result<Value> {
     // A caller may resolve the document before waiting for its queue, while
     // it moves or its link is turned off. Authorize it as it is now.
     let d = &s.doc(&d.id)?;
@@ -1001,11 +1028,6 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
     room.reconcile(s, d)?;
     edit &= !room.conflicted();
     let content = room_text(&room);
-    let state = room
-        .awareness
-        .doc()
-        .transact()
-        .encode_state_as_update_v1(&StateVector::default());
     let usage = s.usage(d, &content);
     let link = if owner {
         d.token.as_ref().map(|t| format!("{}/s/{t}", s.public_url))
@@ -1044,8 +1066,6 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         "shareUrl": link,
         "usage": usage,
         "modified": modified,
-        "content": content,
-        "state": BASE64.encode(state),
         "diskConflict": room.conflicted(),
         "diskPending": room.engine.waiting(),
         "diskSaving": room.engine.needs_projection(),
@@ -1053,7 +1073,17 @@ fn document_payload(s: &Store, h: &HeaderMap, d: &Document, access: &Access) -> 
         "collaborationEpoch": s.epoch(&d.id)?,
         "mediaToken": if owner { browser_auth::media_token(s, h, &d.id) } else { None }
     });
-    if owner {
+    payload["offlineMedia"] = media::offline_media(s, d, &content, owner);
+    if !metadata_only {
+        let state = room
+            .awareness
+            .doc()
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        payload["content"] = json!(content);
+        payload["state"] = json!(BASE64.encode(state));
+    }
+    if owner && !metadata_only {
         let access = mcp_access::document_access(s, d)?;
         payload["mcpAllowed"] = json!(access.mcp_allowed);
         payload["mcpDirect"] = json!(access.mcp_direct);

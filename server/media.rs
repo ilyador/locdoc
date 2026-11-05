@@ -6,7 +6,29 @@ pub(super) async fn upload(
     AxPath(id): AxPath<String>,
     Query(a): Query<Access>,
     h: HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<Value>> {
+    upload_requested(s, id, a, h, multipart, None).await
+}
+pub(super) async fn upload_id(
+    State(s): State<App>,
+    AxPath((id, upload)): AxPath<(String, String)>,
+    Query(a): Query<Access>,
+    h: HeaderMap,
+    multipart: Multipart,
+) -> Result<Json<Value>> {
+    if uuid::Uuid::parse_str(&upload).is_err() {
+        return Err(bad("Invalid upload identity."));
+    }
+    upload_requested(s, id, a, h, multipart, Some(upload)).await
+}
+async fn upload_requested(
+    s: App,
+    id: String,
+    a: Access,
+    h: HeaderMap,
     mut multipart: Multipart,
+    upload: Option<String>,
 ) -> Result<Json<Value>> {
     let d = s.doc(&id)?;
     if !s.access(&h, &d, &a)?.1 {
@@ -37,12 +59,19 @@ pub(super) async fn upload(
         if !s.access(&h, &current, &a)?.1 {
             return Err(denied());
         }
-        upload_payload(s, current, id, name, &bytes)
+        upload_payload(s, current, id, name, &bytes, upload)
     })
     .await
     .map(Json)
 }
-fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]) -> Result<Value> {
+fn upload_payload(
+    s: &Store,
+    d: Document,
+    id: String,
+    name: String,
+    bytes: &[u8],
+    upload: Option<String>,
+) -> Result<Value> {
     if !documents::has_media(&d.path) {
         return Err(plain_text());
     }
@@ -61,22 +90,39 @@ fn upload_payload(s: &Store, d: Document, id: String, name: String, bytes: &[u8]
             "Images must be 5 MB or smaller."
         }));
     }
+    let rel = format!(
+        ".assets/{}/{}.{}",
+        id,
+        upload.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        kind.extension()
+    );
+    let full = s.root.join(&rel);
+    let depth = Path::new(&d.path).parent().unwrap().components().count();
+    let reference = format!("{}{rel}", "../".repeat(depth));
     let room = s.room(&d)?;
-    let usage = s.usage(&d, &room_text(&room.lock().unwrap()));
+    let content = room_text(&room.lock().unwrap());
+    let usage = s.usage(&d, &content);
+    if full.exists() {
+        // A lost upload response must not allocate another asset or reserve
+        // its budget again. Matching bytes are necessary even for the owner.
+        if s.media_path(&d, &reference).ok().as_ref() != Some(&full) || fs::read(&full)? != bytes {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This upload identity already names different bytes.".into(),
+            ));
+        }
+        s.renew_upload(&d, &rel, &reference, &content, bytes.len())?;
+        let usage = s.usage(&d, &content);
+        return Ok(
+            json!({"path":reference,"name":name,"bytes":bytes.len(),"video":video,"usage":usage}),
+        );
+    }
     if usage + bytes.len() > DOC_LIMIT {
         return Err(bad(
             "This document would exceed its 50 MB attachment limit.",
         ));
     }
-    let rel = format!(
-        ".assets/{}/{}.{}",
-        id,
-        uuid::Uuid::new_v4(),
-        kind.extension()
-    );
     s.write_upload(&d, &rel, bytes)?;
-    let depth = Path::new(&d.path).parent().unwrap().components().count();
-    let reference = format!("{}{rel}", "../".repeat(depth));
     let usage = s.usage(&d, &room_text(&room.lock().unwrap()));
     Ok(json!({"path":reference,"name":name,"bytes":bytes.len(),"video":video,"usage":usage}))
 }
@@ -261,6 +307,29 @@ fn media_kind(path: &Path, metadata: &fs::Metadata) -> Result<(usize, &'static s
         return Err(bad("Image exceeds 5 MB."));
     }
     Ok((len, kind.mime_type()))
+}
+/// Only files this caller can already load. The version changes for an
+/// in-place desktop edit as well as a replacement; no file bytes are copied.
+pub(super) fn offline_media(s: &Store, d: &Document, content: &str, owner: bool) -> Value {
+    if !documents::has_media(&d.path) {
+        return json!([]);
+    }
+    let mut files = Vec::new();
+    for reference in previewed(content) {
+        let Ok((path, metadata)) = owner_file(s, d, &reference) else {
+            continue;
+        };
+        if !owner && !s.active_attachment_allowed(d, &path) {
+            continue;
+        }
+        files.push(json!({
+            "path": reference,
+            "bytes": metadata.len(),
+            "version": format!("{}:{}:{}:{}:{}", metadata.dev(), metadata.ino(), metadata.len(), metadata.mtime(), metadata.mtime_nsec()),
+        }));
+    }
+    files.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    json!(files)
 }
 /// Whether the editor previews a media reference as a local file: a relative
 /// path, never a URL with a scheme (`https:`, `data:` or a drive letter), an
@@ -690,6 +759,51 @@ mod tests {
     }
 
     #[test]
+    fn lost_upload_receipt_can_renew_an_expired_asset_without_rewriting_or_double_charging() {
+        let (_dir, s) = store();
+        let created = s.create_document("Retry.md").unwrap();
+        let d = created;
+        let png = BASE64.decode(PNG).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let upload = || {
+            upload_payload(
+                &s,
+                d.clone(),
+                d.id.clone(),
+                "pixel.png".into(),
+                &png,
+                Some(id.clone()),
+            )
+        };
+        let first = upload().unwrap();
+        let reference = first["path"].as_str().unwrap();
+        let inode = fs::metadata(s.root.join(reference)).unwrap().ino();
+        s.db.lock()
+            .unwrap()
+            .execute("UPDATE assets SET pending_until=0 WHERE doc=?", [&d.id])
+            .unwrap();
+        s.db.lock()
+            .unwrap()
+            .execute("DELETE FROM active_media WHERE doc=?", [&d.id])
+            .unwrap();
+        assert_eq!(s.usage(&d, ""), 0);
+        let retry = upload().unwrap();
+        assert_eq!(retry["path"], first["path"]);
+        assert_eq!(retry["usage"].as_u64().unwrap(), png.len() as u64);
+        assert_eq!(fs::metadata(s.root.join(reference)).unwrap().ino(), inode);
+        let approved: bool =
+            s.db.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM active_media WHERE doc=? AND reference=?)",
+                    params![d.id, reference],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        assert!(approved);
+    }
+
+    #[test]
     fn plain_text_image_syntax_is_text_never_approved_served_or_uploaded() {
         let (_dir, s) = store();
         let png = BASE64.decode(PNG).unwrap();
@@ -722,7 +836,7 @@ mod tests {
             );
         }
         assert_eq!(
-            upload_payload(&s, d.clone(), d.id.clone(), "photo.png".into(), &png)
+            upload_payload(&s, d.clone(), d.id.clone(), "photo.png".into(), &png, None)
                 .unwrap_err()
                 .1,
             plain_text().1

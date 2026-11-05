@@ -481,13 +481,27 @@ fn patch(current: &Current, written: &[PathBuf]) -> Option<Vec<Arc<Entry>>> {
             return None;
         }
         let modified = modified(&metadata);
-        if entries[at].modified != modified {
+        let version = Some(offline_version(&metadata));
+        if entries[at].modified != modified || entries[at].offline_version != version {
             let mut entry = (*entries[at]).clone();
             entry.modified = modified;
+            entry.offline_version = version;
             entries[at] = Arc::new(entry);
         }
     }
     Some(entries)
+}
+
+/// Lossless change marker for downloaded copies, independent of displayed dates.
+pub(super) fn offline_version(metadata: &fs::Metadata) -> String {
+    format!(
+        "{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.len()
+    )
 }
 
 /// A file's modification time in whole seconds, as listings show it.
@@ -808,9 +822,11 @@ mod tests {
             id: Some(path.into()),
             shared: false,
             modified,
+            offline_version: None,
             title: path.into(),
             url: None,
             format: Some("markdown"),
+            identity: None,
             file: None,
         })
     }

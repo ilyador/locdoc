@@ -410,9 +410,40 @@ impl Store {
         input: &str,
         visible: &dyn Fn(&str) -> bool,
     ) -> Result<Document> {
+        self.create_document_identity(input, visible, None)
+    }
+
+    /// An offline-created document has already acquired an identity on its
+    /// device. It starts empty: its CRDT outbox supplies the source exactly
+    /// once, without a second independently generated title on the server.
+    pub(super) fn create_offline_document(&self, input: &str, id: &str) -> Result<Document> {
+        if uuid::Uuid::parse_str(id).is_err() {
+            return Err(bad("Invalid document identity."));
+        }
+        self.create_document_identity(input, &|_| true, Some(id))
+    }
+
+    fn create_document_identity(
+        &self,
+        input: &str,
+        visible: &dyn Fn(&str) -> bool,
+        identity: Option<&str>,
+    ) -> Result<Document> {
         use std::io::Write;
         let _files = self.document_files.lock().unwrap();
         let path = relative_path(input, false)?;
+        if let Some(id) = identity {
+            let exists = self
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT 1 FROM docs WHERE id=?", [id], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if exists {
+                return Err(bad("This document identity has already been used."));
+            }
+        }
         self.finish_pending_path(&path)?;
         let Some(kind) = format(&path) else {
             return Err(bad(FORMATS));
@@ -444,6 +475,7 @@ impl Store {
                 .to_string_lossy();
             // A plain text file starts empty, as a new file in a text editor.
             let initial = match kind {
+                _ if identity.is_some() => String::new(),
                 Format::Fountain => format!("Title: {title}\n\n"),
                 Format::Markdown => format!("# {title}\n\n"),
                 Format::Text => String::new(),
@@ -451,7 +483,9 @@ impl Store {
             file.write_all(initial.as_bytes())?;
             file.sync_all()?;
             disk::sync_directories(full.parent().unwrap(), &self.root)?;
-            let id = uuid::Uuid::new_v4().to_string();
+            let id = identity
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             let mut db = self.db.lock().unwrap();
             let tx = db.transaction()?;
             tx.execute("INSERT INTO docs(id,path) VALUES(?,?)", params![id, path])?;

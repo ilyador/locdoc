@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { App } from "./app";
+import { installOfflineShell } from "./offline-workspace";
 import "@fontsource-variable/dm-sans";
 import "@fontsource-variable/dm-sans/wght-italic.css";
 import "@fontsource/courier-prime/latin-400.css";
@@ -30,3 +31,6 @@ import "./hebrew-fonts.css";
 import "./shape-fonts.css";
 
 createRoot(document.getElementById("root")!).render(<App />);
+void installOfflineShell()?.catch(() => {
+  /* The sidebar offers a retry and explains the failure. */
+});

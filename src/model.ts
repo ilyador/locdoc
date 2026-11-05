@@ -7,9 +7,11 @@ export type Entry = {
   id: string | null;
   shared: boolean;
   modified?: number;
+  offlineVersion?: string;
   title?: string;
   url?: string;
   format?: DocumentFormat;
+  identity?: string;
 };
 // A document or folder in Locdoc's trash. `deleted` is in seconds.
 export type TrashItem = {
@@ -54,6 +56,7 @@ export type Document = {
   collaborationEpoch?: string;
   mediaToken?: string | null;
   hiddenMedia?: HiddenMedia[];
+  offlineMedia?: { path: string; version: string; bytes: number }[];
 };
 export type Config = {
   owner: boolean;
@@ -61,6 +64,7 @@ export type Config = {
   guest: string;
   publicUrl: string;
   ownerName?: string;
+  offlineScope?: string;
   folder?: { name: string; permission: string };
 };
 export type Comment = {
