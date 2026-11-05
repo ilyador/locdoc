@@ -13,16 +13,21 @@ export function protectTouchViewport(target: Document) {
   const previousStandalone = root.hasAttribute("data-standalone");
   const previousKeyboard = root.hasAttribute("data-keyboard-open");
   root.toggleAttribute("data-standalone", standalone);
+  const iPad =
+    /iPad/.test(win?.navigator.userAgent || "") ||
+    (win?.navigator.platform === "MacIntel" &&
+      win.navigator.maxTouchPoints > 1);
   // Measure without a painted fixed app ancestor, which can influence iOS's
-  // native status bar. In installed iPad apps even fixed inset:0 can stop short
-  // of the full CSS viewport; use its large viewport height while idle instead.
-  // The keyboard still uses the visual viewport below.
+  // native status bar. Only installed iPad apps need the larger CSS viewport:
+  // their fixed insets can stop short of the physical bottom. On iPhone that
+  // larger viewport extends behind system UI and would hide the whole footer.
+  // Keep the measured fixed bounds there, and the visual viewport for keyboards.
   const gauge = target.createElement("div");
   gauge.setAttribute("data-viewport-gauge", "");
   gauge.setAttribute("aria-hidden", "true");
   gauge.style.cssText =
     "position:fixed;inset:0;pointer-events:none;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box;";
-  if (standalone)
+  if (standalone && iPad)
     gauge.style.cssText += "bottom:auto;height:100vh;height:100lvh;";
   (target.body || root).appendChild(gauge);
   let idle: { width: number; usable: number } | null = null;

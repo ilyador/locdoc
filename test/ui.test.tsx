@@ -2178,6 +2178,7 @@ test("installed iPad uses the full CSS viewport when fixed insets stop above it"
   const { protectTouchViewport } = await import("../src/touch-viewport.ts");
   const vv = Object.getOwnPropertyDescriptor(window, "visualViewport");
   const standalone = Object.getOwnPropertyDescriptor(navigator, "standalone");
+  const agent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
   const rect = HTMLElement.prototype.getBoundingClientRect;
   const computed = window.getComputedStyle;
   const width = window.innerWidth;
@@ -2192,6 +2193,10 @@ test("installed iPad uses the full CSS viewport when fixed insets stop above it"
   try {
     window.innerWidth = 744;
     window.innerHeight = 1101;
+    Object.defineProperty(navigator, "userAgent", {
+      value: "Mozilla/5.0 (iPad; CPU OS 18_7 like Mac OS X)",
+      configurable: true,
+    });
     Object.defineProperty(window, "visualViewport", {
       value: viewport,
       configurable: true,
@@ -2262,6 +2267,8 @@ test("installed iPad uses the full CSS viewport when fixed insets stop above it"
     else Reflect.deleteProperty(window, "visualViewport");
     if (standalone) Object.defineProperty(navigator, "standalone", standalone);
     else Reflect.deleteProperty(navigator, "standalone");
+    if (agent) Object.defineProperty(navigator, "userAgent", agent);
+    else Reflect.deleteProperty(navigator, "userAgent");
   }
 });
 
