@@ -434,13 +434,17 @@ service_show() {
 }
 
 require_unit() {
-  local exec_start environment
+  local exec_start environment sandbox
   [[ $(service_show LoadState) == loaded ]] || die "the $service user unit is not loaded"
   [[ $(service_show NeedDaemonReload) == no ]] ||
     die "the $service unit changed on disk; run systemctl --user daemon-reload first"
   exec_start=$(service_show ExecStart)
   environment=$(service_show Environment)
-  if [[ $exec_start != *"path=$releases/current/locdoc ;"* ||
+  # The unit starts the release directly, or through ~/.local/bin/sixbox-sandbox, which
+  # confines it and then becomes current/locdoc, so the main process is still the release.
+  sandbox=$HOME/.local/bin/sixbox-sandbox
+  if [[ ($exec_start != *"path=$releases/current/locdoc ;"* &&
+    $exec_start != *"path=$sandbox ; argv[]=$sandbox locdoc ;"*) ||
     $(py unit-env "$environment" LOCDOC_WEB) != "$releases/current/web" ]]; then
     die "the $service unit must run $releases/current/locdoc with LOCDOC_WEB=$releases/current/web." \
       "Install the release drop-in with: scripts/deploy.sh install-unit"
