@@ -1,6 +1,12 @@
 export type TableCell = { text: string; from: number; to: number };
+export const tableColumnMinimum = 72;
+export const tableWidthUnit = 4;
 export type MarkdownTable = {
   rows: TableCell[][];
+  separator: TableCell[];
+  // Separator dash counts are relative widths; other Markdown readers simply
+  // ignore their lengths. No hidden metadata or separate layout state is needed.
+  widths: number[];
   // A column without colons starts where each cell's text starts: at the
   // right in a Hebrew cell. Colons ask for an edge or the center.
   align: ("start" | "left" | "center" | "right")[];
@@ -73,7 +79,36 @@ export function parseMarkdownTable(
     rows.push(row);
     start += line.length + 1;
   }
-  return { rows, align };
+  return {
+    rows,
+    align,
+    separator,
+    widths: separator.map((cell) => cell.text.replace(/:/g, "").length),
+  };
+}
+
+// Change only the separator tokens, preserving alignment, spaces, escaped
+// content and every body-cell offset outside this one Markdown line.
+export function tableWidthChanges(source: string, widths: number[]) {
+  const data = parseMarkdownTable(source);
+  if (
+    !data ||
+    widths.length !== data.widths.length ||
+    widths.some((width) => !Number.isFinite(width) || width <= 0)
+  )
+    return null;
+  return data.separator.flatMap((cell, index) => {
+    const dashes = "-".repeat(
+      Math.max(3, Math.round(widths[index] / tableWidthUnit)),
+    );
+    const insert =
+      (cell.text.startsWith(":") ? ":" : "") +
+      dashes +
+      (cell.text.endsWith(":") ? ":" : "");
+    return insert === cell.text
+      ? []
+      : [{ from: cell.from, to: cell.to, insert }];
+  });
 }
 
 export function createMarkdownTable(rows: number, columns: number) {

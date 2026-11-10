@@ -1,80 +1,13 @@
 import { Facet } from "@codemirror/state";
 import { EditorView, WidgetType } from "@codemirror/view";
-import { parseMarkdownTable } from "./markdown-table";
 import { isolate, textDirection } from "./bidi";
+export { TableWidget } from "./markdown-table-widget";
 
 export function mediaUrl(id: string, path: string, token?: string) {
   return `/api/docs/${id}/media?${new URLSearchParams({ path, ...(token ? { token } : {}) })}`;
 }
 export function isVideo(path: string) {
   return /\.(mp4|webm|mov)(?:[?&]|$)/i.test(decodeURIComponent(path));
-}
-
-export class TableWidget extends WidgetType {
-  constructor(
-    readonly source: string,
-    readonly editable: boolean,
-  ) {
-    super();
-  }
-  eq(other: TableWidget) {
-    return this.source === other.source && this.editable === other.editable;
-  }
-  toDOM(view: EditorView) {
-    const wrap = document.createElement("div");
-    wrap.className = "md-table-preview";
-    const data = parseMarkdownTable(this.source, 0);
-    if (!data) return wrap;
-    // A table whose text starts in Hebrew runs its columns from the right and
-    // scrolls from there. Each cell reads in its own direction.
-    const direction = textDirection(
-      data.rows.flatMap((row) => row.map((cell) => cell.text)).join(" "),
-    );
-    if (direction) wrap.dir = direction;
-    const table = document.createElement("table");
-    table.setAttribute("aria-label", "Document table");
-    const head = document.createElement("thead");
-    const body = document.createElement("tbody");
-    data.rows.forEach((row, rowIndex) => {
-      const tr = document.createElement("tr");
-      row.forEach((cell, columnIndex) => {
-        const td = document.createElement(rowIndex === 0 ? "th" : "td");
-        const own = textDirection(cell.text);
-        if (own) td.dir = own;
-        td.style.textAlign = data.align[columnIndex];
-        if (this.editable) {
-          const edit = document.createElement("button");
-          edit.type = "button";
-          edit.className = "md-table-cell";
-          edit.textContent = cell.text || "\u00a0";
-          edit.setAttribute(
-            "aria-label",
-            `Edit row ${rowIndex + 1}, column ${columnIndex + 1}${cell.text ? `: ${cell.text}` : ""}`,
-          );
-          // The user's own selection: the preview reveals the source there.
-          edit.onclick = () => {
-            view.dispatch({
-              selection: { anchor: view.posAtDOM(wrap) + cell.from },
-              scrollIntoView: true,
-              userEvent: "select",
-            });
-            view.focus();
-          };
-          td.appendChild(edit);
-        } else {
-          td.textContent = cell.text || "\u00a0";
-        }
-        tr.appendChild(td);
-      });
-      (rowIndex === 0 ? head : body).appendChild(tr);
-    });
-    table.append(head, body);
-    wrap.appendChild(table);
-    return wrap;
-  }
-  ignoreEvent() {
-    return true;
-  }
 }
 
 // Phosphor's regular ImageBroken, drawn like the workspace's other icons.

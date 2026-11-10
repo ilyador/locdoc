@@ -27,7 +27,7 @@
   --warning-line: #b57830;
   --syntax-heading: #c13600;
   --syntax-teal: #117c72;
-  --syntax-code: #637a00;
+  --syntax-code: #526600;
   --syntax-delete: #bd4549;
   --syntax-violet: #5658b9;
   --syntax-amber: #946800;
@@ -1992,7 +1992,7 @@ button:hover {
   text-decoration: line-through;
 }
 .md-inline-code {
-  background: var(--subtle);
+  background: color-mix(in srgb, var(--syntax-code) 12%, transparent);
   font-family: var(--code-font);
   font-size: 0.9em;
   border-radius: 4px;
@@ -2002,7 +2002,7 @@ button:hover {
 .md-code-line,
 :where(.md-code-line + .inline-comment-host[data-splits-line]) + .cm-line {
   font: 0.9em/1.65 var(--code-font);
-  background: var(--subtle);
+  background: color-mix(in srgb, var(--syntax-code) 12%, transparent);
   color: var(--syntax-code);
   padding: 0 13px !important;
   min-height: 1.65em;
@@ -2155,6 +2155,7 @@ button:hover {
 }
 .md-table-preview table {
   border-collapse: collapse;
+  table-layout: fixed;
   width: 100%;
   font-size: 0.9em;
   line-height: 1.65;
@@ -2163,17 +2164,13 @@ button:hover {
 .md-table-preview th,
 .md-table-preview td {
   border: 1px solid var(--line);
-  padding: 9px 13px;
-  min-width: 100px;
+  padding: 0;
   vertical-align: top;
 }
 .md-table-preview th {
+  position: relative;
   background: var(--subtle);
   font-weight: var(--weight-semibold);
-}
-.md-table-preview:has(.md-table-cell) th,
-.md-table-preview:has(.md-table-cell) td {
-  padding: 0;
 }
 .md-table-cell {
   display: block;
@@ -2185,8 +2182,45 @@ button:hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.md-table-cell:focus-visible {
+.md-table-preview :is(th, td):focus-visible {
   outline-offset: -3px;
+}
+.md-table-resize {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: -6px;
+  width: 12px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.md-table-resize::after {
+  content: "";
+  position: absolute;
+  inset-block: 6px;
+  inset-inline-start: calc(50% - 1px);
+  width: 2px;
+  background: var(--accent);
+  opacity: 0;
+}
+.md-table-resize:hover::after,
+.md-table-resize:focus-visible::after,
+.is-resizing .md-table-resize::after {
+  opacity: 1;
+}
+.md-table-preview.is-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+@media (pointer: coarse) {
+  .md-table-resize {
+    width: 44px;
+    inset-inline-end: -22px;
+  }
+  .md-table-resize::after {
+    opacity: 0.35;
+  }
 }
 .comment-marker {
   display: inline-flex;

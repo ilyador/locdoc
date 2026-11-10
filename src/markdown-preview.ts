@@ -22,7 +22,7 @@ import {
   visibleTextRanges,
 } from "./editor-comments";
 import { previewSelection, userEngagement } from "./editor-engagement";
-import { resolveDocumentLink } from "./document-links";
+import { inlineLink } from "./markdown-inline";
 import { documentFormat } from "./document-format";
 import { previewRanges, type PreviewRange } from "./preview-ranges";
 import { fountainPreview } from "./fountain-preview";
@@ -163,7 +163,12 @@ export function livePreview(
               blockStarts.add(state.doc.lineAt(from).from);
               decorations.push(
                 Decoration.replace({
-                  widget: new TableWidget(source, !state.readOnly),
+                  widget: new TableWidget(
+                    source,
+                    !state.readOnly,
+                    path,
+                    entries,
+                  ),
                   block: true,
                 }).range(from, end),
               );
@@ -297,14 +302,13 @@ export function livePreview(
             );
           }
           if (name === "Link" || name === "Autolink" || name === "URL") {
-            if (
-              name === "URL" &&
-              /^(Link|Autolink|Image)$/.test(n.node.parent?.name || "")
-            )
-              return;
-            const destination =
-              name === "URL" ? n.node : n.node.getChild("URL");
-            if (!destination) {
+            const link = inlineLink(
+              (from, to) => state.sliceDoc(from, to),
+              n.node,
+              path,
+              entries,
+            );
+            if (!link) {
               // Markdown parses the inner [text] of [[text]] as a shortcut
               // link. Keep this literal bracketed prose in one consistent ink.
               if (
@@ -320,18 +324,7 @@ export function livePreview(
                 );
               return;
             }
-            const raw = state
-              .sliceDoc(destination.from, destination.to)
-              .replace(/^<|>$/g, "");
-            const href = resolveDocumentLink(raw, path, entries);
-            if (!href) return;
-            const mark = n.node.getChild("LinkMark");
-            const labelFrom =
-              name === "Link" ? mark?.to || from : destination.from;
-            const labelTo =
-              name === "Link"
-                ? n.node.getChildren("LinkMark")[1]?.from || destination.from
-                : destination.to;
+            const { href, from: labelFrom, to: labelTo } = link;
             if (labelTo > labelFrom)
               decorations.push(
                 Decoration.mark({
@@ -340,7 +333,7 @@ export function livePreview(
                   attributes: {
                     href,
                     "data-link-url": href,
-                    "data-link-label": state.sliceDoc(labelFrom, labelTo),
+                    "data-link-label": link.label,
                   },
                 }).range(labelFrom, labelTo),
               );

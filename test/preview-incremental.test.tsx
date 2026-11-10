@@ -908,8 +908,8 @@ test("reused media, table and task controls act at their mapped source positions
       view.dom.querySelector(".embed") === image,
       "Mapped image must retain its DOM",
     );
-    const tableCell = view.dom.querySelector<HTMLButtonElement>(
-      'button[aria-label="Edit row 2, column 1: Cell"]',
+    const tableCell = view.dom.querySelector<HTMLElement>(
+      '[aria-label="Edit row 2, column 1: Cell"]',
     );
     assert.ok(tableCell, "Mapped table cell must be clickable");
     tableCell.click();

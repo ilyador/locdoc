@@ -4,6 +4,7 @@ import { markdownLanguage } from "@codemirror/lang-markdown";
 import {
   createMarkdownTable,
   parseMarkdownTable,
+  tableWidthChanges,
 } from "../src/markdown-table.ts";
 
 test("table cell targets retain offsets and escaped pipes", () => {
@@ -16,7 +17,9 @@ test("table cell targets retain offsets and escaped pipes", () => {
 });
 
 test("a column without colons starts where its text starts, so Hebrew cells align right", () => {
-  const table = parseMarkdownTable("| שם | Name | Note |\n| --- | :--- | :---: |\n| דנה | Ada | x |");
+  const table = parseMarkdownTable(
+    "| שם | Name | Note |\n| --- | :--- | :---: |\n| דנה | Ada | x |",
+  );
   assert.deepEqual(table.align, ["start", "left", "center"]);
 });
 
@@ -57,11 +60,46 @@ test("picker dimensions produce valid Markdown including a header-only table", (
     assert.ok(parsed.rows.every((row) => row.length === columns));
     const nodes = [];
     markdownLanguage.parser.parse(createMarkdownTable(rows, columns)).iterate({
-      enter(node) { nodes.push(node.name); },
+      enter(node) {
+        nodes.push(node.name);
+      },
     });
     assert.equal(nodes.filter((name) => name === "Table").length, 1);
     // Lezer omits empty body-cell nodes, but retains each body row.
     assert.equal(nodes.filter((name) => name === "TableCell").length, columns);
     assert.equal(nodes.filter((name) => name === "TableRow").length, rows - 1);
   }
+});
+
+test("column widths round-trip as ordinary Markdown without changing contents or alignment", () => {
+  const source = "Name | Note\n :--- | ---: \nAda | one \\| two";
+  const changes = tableWidthChanges(source, [280, 120]);
+  let resized = source;
+  for (const change of changes.toReversed())
+    resized =
+      resized.slice(0, change.from) + change.insert + resized.slice(change.to);
+  const parsed = parseMarkdownTable(resized);
+  assert.deepEqual(parsed.widths, [70, 30]);
+  assert.deepEqual(parsed.align, ["left", "right"]);
+  assert.deepEqual(
+    parsed.rows.map((row) => row.map((cell) => cell.text)),
+    [
+      ["Name", "Note"],
+      ["Ada", "one | two"],
+    ],
+  );
+  const nodes = [];
+  markdownLanguage.parser.parse(resized).iterate({
+    enter(node) {
+      nodes.push(node.name);
+    },
+  });
+  assert.equal(
+    nodes.filter((name) => name === "Table").length,
+    1,
+    "the result remains standard Markdown",
+  );
+  assert.equal(tableWidthChanges(source, [0, 120]), null);
+  assert.equal(tableWidthChanges(source, [NaN, 120]), null);
+  assert.equal(tableWidthChanges(source, [120]), null);
 });

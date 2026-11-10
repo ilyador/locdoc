@@ -168,7 +168,8 @@ const markdown: SyntaxReference = {
               "   2",
               " |",
             ],
-            meaning: "Table; a colon in the dashes aligns a column",
+            meaning:
+              "Table; colons align columns, dash lengths store resized widths",
           },
           {
             source: ["---"],
