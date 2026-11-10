@@ -6,9 +6,11 @@ import {
   RectangleMarker,
 } from "@codemirror/view";
 
-function selectionMarkers(view: EditorView) {
+function selectionMarkers(view: EditorView, native: boolean) {
   const ranges: { from: number; to: number }[] = [];
   for (const range of view.state.selection.ranges) {
+    if (native && view.hasFocus && range === view.state.selection.main)
+      continue;
     if (range.empty) continue;
     for (const visible of view.visibleRanges) {
       const from = Math.max(range.from, visible.from);
@@ -85,27 +87,54 @@ function selectionMarkers(view: EditorView) {
   return markers;
 }
 
-// Own the selection background independently of focus: iOS can hide its native
-// highlight for a context menu without blurring the editor. Keep CodeMirror's
-// caret and iOS handles, and leave the native selection and text DOM untouched.
-export const documentSelection = [
-  drawSelection(),
-  layer({
-    above: false,
-    class: "cm-documentSelectionLayer",
-    markers: selectionMarkers,
-    update: (update) =>
-      update.docChanged || update.selectionSet || update.viewportChanged,
-  }),
-  EditorView.baseTheme({
-    // One painter for backgrounds; the built-in layer still owns iOS handles.
-    ".cm-selectionLayer .cm-selectionBackground": { visibility: "hidden" },
-    ".cm-line::selection, .cm-line ::selection": {
-      backgroundColor: "transparent !important",
-    },
-    // Inputs embedded in widgets retain their own native selection styling.
-    ".cm-content :focus::selection, .cm-content :focus ::selection": {
-      backgroundColor: "Highlight !important",
-    },
-  }),
-];
+// iOS paints the active selection outside the page; ::selection cannot reliably
+// hide it. Let it own the caret, handles and primary highlight together. Our
+// layer keeps the selection visible when an app menu takes focus, and draws
+// secondary ranges. Desktop keeps the measured text-fragment selection.
+function selectionExtension(native: boolean) {
+  return [
+    native
+      ? EditorView.contentAttributes.of({ tabindex: "0" })
+      : drawSelection(),
+    layer({
+      above: false,
+      class: "cm-documentSelectionLayer",
+      markers: (view) => selectionMarkers(view, native),
+      update: (update) =>
+        update.docChanged ||
+        update.selectionSet ||
+        update.viewportChanged ||
+        update.focusChanged,
+    }),
+    native
+      ? EditorView.baseTheme({
+          ".cm-content, .cm-line": {
+            caretColor: "var(--accent) !important",
+          },
+        })
+      : EditorView.baseTheme({
+          // Only our measured layer paints selection backgrounds on desktop.
+          ".cm-selectionLayer .cm-selectionBackground": {
+            visibility: "hidden",
+          },
+          ".cm-line::selection, .cm-line ::selection": {
+            backgroundColor: "transparent !important",
+          },
+          // Inputs embedded in widgets retain their own native selection styling.
+          ".cm-content :focus::selection, .cm-content :focus ::selection": {
+            backgroundColor: "Highlight !important",
+          },
+        }),
+  ];
+}
+
+// Reuse the themes and layers when another document opens.
+const nativeSelection = selectionExtension(true);
+const drawnSelection = selectionExtension(false);
+
+export function documentSelection() {
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+    ? nativeSelection
+    : drawnSelection;
+}

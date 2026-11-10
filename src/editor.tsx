@@ -275,10 +275,11 @@ export const MarkdownEditor = forwardRef<
           EditorView.contentAttributes.of({
             spellcheck: "true",
             autocorrect: "on",
+            autocapitalize: "sentences",
             "data-gramm": "false",
           }),
           perLineDirection,
-          documentSelection,
+          documentSelection(),
           highlightSelectionMatches(),
           findExtension(),
           layer.extension,

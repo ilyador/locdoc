@@ -490,6 +490,136 @@ for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
     }
   });
 
+for (const profile of [
+  {
+    name: "iPhone",
+    userAgent: "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Mobile/15E148",
+    platform: "iPhone",
+    maxTouchPoints: 5,
+  },
+  {
+    name: "iPad desktop mode",
+    userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15",
+    platform: "MacIntel",
+    maxTouchPoints: 5,
+  },
+])
+  for (const path of ["Page.md", "Scene.fountain", "Notes.txt"])
+    test(`${profile.name} ${path} has one selection painter and retains selection in an app menu`, async () => {
+      const keys = ["userAgent", "platform", "maxTouchPoints"] as const;
+      const previous = keys.map((key) =>
+        Object.getOwnPropertyDescriptor(navigator, key),
+      );
+      keys.forEach((key) =>
+        Object.defineProperty(navigator, key, {
+          configurable: true,
+          value: profile[key],
+        }),
+      );
+      const doc = open("A selected passage to format.", path);
+      const field = document.createElement("input");
+      document.body.append(field);
+      const previousRects = window.Range.prototype.getClientRects;
+      window.Range.prototype.getClientRects = function () {
+        return this.collapsed
+          ? ([] as any)
+          : ([new window.DOMRect(16, 0, 128, 20)] as any);
+      };
+      const highlight = () =>
+        doc.page.container.querySelector(
+          ".cm-documentSelectionLayer .cm-selectionBackground",
+        );
+      try {
+        await act(async () => {
+          doc.view.focus();
+          doc.view.dispatch({
+            selection: { anchor: 2, head: 18 },
+            userEvent: "select.pointer",
+          });
+        });
+        await finishFrame();
+        assert.equal(window.getSelection()!.toString(), "selected passage");
+        assert.equal(
+          highlight(),
+          null,
+          "the active native selection must not have a second rectangle",
+        );
+        assert.equal(
+          doc.view.dom.querySelector(".cm-selectionHandle, .cm-cursorLayer"),
+          null,
+          "iOS owns its caret and selection handles too",
+        );
+        const line = doc.view.contentDOM.querySelector(".cm-line");
+        const callout = new window.MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => doc.view.contentDOM.dispatchEvent(callout));
+        await finishFrame();
+        assert.equal(callout.defaultPrevented, false);
+        assert.equal(window.getSelection()!.toString(), "selected passage");
+        assert.equal(
+          highlight(),
+          null,
+          "the native copy menu keeps the native selection",
+        );
+        act(() => field.focus());
+        await waitFor(() =>
+          assert.ok(highlight(), "an app field gets a retained highlight"),
+        );
+        assert.ok(document.activeElement === field, "the menu keeps focus");
+        act(() => doc.text.insert(0, "Before "));
+        await waitFor(() =>
+          assert.equal(doc.view.state.selection.main.from, 9),
+        );
+        assert.equal(doc.view.state.sliceDoc(9, 25), "selected passage");
+        await act(async () => doc.view.focus());
+        await waitFor(() =>
+          assert.equal(
+            highlight(),
+            null,
+            "returning to native selection removes the retained rectangle",
+          ),
+        );
+        assert.equal(window.getSelection()!.toString(), "selected passage");
+        assert.ok(
+          doc.view.contentDOM.querySelector(".cm-line") === line,
+          "selection and focus do not replace the text line",
+        );
+        await act(async () => {
+          doc.page.rerender(<MarkdownEditor {...doc.props} editable={false} />);
+          doc.view.focus();
+        });
+        assert.equal(
+          doc.view.hasFocus,
+          true,
+          "read-only text remains focusable for native selection",
+        );
+        await waitFor(() => assert.equal(highlight(), null));
+        act(() => doc.view.dispatch({ selection: { anchor: 25 } }));
+        act(() => field.focus());
+        await finishFrame();
+        assert.equal(
+          highlight(),
+          null,
+          "a collapsed selection leaves no highlight",
+        );
+        assert.equal(
+          doc.text.toString(),
+          "Before A selected passage to format.",
+        );
+      } finally {
+        window.Range.prototype.getClientRects = previousRects;
+        field.remove();
+        doc.close();
+        keys.forEach((key, index) => {
+          const value = previous[index];
+          if (value) Object.defineProperty(navigator, key, value);
+          else Reflect.deleteProperty(navigator, key);
+        });
+      }
+    });
+
 test("wrapped selection follows its own text boxes, not an earlier line's indentation", async () => {
   const source =
     "@ANA\nA line.\n\n/* Selected note with enough words to wrap. */\n\nAnother paragraph.";

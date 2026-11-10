@@ -140,7 +140,7 @@ function wordStyles(word: Node) {
   return [...styles].sort();
 }
 
-test("native spelling and autocorrection stay enabled across document formats", () => {
+test("native spelling, autocorrection and sentence capitalization stay enabled across document formats", () => {
   const ydoc = new Y.Doc();
   ydoc.getText("content").insert(0, "Some prose.");
   const awareness = new Awareness(ydoc);
@@ -159,6 +159,7 @@ test("native spelling and autocorrection stay enabled across document formats", 
       const content = page.container.querySelector<HTMLElement>(".cm-content")!;
       assert.equal(content.getAttribute("spellcheck"), "true", path);
       assert.equal(content.getAttribute("autocorrect"), "on", path);
+      assert.equal(content.getAttribute("autocapitalize"), "sentences", path);
       assert.equal(
         content.getAttribute("writingsuggestions"),
         "false",

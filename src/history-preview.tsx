@@ -56,7 +56,7 @@ export function HistoryPreview({
           placeholder("Empty version"),
           documentPreview(documentId, token, path),
           perLineDirection,
-          documentSelection,
+          documentSelection(),
           // CodeMirror draws the target first; only this pane scrolls, even for
           // a long jump in WebKit. Live-document reading state stays separate.
           EditorView.scrollHandler.of((view, range, options) => {
