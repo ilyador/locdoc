@@ -2074,7 +2074,6 @@ button:hover {
 .embed img,
 .embed video {
   max-width: 100%;
-  max-height: 560px;
   border-radius: 6px;
   display: block;
   margin: 0 auto;
@@ -2107,9 +2106,20 @@ button:hover {
 .embed-inline img,
 .embed-inline video {
   max-width: 100%;
-  max-height: 560px;
   border-radius: 6px;
   vertical-align: bottom;
+}
+.embed-inline:has(> img) {
+  inline-size: 100%;
+}
+.embed img,
+.embed-inline img {
+  inline-size: 100%;
+  block-size: auto;
+}
+.embed video,
+.embed-inline video {
+  max-block-size: 560px;
 }
 .cm-content[contenteditable="true"] .embed-inline img,
 .cm-content[contenteditable="true"] .embed-inline .media-missing {
