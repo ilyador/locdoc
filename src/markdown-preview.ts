@@ -38,6 +38,7 @@ import {
 } from "./markdown-widgets";
 import { mediaPreview, previewedImage } from "./markdown-media";
 import { plainTextSupport } from "./plain-text";
+import { orderedListNumbers } from "./list-numbers";
 import { directionSyntax, markdownDirectionSyntax } from "./text-direction";
 import type { Entry } from "./model";
 
@@ -486,6 +487,7 @@ export const markdownWriting = markdown({
 });
 const markdownSupport = [
   markdownWriting,
+  orderedListNumbers,
   syntaxHighlighting(writingHighlight),
   directionSyntax.of(markdownDirectionSyntax),
 ];
