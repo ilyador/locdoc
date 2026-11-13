@@ -1,5 +1,6 @@
 import {
   ChangeSet,
+  countColumn,
   EditorState,
   Prec,
   type ChangeSpec,
@@ -41,15 +42,50 @@ function touchesMark(tree: Tree, from: number, to: number) {
   return found;
 }
 
-/** Each item's number, where it is in the text. */
+/** Each item's number, where it is in the text and how far it is indented. */
 function numbers(state: EditorState, list: SyntaxNode) {
   return list.getChildren("ListItem").flatMap((item) => {
     const mark = item.getChild("ListMark");
     const digits = mark
       ? state.sliceDoc(mark.from, mark.to).match(orderedMark)?.[1]
       : undefined;
-    return mark && digits ? [{ from: mark.from, digits }] : [];
+    if (!mark || !digits) return [];
+    const line = state.doc.lineAt(mark.from);
+    const column = countColumn(
+      state.sliceDoc(line.from, mark.from),
+      state.tabSize,
+    );
+    return [{ from: mark.from, digits, column }];
   });
+}
+
+/** The number of the item that began on the line at `pos` before the edit,
+ * if its number stood at `column`. */
+function numberOnLine(
+  state: EditorState,
+  tree: Tree,
+  pos: number,
+  column: number,
+) {
+  const line = state.doc.lineAt(pos);
+  let digits: string | undefined;
+  tree.iterate({
+    from: line.from,
+    to: line.to,
+    enter: (node) => {
+      if (digits !== undefined) return false;
+      if (node.name !== "ListMark" || node.from < line.from) return;
+      const at = countColumn(
+        state.sliceDoc(line.from, node.from),
+        state.tabSize,
+      );
+      digits =
+        at === column
+          ? (state.sliceDoc(node.from, node.to).match(orderedMark)?.[1] ?? "")
+          : "";
+    },
+  });
+  return digits || undefined;
 }
 
 /** Changes that number each ordered list `tr` reshaped in sequence from
@@ -96,27 +132,38 @@ export function listRenumbering(tr: Transaction): ChangeSpec[] {
   const inverse = tr.changes.invert(before.doc);
   const changes: ChangeSpec[] = [];
   for (const list of lists.values()) {
-    const items = numbers(state, list);
-    if (!items.length) continue;
-    const first = items[0];
-    let start = Number(first.digits);
-    if (!typedOver(first.from, first.from + first.digits.length)) {
-      // A list keeps the number it started with, also when its first item
-      // goes: map its start back and read the list that began there.
-      const origin = inverse.mapPos(list.from, -1);
-      const earlier = listsAt(oldTree, origin).find((l) => l.from === origin);
-      const was = earlier && numbers(before, earlier)[0];
-      if (was) start = Number(was.digits);
-    }
-    items.forEach((item, index) => {
-      const number = String(start + index);
-      if (item.digits !== number)
+    // Items indented less than an item's text still belong to its list in
+    // Markdown, but writers indent them to number them on their own. So each
+    // run of items at one indent counts by itself, and a run ends where a
+    // less indented item comes.
+    const runs = new Map<number, number>();
+    for (const item of numbers(state, list)) {
+      for (const column of [...runs.keys()])
+        if (column > item.column) runs.delete(column);
+      const last = runs.get(item.column);
+      let number = last === undefined ? Number(item.digits) : last + 1;
+      if (
+        last === undefined &&
+        !typedOver(item.from, item.from + item.digits.length)
+      ) {
+        // A run keeps the number it started with, also when its first item
+        // goes: map its line back and read the number that began there.
+        const was = numberOnLine(
+          before,
+          oldTree,
+          inverse.mapPos(state.doc.lineAt(item.from).from, -1),
+          item.column,
+        );
+        if (was) number = Number(was);
+      }
+      runs.set(item.column, number);
+      if (item.digits !== String(number))
         changes.push({
           from: item.from,
           to: item.from + item.digits.length,
-          insert: number,
+          insert: String(number),
         });
-    });
+    }
   }
   return changes;
 }

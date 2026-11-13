@@ -89,6 +89,28 @@ test("a nested list renumbers on its own and leaves the outer list alone", () =>
   );
 });
 
+test("items indented by two spaces keep their own numbering", () => {
+  // Markdown puts these in one list with the items above them; writers
+  // mean them as a numbered list of their own.
+  const doc =
+    "1. First\n2. Second\n  1. Sub a\n  2. Sub b\n  3. Sub c\n3. Third\n4. Fourth";
+  const outer = open(doc);
+  assert.equal(
+    after(outer, { changes: { ...line(outer, 6), insert: "" } }),
+    "1. First\n2. Second\n  1. Sub a\n  2. Sub b\n  3. Sub c\n3. Fourth",
+  );
+  const inner = open(doc);
+  assert.equal(
+    after(inner, { changes: { ...line(inner, 3), insert: "" } }),
+    "1. First\n2. Second\n  1. Sub b\n  2. Sub c\n3. Third\n4. Fourth",
+  );
+  const gap = open("1. First\n2. Second\n  1. Sub a\n3. Third\n4. Fourth");
+  assert.equal(
+    after(gap, { changes: { ...line(gap, 4), insert: "" } }),
+    "1. First\n2. Second\n  1. Sub a\n3. Fourth",
+  );
+});
+
 test("typing inside an item never rewrites numbers the writer repeated", () => {
   const state = open("1. Milk\n1. Eggs\n1. Bread");
   assert.equal(
