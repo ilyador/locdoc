@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -28,6 +29,7 @@ import {
 } from "./document-format";
 import type { DocumentSession } from "./document-session";
 import type { FileActions } from "./file-actions";
+import { queuedFiles, unsentDocument } from "./offline-files";
 import type { Config, Document } from "./model";
 import { normalizePresence } from "./presence";
 import { RecentlyDeleted } from "./trash";
@@ -46,6 +48,34 @@ export function panelTitle(panel: string | null) {
   }[panel || ""];
 }
 
+/** Whether the server has yet to accept a document this browser made. A
+ * document read from the server answers at once. One read before the server
+ * had it stays unsent until the queue shows it accepted, so the answer
+ * follows the queue as it drains and keeps the document it was read for. */
+function useUnsent(doc: Document) {
+  const [answer, setAnswer] = useState<{ id: string; unsent: boolean }>();
+  const { id, unsent: readUnsent } = doc;
+  useEffect(() => {
+    if (!readUnsent) return;
+    let current = true;
+    const read = () =>
+      void queuedFiles()
+        .then((queue) => unsentDocument(queue, id))
+        .catch(() => true)
+        .then((unsent) => {
+          if (current) setAnswer({ id, unsent });
+        });
+    read();
+    window.addEventListener("locdoc-offline-files", read);
+    return () => {
+      current = false;
+      window.removeEventListener("locdoc-offline-files", read);
+    };
+  }, [id, readUnsent]);
+  if (!readUnsent) return false;
+  return answer?.id === id ? answer.unsent : true;
+}
+
 export function DocumentSharePanel({
   doc,
   filename,
@@ -59,11 +89,27 @@ export function DocumentSharePanel({
   onChange: (permission: string, rotate: boolean) => Promise<void>;
   onShareFolder: (path: string) => void;
 }) {
+  const description = (
+    <p className="dialog-description">
+      Share “<bdi>{filename}</bdi>” with a link.
+    </p>
+  );
+  const unsent = useUnsent(doc);
+  // The server does not know an unsent document, so every control here would
+  // fail as "Document not found." for a document the owner is looking at.
+  if (unsent)
+    return (
+      <>
+        {description}
+        <p role="status" className="field-help">
+          This document has not reached the server yet. Sharing and MCP access
+          work once it has.
+        </p>
+      </>
+    );
   return (
     <>
-      <p className="dialog-description">
-        Share “<bdi>{filename}</bdi>” with a link.
-      </p>
+      {description}
       <ShareControls
         value={doc}
         name={name}

@@ -57,6 +57,8 @@ export type Document = {
   mediaToken?: string | null;
   hiddenMedia?: HiddenMedia[];
   offlineMedia?: { path: string; version: string; bytes: number }[];
+  /** Made in this browser and not accepted by the server when it was read. */
+  unsent?: boolean;
 };
 export type Config = {
   owner: boolean;

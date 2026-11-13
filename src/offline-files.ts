@@ -70,6 +70,14 @@ export async function queuedFiles() {
     : [];
 }
 
+/** A document created here that the server has not accepted yet: nothing
+ * that asks the server about it, as sharing does, can answer. */
+export const unsentDocument = (queue: QueuedFile[], id: string) =>
+  queue.some(
+    ({ command, result }) =>
+      command.kind === "create-file" && command.document === id && !result,
+  );
+
 export function projectEntries(base: Entry[], queue: QueuedFile[]) {
   let entries = base;
   for (const { command: c, entries: kept, result } of queue) {
@@ -174,6 +182,7 @@ export async function localDocument(
     modified: creation.created,
     collaborationEpoch: "",
     offlineMedia: [],
+    unsent: true,
   });
 }
 export async function localDeletion(path: string) {
