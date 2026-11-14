@@ -1,6 +1,13 @@
-# Locdoc
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme/header-dark.png">
+  <img src="assets/readme/header-light.png" width="1280" alt="Locdoc. Local Markdown. Shared ideas. Write together. Keep your files.">
+</picture>
 
 A small, self-hosted Markdown and Fountain editor over real files. Write in your browser or your desktop editor, and share documents or folders without accounts.
+
+<img src="assets/readme/collaboration.png" width="1600" alt="Two guests edit a shared Markdown plan beside the owner: their named cursors, a selection, presence avatars in the header and an open comment thread under the passage it discusses.">
+
+<sub>Two link guests edit with the owner. Their cursors and avatars show live, and the comment thread is stored in the Markdown file as plain <code>[[comment(…)]]</code> records.</sub>
 
 - Real nested folders and ordinary UTF-8 `.md`, `.fountain` and `.txt` files.
 - A searchable sidebar with **By date** and **Folders** tabs, both newest first; your selected view is remembered locally.
@@ -11,8 +18,35 @@ A small, self-hosted Markdown and Fountain editor over real files. Write in your
 - Document and folder links with **view & comment** or **edit & comment** access.
 - Searchable document links, link previews, local fonts, automatic dark mode, and mobile layouts.
 - Scroll positions remembered in each browser, separately for each document and reader.
+- Version history that marks what each snapshot added and removed, with restore.
+- Offline editing in a signed-in browser; changes sync when the connection returns.
 - An authenticated MCP interface for ChatGPT and other MCP clients.
 - A local owner key; no email, hosted database, or third-party collaboration service.
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/readme/images.png" alt="A Markdown travel note with a full-width photo of a Lisbon tram, set in Lora, beside the Folders tab.">
+      <br><sub><b>Local images</b> render in place from ordinary <code>![alt](images/tram-28.jpg)</code> links. Font, size and spacing are per-browser preferences.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/readme/screenplay.png" alt="A Fountain screenplay in dark mode with colored character cues, a note, a comment thread, a transition and a guest's selection.">
+      <br><sub><b>Fountain screenplays</b> format as you type, with comments and live cursors as in Markdown. Dark mode follows the system.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/readme/sharing.png" alt="The Share folder dialog with Edit &amp; comment link access, a public URL, Copy link and Allow MCP turned on.">
+      <br><sub><b>Share</b> a document or a whole folder for view &amp; comment or edit &amp; comment. MCP access is a separate switch.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/readme/history.png" alt="Version history in dark mode: a dated list of snapshots beside the document, with added words underlined and removed words struck through.">
+      <br><sub><b>Version history</b> compares each snapshot with the one before it. Browsing never changes the live document.</sub>
+    </td>
+  </tr>
+</table>
+
+<sub>Screenshots show a demo workspace with invented documents and people. Photos: <a href="https://unsplash.com/license">Unsplash</a>.</sub>
 
 ## Install
 
