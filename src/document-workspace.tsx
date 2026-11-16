@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { WarningCircle, X } from "@phosphor-icons/react";
 import { api, send } from "./api";
 import { MarkdownEditor } from "./editor";
+import { InkPlayer } from "./ink-player";
 import type { EditorHandle, LinkTarget, Selection } from "./editor-types";
 import { FolderShare, type ShareAccess } from "./sharing";
 import { LinkPicker } from "./link-picker";
@@ -168,6 +169,7 @@ export function DocumentWorkspace({
   const fontCategory = useFontCategory(font);
   const [shareFolderPath, setShareFolderPath] = useState<string | null>(null);
   const [panel, setPanel] = useState<string | null>(null);
+  const [playingInk, setPlayingInk] = useState(false);
   const { toast, tell, dismiss } = useToast();
   const { busy, action } = useAction(tell);
   const error = documentError || workspace.error;
@@ -185,6 +187,7 @@ export function DocumentWorkspace({
     pageWidth,
     paragraphSpacing,
     scrollPastEnd,
+    playingInk,
   ]);
   const [linkSelection, setLinkSelection] = useState<Selection | null>(null);
   const [linkTarget, setLinkTarget] = useState<LinkTarget | null>(null);
@@ -222,7 +225,7 @@ export function DocumentWorkspace({
     endpoint,
     ready: !!doc,
     source: session?.ydoc.getText("content"),
-    plain: format === "text",
+    plain: format === "text" || format === "ink",
     name,
     action,
   });
@@ -440,10 +443,12 @@ export function DocumentWorkspace({
             openOptions={() => setPanel("document")}
             formatFountain={(kind) => editor.current?.formatFountain(kind)}
             tools={formattingTools()}
+            playingInk={playingInk}
+            toggleInk={() => setPlayingInk((value) => !value)}
           />
         )}
         <div
-          className={`document-layout ${panel === "appearance" ? "with-appearance" : ""}`}
+          className={`document-layout ${panel === "appearance" ? "with-appearance" : ""} ${format === "ink" && playingInk ? "with-ink-player" : ""}`}
         >
           {panel === "appearance" && (
             <AppearancePanel
@@ -534,6 +539,21 @@ export function DocumentWorkspace({
                 )}
               </div>
             </div>
+          )}
+          {doc && session && format === "ink" && playingInk && (
+            <InkPlayer
+              key={doc.id}
+              text={session.ydoc.getText("content")}
+              path={entry?.path || doc.path}
+              entries={entries}
+              accessQuery={accessQuery}
+              onClose={() => {
+                setPlayingInk(false);
+                surface.current
+                  ?.querySelector<HTMLButtonElement>(".ink-play-button")
+                  ?.focus();
+              }}
+            />
           )}
         </div>
         <DocumentFooter

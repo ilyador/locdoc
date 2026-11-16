@@ -1,6 +1,7 @@
 import { commentParser, commentReadingText } from "./comment-syntax";
 import { documentFormat } from "./document-format";
 import { parseFountain } from "./fountain";
+import { inkSource, withoutInkComments } from "./ink-source";
 
 const hidden = new Set([
   "LocdocComment",
@@ -22,6 +23,15 @@ const words = new Intl.Segmenter(undefined, { granularity: "word" });
 export function countDocumentWords(source: string, path: string) {
   const format = documentFormat(path);
   if (format === "text") return countPlainWords(source);
+  if (format === "ink")
+    return countPlainWords(
+      withoutInkComments(inkSource(source))
+        .replace(
+          /^\s*(?:=|~|VAR\b|CONST\b|LIST\b|INCLUDE\b|EXTERNAL\b|TODO:).*$/gm,
+          "",
+        )
+        .replace(/(?:->|<-|#)[^\n]*|\{[^{}]*\}/g, ""),
+    );
   if (format !== "fountain") return countMarkdownWords(source);
   const text = parseFountain(source)
     .lines.filter(

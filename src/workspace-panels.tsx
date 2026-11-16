@@ -374,7 +374,7 @@ export function DocumentOptions({
       <p className="dialog-description">
         <PathText path={doc.path} separator="/" />
       </p>
-      {doc.edit && format === "markdown" && (
+      {doc.edit && (format === "markdown" || format === "ink") && (
         <div className="formatting-menu" role="group" aria-label="Formatting">
           {formatting}
         </div>
@@ -396,7 +396,7 @@ export function DocumentOptions({
           onRename={onRename}
         />
       )}
-      {format !== "text" && (
+      {format !== "text" && format !== "ink" && (
         <div className="attachment-info">
           <Image />
           <span>

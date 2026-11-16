@@ -805,68 +805,71 @@ mod tests {
 
     #[test]
     fn plain_text_image_syntax_is_text_never_approved_served_or_uploaded() {
-        let (_dir, s) = store();
-        let png = BASE64.decode(PNG).unwrap();
-        fs::create_dir_all(s.root.join("Notes")).unwrap();
-        fs::write(s.root.join("Notes/photo.png"), &png).unwrap();
-        // A desktop Markdown file naming this image would approve it.
-        fs::write(s.root.join("Notes/plain.txt"), "![photo](photo.png)\n").unwrap();
-        let d = s.index_document("Notes/plain.txt").unwrap();
-        let d = link(&s, &d, "plain-link");
-        let room = s.room(&d).unwrap();
-        fs::write(
-            s.root.join("Notes/plain.txt"),
-            "![photo](photo.png)\n![again](./photo.png)\n",
-        )
-        .unwrap();
-        assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
-        assert_eq!(approvals(&s, &d), 0);
-        assert_eq!(s.usage(&d, &room_text(&room.lock().unwrap())), 0);
-        // A link editor may type image syntax: it is text, not an embed of
-        // an unapproved file, so the edit is accepted.
-        let typed = peer_update(&room, "![secret](../private.png)\n");
-        process_frame(&s, &d, &room, &typed, true, false, &mut Peer::default()).unwrap();
-        assert!(room_text(&room.lock().unwrap()).contains("![secret]"));
-        assert_eq!(approvals(&s, &d), 0);
-        // Nothing is served through it, not even to the owner.
-        for (token, headers) in [(Some("plain-link"), HeaderMap::new()), (None, owner(&s))] {
+        for extension in ["txt", "ink"] {
+            let path = format!("Notes/plain.{extension}");
+            let (_dir, s) = store();
+            let png = BASE64.decode(PNG).unwrap();
+            fs::create_dir_all(s.root.join("Notes")).unwrap();
+            fs::write(s.root.join("Notes/photo.png"), &png).unwrap();
+            // A desktop Markdown file naming this image would approve it.
+            fs::write(s.root.join(&path), "![photo](photo.png)\n").unwrap();
+            let d = s.index_document(&path).unwrap();
+            let d = link(&s, &d, "plain-link");
+            let room = s.room(&d).unwrap();
+            fs::write(
+                s.root.join(&path),
+                "![photo](photo.png)\n![again](./photo.png)\n",
+            )
+            .unwrap();
+            assert!(s.persist(&d, &mut room.lock().unwrap()).unwrap());
+            assert_eq!(approvals(&s, &d), 0);
+            assert_eq!(s.usage(&d, &room_text(&room.lock().unwrap())), 0);
+            // A link editor may type image syntax: it is text, not an embed of
+            // an unapproved file, so the edit is accepted.
+            let typed = peer_update(&room, "![secret](../private.png)\n");
+            process_frame(&s, &d, &room, &typed, true, false, &mut Peer::default()).unwrap();
+            assert!(room_text(&room.lock().unwrap()).contains("![secret]"));
+            assert_eq!(approvals(&s, &d), 0);
+            // Nothing is served through it, not even to the owner.
+            for (token, headers) in [(Some("plain-link"), HeaderMap::new()), (None, owner(&s))] {
+                assert_eq!(
+                    served(&s, &d, "photo.png", token, &headers),
+                    StatusCode::FORBIDDEN
+                );
+            }
             assert_eq!(
-                served(&s, &d, "photo.png", token, &headers),
+                upload_payload(&s, d.clone(), d.id.clone(), "photo.png".into(), &png, None)
+                    .unwrap_err()
+                    .1,
+                plain_text().1
+            );
+            let payload = document_payload(&s, &owner(&s), &d, &Access::default()).unwrap();
+            assert_eq!(payload["hiddenMedia"], json!([]));
+            // As Markdown its image syntax names media, which a rename does not
+            // approve for link visitors; the owner sees what they cannot.
+            drop(room);
+            s.rename_document(&d.id, "Notes/plain.md").unwrap();
+            let markdown = s.doc(&d.id).unwrap();
+            assert_eq!(
+                served(
+                    &s,
+                    &markdown,
+                    "photo.png",
+                    Some("plain-link"),
+                    &HeaderMap::new()
+                ),
                 StatusCode::FORBIDDEN
             );
+            let payload = document_payload(&s, &owner(&s), &markdown, &Access::default()).unwrap();
+            assert_eq!(
+                payload["hiddenMedia"],
+                json!([
+                    {"path": "../private.png", "reason": "missing"},
+                    {"path": "./photo.png", "reason": "unapproved"},
+                    {"path": "photo.png", "reason": "unapproved"},
+                ])
+            );
         }
-        assert_eq!(
-            upload_payload(&s, d.clone(), d.id.clone(), "photo.png".into(), &png, None)
-                .unwrap_err()
-                .1,
-            plain_text().1
-        );
-        let payload = document_payload(&s, &owner(&s), &d, &Access::default()).unwrap();
-        assert_eq!(payload["hiddenMedia"], json!([]));
-        // As Markdown its image syntax names media, which a rename does not
-        // approve for link visitors; the owner sees what they cannot.
-        drop(room);
-        s.rename_document(&d.id, "Notes/plain.md").unwrap();
-        let markdown = s.doc(&d.id).unwrap();
-        assert_eq!(
-            served(
-                &s,
-                &markdown,
-                "photo.png",
-                Some("plain-link"),
-                &HeaderMap::new()
-            ),
-            StatusCode::FORBIDDEN
-        );
-        let payload = document_payload(&s, &owner(&s), &markdown, &Access::default()).unwrap();
-        assert_eq!(
-            payload["hiddenMedia"],
-            json!([
-                {"path": "../private.png", "reason": "missing"},
-                {"path": "./photo.png", "reason": "unapproved"},
-                {"path": "photo.png", "reason": "unapproved"},
-            ])
-        );
     }
 
     /// One shared page in Album with a link editor, a folder link around it

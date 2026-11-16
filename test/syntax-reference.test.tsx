@@ -106,6 +106,7 @@ const paths: Record<DocumentFormat, string> = {
   markdown: "Notes/reference.md",
   fountain: "Notes/reference.fountain",
   text: "Notes/reference.txt",
+  ink: "Notes/reference.ink",
 };
 const entries: Entry[] = [
   {
@@ -565,15 +566,48 @@ const textChecks: Record<string, (source: string) => void> = {
   ...commentChecks("text"),
 };
 
+const inkChecks: Record<string, (source: string) => void> = {};
+for (const [source, selector, token] of [
+  ["The door is open.", ".cm-line", "The door is open."],
+  ["* [Open the door]", ".ink-choice-mark", "* "],
+  ["+ Ask again", ".ink-choice-mark", "+ "],
+  ["- The paths meet.", ".ink-choice-mark", "-"],
+  ["=== door ===", ".ink-knot", "=== door ==="],
+  ["= inside", ".ink-stitch", "= inside"],
+  ["-> door", ".ink-divert", "-> door"],
+  ["-> END", ".ink-divert", "-> END"],
+  ["VAR keys = 0", ".ink-keyword", "VAR"],
+  ["~ keys += 1", ".ink-keyword", "~"],
+  ["{keys > 0: Unlocked|Locked}", ".ink-variable", "keys"],
+  ["# ambience: rain", ".ink-tag", "# ambience: rain"],
+  ["// A note to yourself", ".ink-comment", "// A note to yourself"],
+  ["/* A longer note */", ".ink-comment", "/* A longer note */"],
+  ["INCLUDE chapter.ink", ".ink-keyword", "INCLUDE"],
+])
+  inkChecks[source] = (source) =>
+    rendered(source, "ink", (view) => {
+      assert.equal(view.text(0), source, "Ink syntax remains visible");
+      assert.equal(
+        view.one(selector)?.textContent,
+        token,
+        "Ink highlights its own syntax",
+      );
+      assert.equal(
+        view.all(".md-strong, .md-em, .md-h1, .md-link, img").length,
+        0,
+      );
+    });
+
 const checks: Record<DocumentFormat, Record<string, (s: string) => void>> = {
   markdown: markdownChecks,
   fountain: fountainChecks,
   text: textChecks,
+  ink: inkChecks,
 };
 const examples = (format: DocumentFormat) =>
   syntaxReference[format].columns.flat().flatMap((group) => group.examples);
 
-for (const format of ["markdown", "fountain", "text"] as const)
+for (const format of ["markdown", "fountain", "ink", "text"] as const)
   test(`every ${format} reference example shows in its editor as described`, () => {
     const listed = examples(format).map(exampleSource);
     assert.equal(new Set(listed).size, listed.length, "examples are unique");

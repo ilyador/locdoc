@@ -28,7 +28,7 @@ export function HistoryPreview({
     const reading = (text: string) =>
       commentReadingText(
         text.replace(/\r\n?/g, "\n"),
-        documentFormat(path) === "text",
+        ["text", "ink"].includes(documentFormat(path)),
       );
     return {
       content: reading(content),

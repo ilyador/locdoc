@@ -46,7 +46,7 @@ const item = (path: string, id: string | null, modified: number): Item => ({
   shared: false,
   modified,
   title:
-    id === null ? name(path) : name(path).replace(/\.(md|fountain|txt)$/i, ""),
+    id === null ? name(path) : name(path).replace(/\.(md|fountain|ink|txt)$/i, ""),
   ...(id === null ? {} : { format: format(path) }),
 });
 
@@ -182,8 +182,8 @@ export function fileApi(
     }
     if (route === "/api/files" && method === "POST") {
       if (exists(body.path)) return taken();
-      if (body.kind === "file" && !/\.(md|fountain|txt)$/i.test(body.path))
-        return json(400, { error: "Document names must end with .md, .fountain or .txt." });
+      if (body.kind === "file" && !/\.(md|fountain|ink|txt)$/i.test(body.path))
+        return json(400, { error: "Document names must end with .md, .fountain, .ink or .txt." });
       const id = body.kind === "file" ? `new-${++created}` : null;
       items.push(item(body.path, id, ++time));
       return json(200, id ? { id, path: body.path } : { ok: true });
@@ -243,7 +243,7 @@ export function fileApi(
       if (method === "PATCH") {
         if (exists(body.path)) return taken();
         doc.path = body.path;
-        doc.title = name(body.path).replace(/\.(md|fountain|txt)$/i, "");
+        doc.title = name(body.path).replace(/\.(md|fountain|ink|txt)$/i, "");
         doc.format = format(body.path);
         return json(200, { ok: true });
       }
@@ -289,7 +289,7 @@ export function fileApi(
     rename(from: string, to: string) {
       const doc = items.find((other) => other.path === from)!;
       doc.path = to;
-      doc.title = name(to).replace(/\.(md|fountain|txt)$/i, "");
+      doc.title = name(to).replace(/\.(md|fountain|ink|txt)$/i, "");
       doc.format = format(to);
     },
     parent,

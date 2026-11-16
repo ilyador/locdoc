@@ -702,7 +702,7 @@ export function AppearancePanel({
         {tab !== "theme" && (
           <p className="appearance-scope">
             For all{" "}
-            {format === "fountain" ? "Fountain" : "Markdown and plain text"}{" "}
+            {format === "fountain" ? "Fountain" : "Markdown, Ink and plain text"}{" "}
             files in this browser.
           </p>
         )}

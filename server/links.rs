@@ -116,9 +116,12 @@ pub(super) async fn preview(
         })
         .await?;
         // Plain text has no headings; its title is its filename.
-        let heading = (documents::format(&target.path) != Some(documents::Format::Text))
-            .then(|| text.lines().find_map(|line| line.strip_prefix("# ")))
-            .flatten();
+        let heading = (!matches!(
+            documents::format(&target.path),
+            Some(documents::Format::Text | documents::Format::Ink)
+        ))
+        .then(|| text.lines().find_map(|line| line.strip_prefix("# ")))
+        .flatten();
         let title = heading
             .map(|s| plain(s, 160))
             .filter(|s| !s.is_empty())

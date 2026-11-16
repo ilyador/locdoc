@@ -327,7 +327,7 @@ export function DocumentSidebar({
                   <div className="tree-empty">
                     {needle
                       ? "No matching documents."
-                      : "Create a document, or add a .md, .fountain or .txt file to your docs folder."}
+                      : "Create a document, or add a .md, .fountain, .ink or .txt file to your docs folder."}
                   </div>
                 )
               }

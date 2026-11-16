@@ -10,6 +10,8 @@ import {
   TextH,
   TextItalic,
   TextUnderline,
+  GitBranch,
+  ArrowBendUpRight,
   type Icon,
 } from "@phosphor-icons/react";
 import type { DocumentFormat } from "./document-format";
@@ -38,7 +40,7 @@ export function FormattingTools({
 }) {
   const fountain = format === "fountain";
   // Plain text keeps only comments: it has no syntax to format.
-  const formatting = editable && format !== "text";
+  const formatting = editable && (format === "markdown" || fountain);
   const commands: {
     label: string;
     icon: Icon;
@@ -118,7 +120,22 @@ export function FormattingTools({
               },
             ]),
       ]
-    : [];
+    : editable && format === "ink"
+      ? [
+          {
+            label: "Insert choice",
+            icon: GitBranch,
+            className: "toolbar-secondary",
+            run: () => onEdit((e) => e.insert("\n* [A choice]\n")),
+          },
+          {
+            label: "Insert divert",
+            icon: ArrowBendUpRight,
+            className: "toolbar-secondary",
+            run: () => onEdit((e) => e.insert("\n-> END\n")),
+          },
+        ]
+      : [];
   return (
     <div className="formatting-tools">
       {commands

@@ -9,7 +9,7 @@ A small, self-hosted Markdown and Fountain editor over real files. Write in your
 
 <sub>Two link guests edit with the owner. Their cursors and avatars show live, and the comment thread is stored in the Markdown file as plain <code>[[comment(…)]]</code> records.</sub>
 
-- Real nested folders and ordinary UTF-8 `.md`, `.fountain` and `.txt` files.
+- Real nested folders and ordinary UTF-8 `.md`, `.fountain`, `.ink` and `.txt` files.
 - A searchable sidebar with **By date** and **Folders** tabs, both newest first; your selected view is remembered locally.
 - File actions as in a code editor's explorer, with a trash: a deleted document or folder can always be put back.
 - Autosave, live Markdown formatting, task lists, tables, local images and videos.
@@ -225,6 +225,23 @@ Speaker names already used in a script appear as suggestions when typing a new c
 
 Paragraph spacing is available under **aA → Layout** for both Markdown and Fountain. Each format remembers its own value. Spacing follows explicit source lines; wrapped text, blank lines, speaker cues and parentheticals keep their existing layout.
 
+## Ink stories
+
+Name a document `.ink`, or put an Ink file in the documents folder. Knots,
+stitches, choices, diverts, variables, tags and source comments have their own
+syntax colors. Divert targets autocomplete. **Play story** opens a live preview
+beside the editor (below it on a narrow screen). Follow choices, restart, and
+see compiler messages. Edits replay unchanged, unambiguous choices up to the
+first changed branch.
+
+The preview uses [inkjs](https://github.com/y-lohse/inkjs). `INCLUDE` resolves
+relative to each file using documents accessible in the current workspace or
+folder link. A single-document link cannot load private includes. Source and
+output stay inert; game-side external functions are not bound. Execution runs
+in a worker with time and output limits. The preview supports 64 files and
+2 MB of source. Locdoc comment records are omitted from the preview while
+preserving compiler line numbers; downloads retain the original source.
+
 ## Plain text
 
 Name a document `.txt`, or place a `.txt` file in your documents folder, for
@@ -240,7 +257,7 @@ comment never shows an empty line. Joining the next line onto a line that
 comments end, with Backspace at its start or Delete at the end of the line,
 moves their records to the end of the joined text, where a new comment would go;
 so does joining the text that a record on a line of its own shows there.
-A rename can change a document between `.md`, `.fountain` and `.txt`; it keeps
+A rename can change a document between `.md`, `.fountain`, `.ink` and `.txt`; it keeps
 its links, comments and history. A plain text document renamed to Markdown shows
 its image syntax as images to you, and to link visitors only once you approve
 them.

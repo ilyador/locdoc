@@ -125,6 +125,7 @@ pub(super) fn record_root(data: &Path, identity: &RootIdentity) -> Result<()> {
 pub(super) enum Format {
     Markdown,
     Fountain,
+    Ink,
     /// Plain text: its source has no Markdown, so no media references.
     Text,
 }
@@ -134,12 +135,13 @@ impl Format {
         match self {
             Self::Markdown => "markdown",
             Self::Fountain => "fountain",
+            Self::Ink => "ink",
             Self::Text => "text",
         }
     }
 }
 
-pub(super) const FORMATS: &str = "Document names must end with .md, .fountain or .txt.";
+pub(super) const FORMATS: &str = "Document names must end with .md, .fountain, .ink or .txt.";
 
 pub(super) fn format(path: &str) -> Option<Format> {
     match Path::new(path)
@@ -150,6 +152,7 @@ pub(super) fn format(path: &str) -> Option<Format> {
     {
         "md" => Some(Format::Markdown),
         "fountain" => Some(Format::Fountain),
+        "ink" => Some(Format::Ink),
         "txt" => Some(Format::Text),
         _ => None,
     }
@@ -158,7 +161,7 @@ pub(super) fn format(path: &str) -> Option<Format> {
 /// Whether a document's `![...](...)` syntax names media. In a plain text
 /// document it is text: never approved, served or charged as an embed.
 pub(super) fn has_media(path: &str) -> bool {
-    format(path) != Some(Format::Text)
+    !matches!(format(path), Some(Format::Text | Format::Ink))
 }
 
 pub(super) fn relative_path(input: &str, hidden: bool) -> Result<String> {
@@ -478,7 +481,7 @@ impl Store {
                 _ if identity.is_some() => String::new(),
                 Format::Fountain => format!("Title: {title}\n\n"),
                 Format::Markdown => format!("# {title}\n\n"),
-                Format::Text => String::new(),
+                Format::Ink | Format::Text => String::new(),
             };
             file.write_all(initial.as_bytes())?;
             file.sync_all()?;
@@ -852,6 +855,10 @@ pub(super) mod tests {
         );
         assert_eq!(format(&notes.path), Some(Format::Text));
         assert!(!has_media(&notes.path));
+        let ink = s.create_document("Notes/Story.INK").unwrap();
+        assert_eq!(format(&ink.path), Some(Format::Ink));
+        assert_eq!(fs::read_to_string(s.root.join(&ink.path)).unwrap(), "");
+        assert!(!has_media(&ink.path));
         // A desktop file of any letter case is discovered as plain text.
         fs::write(s.root.join("Notes/README.TXT"), "Desktop notes\n").unwrap();
         let found = s.index_document("Notes/README.TXT").unwrap();
@@ -861,6 +868,7 @@ pub(super) mod tests {
         for (path, name) in [
             ("Notes/list.md", "markdown"),
             ("Notes/list.fountain", "fountain"),
+            ("Notes/list.ink", "ink"),
             ("Notes/list.txt", "text"),
         ] {
             s.rename_document(&notes.id, path).unwrap();

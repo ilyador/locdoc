@@ -83,7 +83,7 @@ test("uploads never reach a plain-text document", async () => {
     return new Response("{}");
   }) as typeof fetch;
   try {
-    for (const path of ["Notes/plain.txt", "Script.fountain"])
+    for (const path of ["Notes/plain.txt", "Script.fountain", "Story.ink"])
       await assert.rejects(
         uploadAttachment(new Blob(["png"], { type: "image/png" }) as File, {
           doc: { id: "doc", path, edit: true } as any,

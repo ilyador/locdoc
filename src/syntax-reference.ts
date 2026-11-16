@@ -294,6 +294,82 @@ const fountain: SyntaxReference = {
   ],
 };
 
+const ink: SyntaxReference = {
+  summary:
+    "Ink syntax stays visible. Play story opens a live, branching preview.",
+  columns: [
+    [
+      {
+        title: "Story and choices",
+        examples: [
+          {
+            source: ["", "The door is open."],
+            meaning: "A line of story text",
+          },
+          {
+            source: ["* [", "Open the door", "]"],
+            meaning: "A once-only choice; brackets hide it from the response",
+          },
+          {
+            source: ["+ ", "Ask again"],
+            meaning: "A choice that stays available",
+          },
+          {
+            source: ["- ", "The paths meet."],
+            meaning: "Gather branches back together",
+          },
+          {
+            source: ["=== ", "door", " ==="],
+            meaning: "A knot: a named section of story",
+          },
+          {
+            source: ["= ", "inside"],
+            meaning: "A stitch: a section within a knot",
+          },
+          {
+            source: ["-> ", "door"],
+            meaning: "Divert to a knot or stitch; targets autocomplete",
+          },
+          { source: ["-> END"], meaning: "End the story" },
+        ],
+      },
+    ],
+    [
+      {
+        title: "Logic and notes",
+        examples: [
+          {
+            source: ["VAR ", "keys", " = 0"],
+            meaning: "Declare a global variable",
+          },
+          { source: ["~ ", "keys", " += 1"], meaning: "Change a variable" },
+          {
+            source: ["{", "keys", " > 0: ", "Unlocked", "|", "Locked", "}"],
+            meaning: "Conditional text",
+          },
+          {
+            source: ["# ", "ambience: rain"],
+            meaning: "A tag, separate from story text",
+          },
+          {
+            source: ["// ", "A note to yourself"],
+            meaning: "An Ink source comment",
+          },
+          {
+            source: ["/* ", "A longer note", " */"],
+            meaning: "A comment that can span lines",
+          },
+          {
+            source: ["INCLUDE ", "chapter.ink"],
+            meaning:
+              "Include an accessible Ink document, relative to this file",
+          },
+        ],
+      },
+    ],
+  ],
+};
+
 const text: SyntaxReference = {
   summary: "Saved exactly as typed. Nothing is formatted.",
   columns: [
@@ -321,5 +397,6 @@ const text: SyntaxReference = {
 export const syntaxReference: Record<DocumentFormat, SyntaxReference> = {
   markdown,
   fountain,
+  ink,
   text,
 };

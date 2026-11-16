@@ -12,7 +12,7 @@ import {
   cacheRead,
   offlineCacheEnabled,
 } from "./offline-cache.ts";
-import { documentFormat } from "./document-format.ts";
+import { documentFormat, documentName } from "./document-format.ts";
 import { flushOpenDrafts, pendingDraftDocuments } from "./drafts.ts";
 import type { Document, Entry, TrashItem } from "./model.ts";
 
@@ -97,10 +97,7 @@ export function projectEntries(base: Entry[], queue: QueuedFile[]) {
             id: c.kind === "create-file" ? c.document : null,
             shared: false,
             modified: 0,
-            title: c.path
-              .split("/")
-              .pop()
-              ?.replace(/\.(md|fountain|txt)$/i, ""),
+            title: documentName(c.path),
             ...(c.kind === "create-folder"
               ? { identity: result?.identity || `new.${c.id}` }
               : { format: documentFormat(c.path) }),
@@ -114,10 +111,7 @@ export function projectEntries(base: Entry[], queue: QueuedFile[]) {
               path: rename(entry.path, c.from, c.path),
               title:
                 entry.path === c.from
-                  ? c.path
-                      .split("/")
-                      .pop()
-                      ?.replace(/\.(md|fountain|txt)$/i, "")
+                  ? documentName(c.path)
                   : entry.title,
             }
           : entry,

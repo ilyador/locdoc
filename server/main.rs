@@ -1733,7 +1733,7 @@ mod tests {
     fn listings_name_formats_and_leave_out_attachment_folders_without_documents() {
         let (_dir, s) = store();
         let png = BASE64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aFlsAAAAASUVORK5CYII=").unwrap();
-        for path in ["Trip/script.fountain", "Trip/list.txt"] {
+        for path in ["Trip/script.fountain", "Trip/list.txt", "Trip/story.ink"] {
             s.create_document(path).unwrap();
         }
         // Images only, at any depth: left out of listings like .assets.
@@ -1773,6 +1773,7 @@ mod tests {
             "Trip/page.md",
             "Trip/script.fountain",
             "Trip/list.txt",
+            "Trip/story.ink",
             "Work/_attachments/Notes/kept.md",
             "Trip",
         ]
@@ -1783,6 +1784,7 @@ mod tests {
                 Some("markdown"),
                 Some("fountain"),
                 Some("text"),
+                Some("ink"),
                 Some("markdown"),
                 None
             ]

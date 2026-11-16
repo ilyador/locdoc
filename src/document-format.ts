@@ -1,23 +1,26 @@
-export type DocumentFormat = "markdown" | "fountain" | "text";
-export type DocumentExtension = ".md" | ".fountain" | ".txt";
+export type DocumentFormat = "markdown" | "fountain" | "ink" | "text";
+export type DocumentExtension = ".md" | ".fountain" | ".ink" | ".txt";
 
 const extensions: Record<DocumentFormat, DocumentExtension> = {
   markdown: ".md",
   fountain: ".fountain",
+  ink: ".ink",
   text: ".txt",
 };
-const documentExtensionPattern = /\.(md|fountain|txt)$/i;
+const documentExtensionPattern = /\.(md|fountain|ink|txt)$/i;
 // The extensions a name shows after its title: a document's, and those of the
 // images and videos a document embeds.
 const nameExtensionPattern =
-  /\.(?:md|fountain|txt|png|jpe?g|gif|webp|avif|mp4|webm|mov)$/i;
+  /\.(?:md|fountain|ink|txt|png|jpe?g|gif|webp|avif|mp4|webm|mov)$/i;
 
 export function documentFormat(path = ""): DocumentFormat {
   return /\.fountain$/i.test(path)
     ? "fountain"
-    : /\.txt$/i.test(path)
-      ? "text"
-      : "markdown";
+    : /\.ink$/i.test(path)
+      ? "ink"
+      : /\.txt$/i.test(path)
+        ? "text"
+        : "markdown";
 }
 
 // Whether a file name is one Locdoc opens as a document.
@@ -48,7 +51,9 @@ export function nameParts(name: string): [title: string, extension: string] {
 export function formatLabel(format: DocumentFormat) {
   return format === "fountain"
     ? "Fountain"
-    : format === "text"
-      ? "Plain text"
-      : "Markdown";
+    : format === "ink"
+      ? "Ink"
+      : format === "text"
+        ? "Plain text"
+        : "Markdown";
 }

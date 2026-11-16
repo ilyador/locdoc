@@ -176,7 +176,12 @@ test("comments the server adds show no new line in any format, as in the shared 
     ),
   ).filter((c: any) => c.comment);
   const formats = new Set(cases.map((c: any) => documentFormat(c.path)));
-  assert.deepEqual([...formats].sort(), ["fountain", "markdown", "text"]);
+  assert.deepEqual([...formats].sort(), [
+    "fountain",
+    "ink",
+    "markdown",
+    "text",
+  ]);
   const lines = (path: string, source: string) => {
     const editor = mount(`Notes/${path}`, source);
     try {
@@ -868,7 +873,7 @@ test("joining a line onto text that a comment ends writes the record where place
   const cases = joins();
   assert.deepEqual(
     [...new Set(cases.map((c) => documentFormat(c.path)))].sort(),
-    ["fountain", "markdown", "text"],
+    ["fountain", "ink", "markdown", "text"],
   );
   const added = "[[comment(ana): A note]]";
   for (const c of cases) {

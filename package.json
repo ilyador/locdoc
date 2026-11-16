@@ -49,6 +49,7 @@
     "@lezer/highlight": "1.2.5",
     "@lezer/markdown": "1.8.0",
     "@phosphor-icons/react": "2.1.10",
+    "inkjs": "2.4.0",
     "lib0": "0.2.119",
     "react": "19.3.1",
     "react-dom": "19.3.1",

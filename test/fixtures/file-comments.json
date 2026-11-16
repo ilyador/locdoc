@@ -996,5 +996,26 @@
       "join": true,
       "expected": "ALEX\nHello there.How are you?\nFine?[[comment(ana): A note]]\n\nBEN\nHi."
     }
+  },
+  {
+    "name": "Ink: a comment on a choice keeps the visible choice intact",
+    "path": "story.ink",
+    "source": "* [Open the door]\n  It creaks.\n-> END",
+    "threads": [],
+    "comment": {
+      "after": "door",
+      "expected": "* [Open the door][[comment(ana): A note]]\n  It creaks.\n-> END"
+    }
+  },
+  {
+    "name": "Ink: comments follow plain text rules even beside brackets and logic",
+    "path": "story.ink",
+    "source": "~ key = 1\nThe door opens.It creaks.\n-> END",
+    "threads": [],
+    "comment": {
+      "after": "opens.",
+      "expected": "~ key = 1\nThe door opens.It creaks.[[comment(ana): A note]]\n-> END",
+      "join": true
+    }
   }
 ]

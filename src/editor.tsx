@@ -168,7 +168,7 @@ export const MarkdownEditor = forwardRef<
     };
     // Plain text has no Markdown or screenplay syntax to insert.
     const formatted = () =>
-      documentFormat(path) === "text" ? null : writable();
+      ["text", "ink"].includes(documentFormat(path)) ? null : writable();
     return {
       formatFountain(kind) {
         const v = writable();

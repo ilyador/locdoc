@@ -89,7 +89,10 @@ fn line_breaks(source: &str) -> usize {
 /// Whether the document at `path` is plain text, whose records follow no
 /// Markdown rules.
 pub(super) fn plain(path: &str) -> bool {
-    documents::format(path) == Some(documents::Format::Text)
+    matches!(
+        documents::format(path),
+        Some(documents::Format::Text | documents::Format::Ink)
+    )
 }
 fn parse(source: &str, plain: bool) -> Vec<Thread> {
     if !source.contains("[[comment(") {

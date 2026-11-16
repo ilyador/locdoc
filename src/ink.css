@@ -1,0 +1,238 @@
+/* Ink shares the writing surface's type and palette. Structure is quiet;
+   choices and diverts carry the color, prose remains the darkest text. */
+.ink-knot {
+  color: var(--text);
+  font-weight: 700;
+}
+.ink-stitch {
+  color: var(--accent);
+  font-weight: 600;
+}
+.ink-choice-mark,
+.ink-divert {
+  color: var(--syntax-teal);
+  font-weight: 600;
+}
+.ink-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+.ink-tag {
+  color: var(--syntax-amber);
+}
+.ink-keyword {
+  color: var(--accent);
+  font-weight: 600;
+}
+.ink-operator,
+.ink-variable {
+  color: var(--secondary);
+}
+.ink-value {
+  color: var(--syntax-code);
+}
+.ink-editor .cm-line:has(.ink-knot) {
+  padding-block-start: 0.8em;
+  border-block-end: 1px solid var(--line);
+}
+.ink-editor .cm-line:has(.ink-choice-mark) {
+  background: color-mix(in srgb, var(--syntax-teal) 5%, transparent);
+}
+.ink-play-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--surface);
+  font: 500 var(--ui-control-size) var(--ui-font);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ink-play-button:hover,
+.ink-play-button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.ink-player {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 40%;
+  min-inline-size: 280px;
+  min-block-size: 0;
+  border-inline-start: 1px solid var(--line);
+  background: var(--subtle);
+}
+.ink-player-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 20px;
+  border-block-end: 1px solid var(--line);
+}
+.ink-player-header h2 {
+  margin: 0;
+  font: 600 var(--ui-control-size) var(--ui-font);
+}
+.ink-player-header > div {
+  display: flex;
+  gap: 2px;
+}
+.ink-transcript {
+  flex: 1;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 24px clamp(20px, 3vw, 40px) 40px;
+  font:
+    400 max(15px, var(--doc-size))/1.8 "Lora",
+    "Locdoc Hebrew Serif",
+    serif;
+  overflow-wrap: anywhere;
+}
+.ink-paragraph {
+  margin-block-end: 1.2em;
+}
+.ink-paragraph p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.ink-paragraph p:focus-visible,
+.ink-message:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
+}
+.ink-paragraph small {
+  font: 400 var(--ui-caption-size)/1.5 var(--ui-font);
+  color: var(--syntax-amber);
+}
+.ink-chosen {
+  margin-block: 24px 16px;
+  color: var(--accent);
+  font: 500 var(--ui-control-size)/1.6 var(--ui-font);
+}
+.ink-chosen p {
+  margin: 0;
+}
+.ink-chosen svg {
+  margin-inline-end: 8px;
+  vertical-align: middle;
+}
+.ink-choices {
+  display: grid;
+  gap: 8px;
+  margin-block-start: 28px;
+}
+.ink-choices button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  inline-size: 100%;
+  min-block-size: 44px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--accent);
+  text-align: start;
+  font: 500 var(--ui-body-size)/1.5 var(--ui-font);
+  cursor: pointer;
+  transition:
+    background 120ms ease-out,
+    border-color 120ms ease-out;
+}
+.ink-choices button:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.ink-choices button[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: wait;
+}
+.ink-choices svg {
+  flex-shrink: 0;
+}
+.ink-end,
+.ink-player-empty {
+  color: var(--muted);
+}
+.ink-end {
+  margin-block-start: 32px;
+  font: 400 var(--ui-control-size) var(--ui-font);
+}
+.ink-message {
+  padding-block: 12px;
+  font: 400 var(--ui-control-size)/1.6 var(--ui-font);
+  white-space: pre-wrap;
+}
+.ink-message-error {
+  color: var(--syntax-delete);
+}
+.ink-message-warning {
+  color: var(--warning-text);
+}
+.ink-player-status {
+  padding: 10px 20px;
+  border-block-start: 1px solid var(--line);
+  color: var(--muted);
+  font: 400 var(--ui-caption-size)/1.5 var(--ui-font);
+}
+.with-ink-player .document-canvas {
+  padding-inline: 28px;
+}
+@container workspace (max-width: 850px) {
+  .with-ink-player {
+    flex-direction: column;
+  }
+  .with-ink-player .writing-pane {
+    flex: 1 1 50%;
+  }
+  .ink-player {
+    flex: 1 1 50%;
+    min-inline-size: 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--line);
+  }
+  .ink-player-header {
+    padding: 8px 16px;
+  }
+  .ink-transcript {
+    padding: 20px;
+  }
+  .with-ink-player.with-appearance .ink-player {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  .with-ink-player {
+    flex-direction: column;
+  }
+  .with-ink-player .writing-pane {
+    flex: 1 1 50%;
+  }
+  .ink-player {
+    flex: 1 1 50%;
+    min-inline-size: 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--line);
+  }
+  .ink-player-header {
+    padding: 8px 16px;
+  }
+  .ink-transcript {
+    padding: 16px 20px;
+  }
+  .with-ink-player .document-canvas {
+    padding-inline: 20px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ink-choices button {
+    transition: none;
+  }
+}

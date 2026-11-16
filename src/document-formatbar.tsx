@@ -1,5 +1,5 @@
 import type { Dispatch, ReactNode, RefObject, SetStateAction } from "react";
-import { CaretDown, DotsThree, Minus, Plus } from "@phosphor-icons/react";
+import { CaretDown, DotsThree, Minus, Plus, Play } from "@phosphor-icons/react";
 import type { DocumentFormat } from "./document-format";
 import type { FountainForce } from "./fountain";
 import { IconButton } from "./ui";
@@ -17,6 +17,8 @@ export function DocumentFormatbar({
   openOptions,
   formatFountain,
   tools,
+  playingInk,
+  toggleInk,
 }: {
   editable: boolean;
   format: DocumentFormat;
@@ -30,6 +32,8 @@ export function DocumentFormatbar({
   openOptions: () => void;
   formatFountain: (kind: FountainForce) => void;
   tools: ReactNode;
+  playingInk?: boolean;
+  toggleInk?: () => void;
 }) {
   const fountain = format === "fountain";
   return (
@@ -71,6 +75,16 @@ export function DocumentFormatbar({
         </div>
       </div>
       <div className="format-tools">
+        {format === "ink" && (
+          <button
+            className="ink-play-button"
+            aria-pressed={!!playingInk}
+            onClick={toggleInk}
+          >
+            <Play size={16} weight="fill" />
+            <span>{playingInk ? "Hide preview" : "Play story"}</span>
+          </button>
+        )}
         {editable && (
           <>
             {fountain && (

@@ -1,3 +1,4 @@
+import { inkSupport } from "./ink-preview";
 import { EditorState, StateField, countColumn } from "@codemirror/state";
 import {
   EditorView,
@@ -500,6 +501,7 @@ export function documentPreview(
 ) {
   const format = documentFormat(path);
   if (format === "text") return plainTextSupport;
+  if (format === "ink") return inkSupport;
   const fountain = format === "fountain";
   return [
     fountain

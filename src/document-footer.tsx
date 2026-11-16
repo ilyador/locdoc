@@ -152,7 +152,7 @@ export function DocumentFooter({
             initial={doc.content}
             path={doc.path}
           />
-          {format !== "text" && (
+          {format !== "text" && format !== "ink" && (
             <span
               className="attachment-usage"
               title="Attachment storage, including uploaded files awaiting insertion"

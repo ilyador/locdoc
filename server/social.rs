@@ -75,7 +75,7 @@ impl Preview {
         let format = documents::format(path);
         let reading = match format {
             Some(documents::Format::Fountain) => fountain_excerpt(&source, end, path),
-            Some(documents::Format::Text) => source[..end].to_owned(),
+            Some(documents::Format::Text | documents::Format::Ink) => source[..end].to_owned(),
             _ => source[front_matter(&source[..end])..end].to_owned(),
         };
         let mut title = String::new();
@@ -88,7 +88,10 @@ impl Preview {
         let mut hidden = 0;
         // Plain text has no Markdown: its paragraphs are the excerpt and its
         // filename is the title.
-        let events = if format == Some(documents::Format::Text) {
+        let events = if matches!(
+            format,
+            Some(documents::Format::Text | documents::Format::Ink)
+        ) {
             for line in reading.lines() {
                 if line.trim().is_empty() {
                     flush(&mut text, &kind, depth, false, &mut blocks);
@@ -444,7 +447,7 @@ fn text_line(left: f32, right: f32, y: f32, rtl: bool, style: &str, line: &str) 
 // sidebar shows it (src/bidi.ts).
 fn isolate_name(name: &str) -> String {
     static EXTENSION: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"(?i)\.(?:md|fountain|txt)$").unwrap());
+        LazyLock::new(|| regex::Regex::new(r"(?i)\.(?:md|fountain|ink|txt)$").unwrap());
     let (stem, extension) = name.split_at(EXTENSION.find(name).map_or(name.len(), |m| m.start()));
     if stem.chars().any(right_to_left) {
         format!("{FSI}{stem}{PDI}{extension}")

@@ -15,6 +15,7 @@ import { isolateName } from "./bidi";
 const opensAs: Record<DocumentFormat, string> = {
   markdown: "Markdown",
   fountain: "a Fountain screenplay",
+  ink: "an Ink story",
   text: "plain text",
 };
 

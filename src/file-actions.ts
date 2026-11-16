@@ -180,7 +180,7 @@ export function useFileActions({
   const [extension, setExtension] = useState<DocumentExtension>(() => {
     try {
       const saved = localStorage.getItem(EXTENSION_KEY);
-      if (saved === ".fountain" || saved === ".txt") return saved;
+      if (saved === ".fountain" || saved === ".ink" || saved === ".txt") return saved;
     } catch {
       // New documents stay Markdown without preference storage.
     }
