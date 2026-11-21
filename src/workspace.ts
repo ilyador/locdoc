@@ -10,6 +10,8 @@ import { useFileActions } from "./file-actions";
 import {
   sharedToken,
   directDocumentId,
+  documentAddress,
+  addressedDocument,
   type Config,
   type Document,
   type Entry,
@@ -317,6 +319,12 @@ export function useWorkspace() {
   const folderView = useRef(false);
   current.current = id;
   const navigation = useRef(0);
+  // Navigations waiting for the open document to store its drafts.
+  const preparing = useRef(0);
+  // A document someone chose gets its own history entry, so Back returns to
+  // the one before. One the workspace picked by itself, such as the first
+  // document of the tree, takes the address it opened with.
+  const pushAddress = useRef(false);
   const navigate = useCallback(
     async (
       from: string | null,
@@ -325,16 +333,32 @@ export function useWorkspace() {
     ) => {
       if (current.current !== from) return false;
       const request = ++navigation.current;
-      await prepare();
+      preparing.current++;
+      try {
+        await prepare();
+      } finally {
+        preparing.current--;
+      }
       if (navigation.current !== request || current.current !== from)
         return false;
       current.current = next;
+      pushAddress.current = next !== from;
       setInitialDocument(null);
       setId(next);
       return true;
     },
     [],
   );
+  // Back or Forward moved the address to a document that did not open, as
+  // when the open one could not store its drafts. The open document's
+  // address comes back as a new entry, so Back tries again. A navigation
+  // still preparing sets the address itself when it lands.
+  const keepAddress = useCallback(() => {
+    const id = current.current;
+    if (preparing.current || !id || addressedDocument() === id) return;
+    if (sharedToken && !folderView.current) return;
+    history.pushState(null, "", documentAddress(id));
+  }, []);
   // A listing that started before a file action finished, or before a newer
   // listing was applied, may hold the old tree. It must not undo that change.
   const treeRequest = useRef(0);
@@ -447,12 +471,13 @@ export function useWorkspace() {
     return () => fonts.remove();
   }, [loadTree]);
   useEffect(() => {
+    const push = pushAddress.current;
+    pushAddress.current = false;
     if (!id || (sharedToken && !config?.folder)) return;
-    const url = sharedToken
-      ? `/s/${encodeURIComponent(sharedToken)}?doc=${encodeURIComponent(id)}`
-      : `/d/${encodeURIComponent(id)}`;
-    if (location.pathname + location.search !== url)
-      history.replaceState(null, "", url + location.hash);
+    const url = documentAddress(id);
+    if (location.pathname + location.search === url) return;
+    if (push) history.pushState(null, "", url);
+    else history.replaceState(null, "", url + location.hash);
   }, [id, config?.folder]);
   useEffect(() => {
     if (name) localStorage.setItem("locdoc.name", name);
@@ -497,6 +522,7 @@ export function useWorkspace() {
     entries,
     id,
     navigate,
+    keepAddress,
     initialDocument,
     error,
     name,

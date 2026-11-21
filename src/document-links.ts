@@ -42,13 +42,51 @@ export function sameLinkTargets(a: Entry[], b: Entry[]) {
   }
 }
 
-export function resolveDocumentLink(
-  raw: string,
+// A document's path in the workspace, as Copy path gives it, pasted into a
+// Markdown document: the path from the folder of that document, so a link
+// with it opens the same document. A path that already names a document from
+// there is kept. In a link's destination, the path is written as a link
+// reads it back. Null to paste the text as it is.
+export function pastedDocumentPath(
+  text: string,
   path: string,
   entries: Entry[],
+  destination: boolean,
 ) {
-  const url = webLink(raw);
-  if (url) return url;
+  const target = text.trim();
+  const isFile = (path: string | null) =>
+    entries.some((entry) => entry.kind === "file" && entry.path === path);
+  if (!isFile(target)) return null;
+  let relative = target;
+  if (!isFile(linkedPath(target, path))) {
+    const from = path.split("/").slice(0, -1);
+    const to = target.split("/");
+    let shared = 0;
+    while (
+      shared < from.length &&
+      shared < to.length - 1 &&
+      from[shared] === to[shared]
+    )
+      shared++;
+    relative = [
+      ...from.slice(shared).map(() => ".."),
+      ...to.slice(shared),
+    ].join("/");
+  }
+  const written = destination ? linkDestination(relative) : relative;
+  return written === text ? null : written;
+}
+// A link reads its destination decoded, and between angle brackets when it
+// holds spaces or parentheses.
+function linkDestination(path: string) {
+  const encoded = path.replace(/%/g, "%25");
+  return /[\s()<>]/.test(encoded)
+    ? `<${encoded.replace(/</g, "%3C").replace(/>/g, "%3E")}>`
+    : encoded;
+}
+
+// The workspace path a relative link from the document at `path` names.
+function linkedPath(raw: string, path: string) {
   try {
     const decoded = decodeURIComponent(raw.replace(/^<|>$/g, ""));
     if (
@@ -64,11 +102,22 @@ export function resolveDocumentLink(
         parts.pop();
       } else if (part !== "." && part) parts.push(part);
     }
-    return (
-      entries.find((e) => e.kind === "file" && e.path === parts.join("/"))
-        ?.url || null
-    );
+    return parts.join("/");
   } catch {
     return null;
   }
+}
+
+export function resolveDocumentLink(
+  raw: string,
+  path: string,
+  entries: Entry[],
+) {
+  const url = webLink(raw);
+  if (url) return url;
+  const linked = linkedPath(raw, path);
+  if (linked === null) return null;
+  return (
+    entries.find((e) => e.kind === "file" && e.path === linked)?.url || null
+  );
 }

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   ArrowCounterClockwise,
   CaretDown,
@@ -203,6 +203,61 @@ export function ShareControls({
         </>
       )}
       {mcpTarget && <McpAccessControl target={mcpTarget} />}
+    </>
+  );
+}
+
+// The document's path in the workspace, to link it from another document.
+// Pasted into a Markdown document elsewhere, the editor writes it from that
+// document's folder (pastedDocumentPath).
+export function DocumentPathCopy({ path }: { path: string }) {
+  const field = useRef<HTMLInputElement>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+  const helpId = useId();
+  const copy = async () => {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(path);
+    } catch {
+      // Plain HTTP origins other than localhost have no asynchronous
+      // clipboard. The field is inside the dialog, which a modal keeps
+      // selectable.
+      const input = field.current;
+      input?.select();
+      if (!input || !document.execCommand?.("copy")) {
+        setCopied(false);
+        setError("Could not copy. Select the path and copy it manually.");
+        return;
+      }
+    }
+    setCopied(true);
+  };
+  return (
+    <>
+      <label className="field-label" htmlFor="document-path">
+        Link from another document
+      </label>
+      <div className="copy-field">
+        <input
+          id="document-path"
+          ref={field}
+          readOnly
+          dir="auto"
+          value={path}
+          aria-describedby={helpId}
+          onFocus={(e) => e.currentTarget.select()}
+        />
+        <IconButton label="Copy document path" onClick={() => void copy()}>
+          {copied ? <Check /> : <Copy />}
+        </IconButton>
+      </div>
+      <p id={helpId} className="field-help" role={error ? "alert" : undefined}>
+        {error ||
+          (copied
+            ? "Path copied. Paste it into a link in another document."
+            : "Paste it into a link in another document. Locdoc adjusts the path to that document’s folder.")}
+      </p>
     </>
   );
 }

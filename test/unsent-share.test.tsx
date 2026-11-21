@@ -69,6 +69,7 @@ const owned = (id: string, path: string) =>
 const panel = (doc: Document) => (
   <panels.DocumentSharePanel
     doc={doc}
+    path={doc.path}
     filename={doc.path}
     name="Owner"
     onChange={async () => assert.fail("an unsent document cannot be shared")}

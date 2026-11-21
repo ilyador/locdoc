@@ -16,7 +16,7 @@ import {
   LockSimple,
   TextAa,
 } from "@phosphor-icons/react";
-import { ShareControls } from "./sharing";
+import { DocumentPathCopy, ShareControls } from "./sharing";
 import { HiddenMediaSection } from "./hidden-media";
 import { CollaborationRecovery } from "./collaboration-recovery";
 import { RemovedDocumentRecovery } from "./removed-document-recovery";
@@ -78,12 +78,16 @@ function useUnsent(doc: Document) {
 
 export function DocumentSharePanel({
   doc,
+  path,
   filename,
   name,
   onChange,
   onShareFolder,
 }: {
   doc: Document;
+  // Where the document is now, as the tree lists it after renames made
+  // elsewhere.
+  path: string;
   filename: string;
   name: string;
   onChange: (permission: string, rotate: boolean) => Promise<void>;
@@ -116,6 +120,7 @@ export function DocumentSharePanel({
         onChange={onChange}
         mcpTarget={doc.owner ? { kind: "document", id: doc.id } : undefined}
       />
+      {doc.owner && <DocumentPathCopy key={doc.id} path={path} />}
       {doc.owner && documentFormat(doc.path) === "markdown" && (
         <HiddenMediaSection key={doc.id} doc={doc} />
       )}

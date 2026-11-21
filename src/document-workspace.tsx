@@ -265,10 +265,12 @@ export function DocumentWorkspace({
         () => session?.drafts.flush() || Promise.resolve(),
       );
       if (moved && window.innerWidth <= 760) setSidebar(false);
+      return moved;
     } catch {
       setError(
         "Could not store unsaved changes. Keep this document open until connected.",
       );
+      return false;
     }
   };
   const choose = (entry: Entry) => {
@@ -304,6 +306,7 @@ export function DocumentWorkspace({
   // back to this document's Open sidebar.
   const port: DocumentPort = {
     choose,
+    open: openDocument,
     prepare: prepareNavigation,
     shareFolder,
     settings: () => {
@@ -607,6 +610,7 @@ export function DocumentWorkspace({
             {panel === "share" && doc && !trashed && (
               <DocumentSharePanel
                 doc={doc}
+                path={path ?? doc.path}
                 filename={filename}
                 name={name}
                 onChange={updateShare}

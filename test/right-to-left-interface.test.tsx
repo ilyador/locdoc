@@ -453,6 +453,7 @@ test("dialogs isolate Hebrew names and paths, and their fields follow typed text
           content: "",
         } as any
       }
+      path="Notes/שמן זית.md"
       filename="שמן זית"
       name="alex"
       onChange={async () => {}}

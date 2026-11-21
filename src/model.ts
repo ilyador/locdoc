@@ -84,3 +84,19 @@ export const sharedToken = location.pathname.match(/^\/s\/([^/]+)/)?.[1];
 export const directDocumentId = location.pathname.match(
   /^\/d\/([\da-f-]{36})\/?$/i,
 )?.[1];
+// The address that shows a document: its own for the owner, its folder
+// link's with the document chosen for a folder link's visitors.
+export const documentAddress = (id: string) =>
+  sharedToken
+    ? `/s/${encodeURIComponent(sharedToken)}?doc=${encodeURIComponent(id)}`
+    : `/d/${encodeURIComponent(id)}`;
+// The document the current address names, as documentAddress wrote it.
+export function addressedDocument(): string | null {
+  try {
+    if (sharedToken) return new URLSearchParams(location.search).get("doc");
+    const id = location.pathname.match(/^\/d\/([^/]+)\/?$/)?.[1];
+    return id ? decodeURIComponent(id) : null;
+  } catch {
+    return null;
+  }
+}

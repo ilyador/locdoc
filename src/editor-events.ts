@@ -1,5 +1,7 @@
 import { EditorView } from "@codemirror/view";
 import type { LinkTarget } from "./editor-types";
+import { pastedDocumentPath } from "./document-links";
+import type { Entry } from "./model";
 
 // Rendered document links open a preview instead of navigating the page.
 export function linkEvents(open: (target: LinkTarget) => void) {
@@ -67,6 +69,39 @@ export function fileDropEvents(upload: (file: File) => void) {
         return true;
       }
       return false;
+    },
+  });
+}
+
+// A document's workspace path pasted into a Markdown document becomes the
+// path from this document's folder, so a link with it opens that document
+// (pastedDocumentPath). Other text pastes as it is.
+export function documentPathPaste(
+  links: () => { path?: string; entries?: Entry[] },
+) {
+  return EditorView.domEventHandlers({
+    paste(e, view) {
+      const { path, entries } = links();
+      const data = e.clipboardData;
+      if (!path || !entries || !data || data.files.length) return false;
+      if (view.state.readOnly) return false;
+      const text = data.getData("text/plain");
+      if (!text || text.length > 4096 || /[\r\n]/.test(text.trim()))
+        return false;
+      const { from } = view.state.selection.main;
+      const written = pastedDocumentPath(
+        text,
+        path,
+        entries,
+        view.state.sliceDoc(Math.max(0, from - 2), from) === "](",
+      );
+      if (written === null) return false;
+      e.preventDefault();
+      view.dispatch(view.state.replaceSelection(written), {
+        userEvent: "input.paste",
+        scrollIntoView: true,
+      });
+      return true;
     },
   });
 }

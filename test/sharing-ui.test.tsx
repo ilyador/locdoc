@@ -4,7 +4,7 @@ import { JSDOM } from "jsdom";
 import React from "react";
 
 let dom, render, screen, fireEvent, waitFor, act, cleanup;
-let McpAccessControl, ShareControls, FolderShare;
+let McpAccessControl, ShareControls, FolderShare, DocumentPathCopy;
 const originalFetch = globalThis.fetch;
 const access = (allowed = false, inherited = false) => ({
   mcpAllowed: allowed,
@@ -42,7 +42,7 @@ before(async () => {
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   ({ render, screen, fireEvent, waitFor, act, cleanup } =
     await import("@testing-library/react"));
-  ({ McpAccessControl, ShareControls, FolderShare } =
+  ({ McpAccessControl, ShareControls, FolderShare, DocumentPathCopy } =
     await import("../src/sharing.tsx"));
 });
 afterEach(() => {
@@ -228,4 +228,58 @@ test("share controls without an owner target do not expose MCP settings", () => 
     />,
   );
   assert.equal(screen.queryByRole("switch"), null);
+});
+
+test("the document's workspace path can be copied to link it from another document", async () => {
+  const copied = [];
+  let refuse = false;
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async (text) => {
+        if (refuse) throw new Error("not allowed");
+        copied.push(text);
+      },
+    },
+  });
+  const execCommand = document.execCommand;
+  try {
+    render(<DocumentPathCopy path="Life Plan/Life goals.md" />);
+    const field = screen.getByLabelText("Link from another document");
+    assert.equal(field.value, "Life Plan/Life goals.md");
+    assert.equal(field.getAttribute("dir"), "auto", "a path keeps its own direction");
+    assert.equal(field.readOnly, true);
+    fireEvent.click(screen.getByRole("button", { name: "Copy document path" }));
+    await waitFor(() =>
+      assert.match(
+        document.querySelector(".field-help").textContent,
+        /^Path copied\./,
+      ),
+    );
+    assert.deepEqual(copied, ["Life Plan/Life goals.md"]);
+    // Without the asynchronous clipboard, as on a plain HTTP address, the
+    // field inside the dialog is selected and copied.
+    refuse = true;
+    const commands = [];
+    document.execCommand = (command) => {
+      commands.push([command, field.selectionStart, field.selectionEnd]);
+      return true;
+    };
+    fireEvent.click(screen.getByRole("button", { name: "Copy document path" }));
+    await waitFor(() => assert.equal(commands.length, 1));
+    assert.deepEqual(commands, [["copy", 0, "Life Plan/Life goals.md".length]]);
+    assert.equal(screen.queryByRole("alert"), null);
+    // When copying is blocked too, the path stays there to copy by hand.
+    document.execCommand = () => false;
+    fireEvent.click(screen.getByRole("button", { name: "Copy document path" }));
+    await waitFor(() =>
+      assert.equal(
+        screen.getByRole("alert").textContent,
+        "Could not copy. Select the path and copy it manually.",
+      ),
+    );
+  } finally {
+    document.execCommand = execCommand;
+    delete navigator.clipboard;
+  }
 });

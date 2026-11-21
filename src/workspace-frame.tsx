@@ -12,7 +12,7 @@ import { IconContext } from "@phosphor-icons/react";
 import { NamePrompt } from "./name-prompt";
 import { useSidebarFocus } from "./sidebar-focus";
 import { WorkspaceSidebar } from "./workspace-sidebar";
-import type { Entry } from "./model";
+import { addressedDocument, type Entry } from "./model";
 import type { Workspace } from "./workspace";
 
 // What the open document's workspace does for the sidebar. The sidebar stays
@@ -20,6 +20,9 @@ import type { Workspace } from "./workspace";
 // through this; each document's workspace sets it while it is mounted.
 export type DocumentPort = {
   choose: (entry: Entry) => void;
+  // Opens another document once this one has stored its drafts; false when
+  // it stays open.
+  open: (id: string) => Promise<boolean>;
   prepare: () => Promise<void>;
   shareFolder: (path: string) => void;
   settings: () => void;
@@ -81,6 +84,27 @@ export function WorkspaceFrame({
     [port],
   );
   const settings = useCallback(() => port.current?.settings(), [port]);
+  // Back and Forward move between the documents someone opened here: the
+  // address names the document to show, and the open one stores its drafts
+  // before it goes, as when a document is chosen in the sidebar.
+  const { navigate, keepAddress } = workspace;
+  const shown = useRef(workspace.id);
+  shown.current = workspace.id;
+  useEffect(() => {
+    const onPopState = () => {
+      const next = addressedDocument();
+      if (!next || next === shown.current) return;
+      const from = shown.current;
+      void (
+        port.current?.open(next) ??
+        navigate(from, next, () => Promise.resolve())
+      ).then((moved) => {
+        if (!moved) keepAddress();
+      });
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [port, navigate, keepAddress]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.defaultPrevented && (e.metaKey || e.ctrlKey) && e.key === "k") {

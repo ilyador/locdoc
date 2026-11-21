@@ -104,6 +104,7 @@ function panel(doc: Document) {
   return (
     <DocumentSharePanel
       doc={doc}
+      path={doc.path}
       filename={doc.path}
       name="Owner"
       onChange={async () => {}}

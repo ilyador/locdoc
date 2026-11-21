@@ -35,7 +35,11 @@ import {
 } from "./editor-commands";
 import { userEngagement } from "./editor-engagement";
 import { documentSelection } from "./editor-selection";
-import { fileDropEvents, linkEvents } from "./editor-events";
+import {
+  documentPathPaste,
+  fileDropEvents,
+  linkEvents,
+} from "./editor-events";
 import {
   editorAccess,
   guardedUndoKeymap,
@@ -243,6 +247,9 @@ export const MarkdownEditor = forwardRef<
   )
     setPreviewEntries(linked);
   const previewInputs = [id, token, path, previewEntries, owner];
+  // Where pasted document paths are written from, as this render shows.
+  const links = useRef({ path, entries: linked });
+  links.current = { path, entries: linked };
   useLayoutEffect(() => {
     const text = ydoc.getText("content");
     const source = text.toString();
@@ -328,6 +335,7 @@ export const MarkdownEditor = forwardRef<
           }),
           linkEvents((target) => callbacks.current.onLink?.(target)),
           fileDropEvents((file) => callbacks.current.onUpload(file)),
+          documentPathPaste(() => links.current),
         ],
       }),
     });

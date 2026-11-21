@@ -5,6 +5,7 @@ import {
   markdownLink,
   resolveDocumentLink,
   sameLinkTargets,
+  pastedDocumentPath,
 } from "../src/document-links.ts";
 import { recentDocuments, sidebarTimestamp } from "../src/recent-documents.ts";
 import { markdownLanguage } from "@codemirror/lang-markdown";
@@ -53,6 +54,56 @@ test("relative document links resolve within actual workspace folders only", () 
     null,
   );
 });
+test("a pasted workspace path is written from the folder of the document it is pasted into", () => {
+  const entries = [
+    { kind: "folder", path: "Projects" },
+    { kind: "file", path: "Projects/Plan.md", url: "/d/plan" },
+    { kind: "file", path: "Projects/Life goals (2027).md", url: "/d/goals" },
+    { kind: "file", path: "Inbox.md", url: "/d/inbox" },
+    { kind: "file", path: "Notes/Deep/Today.md", url: "/d/today" },
+    { kind: "file", path: "Notes/Deep/Projects/Plan.md", url: "/d/other" },
+  ];
+  const paste = (text, path, destination = false) =>
+    pastedDocumentPath(text, path, entries, destination);
+  // Each written path opens the document the pasted path names.
+  const opens = (text, path) => {
+    const written = paste(text, path, true) ?? text;
+    return resolveDocumentLink(written, path, entries);
+  };
+  assert.equal(paste("Projects/Plan.md", "Notes/Deep/Today.md"), null,
+    "a path that already names a document from there is kept");
+  assert.equal(paste("Projects/Plan.md", "Notes/Today.md"), "../Projects/Plan.md");
+  assert.equal(paste("Projects/Plan.md", "Projects/Other.md"), "Plan.md");
+  assert.equal(paste("Inbox.md", "Notes/Deep/Today.md"), "../../Inbox.md");
+  assert.equal(paste("Projects/Plan.md", "Top.md"), null,
+    "a document at the top of the workspace keeps the workspace path");
+  assert.equal(paste(" Inbox.md\n", "Notes/Today.md"), "../Inbox.md",
+    "the copied path may come with surrounding white space");
+  assert.equal(opens("Inbox.md", "Notes/Deep/Today.md"), "/d/inbox");
+  assert.equal(opens("Projects/Plan.md", "Notes/Today.md"), "/d/plan");
+  // In a link's destination, spaces and parentheses need angle brackets.
+  assert.equal(
+    paste("Projects/Life goals (2027).md", "Notes/Today.md", true),
+    "<../Projects/Life goals (2027).md>",
+  );
+  assert.equal(
+    paste("Projects/Life goals (2027).md", "Notes/Today.md"),
+    "../Projects/Life goals (2027).md",
+    "outside a link the path reads as it is",
+  );
+  assert.equal(
+    opens("Projects/Life goals (2027).md", "Notes/Today.md"),
+    "/d/goals",
+  );
+  assert.equal(
+    paste("Projects/Life goals (2027).md", "Top.md", true),
+    "<Projects/Life goals (2027).md>",
+  );
+  // Text that names no document pastes as it is.
+  for (const text of ["Projects/Missing.md", "Projects", "plan", "https://example.com"])
+    assert.equal(paste(text, "Notes/Today.md", true), null, text);
+});
+
 test("recent documents sort by modification without date groups", () => {
   const entries = [
     { kind: "file", id: "old", path: "Old.md", modified: 1 },
