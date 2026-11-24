@@ -855,6 +855,9 @@ export type CommentLayout = {
   draft: Range | null;
 };
 export const setCommentLayout = StateEffect.define<CommentLayout>();
+export const commentSplitLine = Facet.define<number | null, number | null>({
+  combine: ([line]) => line ?? null,
+});
 
 export function resolveCommentAnchor(
   ydoc: Y.Doc,
@@ -1093,10 +1096,12 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
   const field = StateField.define<{
     layout: CommentLayout;
     decorations: DecorationSet;
+    splitLine: number | null;
   }>({
     create: () => ({
       layout: { items: [], active: null, draft: null },
       decorations: Decoration.none,
+      splitLine: null,
     }),
     update(value, tr) {
       let layout = value.layout;
@@ -1145,6 +1150,7 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
       }
       const active =
         layout.draft || layout.items.find((item) => item.id === layout.active);
+      let splitLine: number | null = null;
       if (active) {
         if (layout.draft && active.to > active.from)
           ranges.push(
@@ -1179,21 +1185,21 @@ export function commentLayer(host: HTMLElement, open: (id: string) => void) {
         )
           position = start;
         const line = tr.state.doc.lineAt(position);
+        if (position > line.from && position < line.to) splitLine = line.from;
         ranges.push(
           Decoration.widget({
             block: true,
             side: position === line.from ? -1 : 2,
-            widget: new ConversationWidget(
-              host,
-              position > line.from && position < line.to,
-            ),
+            widget: new ConversationWidget(host, splitLine !== null),
           }).range(position),
         );
       }
-      return { layout, decorations: Decoration.set(ranges, true) };
+      return { layout, decorations: Decoration.set(ranges, true), splitLine };
     },
-    provide: (f) =>
+    provide: (f) => [
       EditorView.decorations.from(f, (value) => value.decorations),
+      commentSplitLine.from(f, (value) => value.splitLine),
+    ],
   });
   return {
     extension: field,

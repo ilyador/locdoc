@@ -13,7 +13,11 @@ import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import { JSDOM } from "jsdom";
 import { sourceCommentLayer } from "../src/editor-comments";
 import { engagement } from "../src/editor-engagement";
-import { livePreview, markdownWriting } from "../src/markdown-preview";
+import {
+  createDocumentPreviewState,
+  livePreview,
+  markdownWriting,
+} from "../src/markdown-preview";
 
 const language = markdownWriting;
 const preview = livePreview("preview-fixture", undefined, "Notes/Note.md", [
@@ -117,6 +121,25 @@ function assertRows(actual: string[], expected: string[], label: string) {
   for (let index = 0; index < actual.length; index++)
     assert.equal(actual[index], expected[index], `${label}: range ${index}`);
 }
+
+test("a modest long list has its formatting ahead of the first viewport", () => {
+  const item = "- A long item with **emphasis** and [a link](https://example.com)";
+  const source = Array(150).fill(item).join("\n");
+  const state = createDocumentPreviewState({
+    doc: source,
+    extensions: [language, sourceCommentLayer, preview],
+  });
+  const lastEmphasis = source.lastIndexOf("emphasis");
+  let styled = false;
+  for (const set of state.facet(EditorView.decorations)) {
+    if (typeof set === "function") continue;
+    set.between(lastEmphasis, lastEmphasis + 1, (from, _to, mark) => {
+      if (from === lastEmphasis && mark.spec.class === "md-strong") styled = true;
+    });
+  }
+  assert.ok(styled, "the last item is formatted before any scroll or idle parse");
+  assert.equal(wrapperRows(state).length, 0, "ordinary rows need no wrapper");
+});
 
 function assertFresh(state: EditorState, label: string) {
   const fresh = create(
@@ -741,8 +764,15 @@ test("a short parser slice preserves already-rendered suffix widgets until the f
   );
   const suffixFrom = partial.doc.toString().indexOf("- [ ] Distant task");
   assert.ok(
-    wrapperRows(partial).some((row) => JSON.parse(row).from === suffixFrom),
-    "An unfinished parser suffix must retain its list indentation wrapper",
+    decorationRows(partial).some((row) => {
+      const { from, class: lineClass, attributes } = JSON.parse(row);
+      return (
+        from === suffixFrom &&
+        lineClass === "md-list" &&
+        attributes?.style === "--list-indent: calc(1ch + 28px)"
+      );
+    }),
+    "An unfinished parser suffix must retain its list indent",
   );
   assertFresh(
     parsed(partial),

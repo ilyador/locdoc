@@ -1644,7 +1644,8 @@ button:hover {
 .writing-toggle .field-help {
   margin: 0 0 0 auto;
 }
-.md-list > .cm-line {
+.md-list > .cm-line,
+.cm-line.md-list {
   padding-inline-start: var(--list-indent) !important;
 }
 .md-list-prefix {
@@ -2016,6 +2017,7 @@ button:hover {
   border-inline-start: 1px solid var(--syntax-teal);
 }
 .md-list > .cm-line.md-quote,
+.cm-line.md-list.md-quote,
 .md-list
   > :where(.cm-line.md-quote + .inline-comment-host[data-splits-line])
   + .cm-line {

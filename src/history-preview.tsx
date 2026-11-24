@@ -4,7 +4,10 @@ import { EditorView, placeholder } from "@codemirror/view";
 import { getChunks, unifiedMergeView } from "@codemirror/merge";
 import { commentReadingText } from "./comment-syntax";
 import { documentFormat } from "./document-format";
-import { documentPreview } from "./markdown-preview";
+import {
+  createDocumentPreviewState,
+  documentPreview,
+} from "./markdown-preview";
 import { perLineDirection } from "./text-direction";
 import { documentSelection } from "./editor-selection";
 
@@ -40,7 +43,8 @@ export function HistoryPreview({
     pane.scrollTop = 0;
     const view = new EditorView({
       parent: host.current!,
-      state: EditorState.create({
+      state: createDocumentPreviewState({
+        path,
         doc: source.content,
         extensions: [
           EditorState.readOnly.of(true),

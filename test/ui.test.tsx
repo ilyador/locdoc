@@ -1951,7 +1951,9 @@ test("wrapped list prefixes preserve nested markers, task controls and native so
       onUpload={() => {}}
     />,
   );
-  const lines = [...page.container.querySelectorAll<HTMLElement>(".md-list")];
+  const lines = [
+    ...page.container.querySelectorAll<HTMLElement>(".cm-line.md-list"),
+  ];
   assert.equal(lines.length, 7);
   assert.deepEqual(
     lines.map((line) => line.style.getPropertyValue("--list-indent")),
@@ -1992,7 +1994,7 @@ test("wrapped list prefixes preserve nested markers, task controls and native so
   assert.ok(text.toString().startsWith("Intro\n10. Bulleted"));
   assert.equal(
     page.container
-      .querySelector<HTMLElement>(".md-list")!
+      .querySelector<HTMLElement>(".cm-line.md-list")!
       .style.getPropertyValue("--list-indent"),
     "4ch",
   );
@@ -2047,9 +2049,11 @@ test("expanded comments retain list indentation across fragments without indenti
     );
     const input = await screen.findByLabelText("List comment reply");
     const host = input.closest(".inline-comment-host")!;
-    const wrapper = page.container.querySelector<HTMLElement>(".md-list")!;
-    assert.equal(wrapper.style.getPropertyValue("--list-indent"), "2ch");
+    const row = page.container.querySelector<HTMLElement>(".cm-line.md-list")!;
+    assert.equal(row.style.getPropertyValue("--list-indent"), "2ch");
     if (suffix) {
+      const wrapper = row.parentElement!;
+      assert.equal(wrapper.style.getPropertyValue("--list-indent"), "2ch");
       assert.ok(
         host.parentElement === wrapper,
         "Comment should remain inside its list wrapper.",
@@ -2064,7 +2068,7 @@ test("expanded comments retain list indentation across fragments without indenti
         host.parentElement === page.container.querySelector(".cm-content"),
         "Comment should remain directly inside the editor content.",
       );
-      assert.equal(wrapper.querySelectorAll(":scope > .cm-line").length, 1);
+      assert.ok(row.parentElement === host.parentElement);
     }
     const paragraph = [...page.container.querySelectorAll(".cm-line")].find(
       (line) => line.textContent === "A separate paragraph",
@@ -2076,7 +2080,7 @@ test("expanded comments retain list indentation across fragments without indenti
     assert.equal(text.toString(), source);
     page.rerender(<MarkdownEditor {...props} activeComment={null} />);
     assert.equal(
-      page.container.querySelectorAll(".md-list > .cm-line").length,
+      page.container.querySelectorAll(".cm-line.md-list").length,
       1,
     );
     assert.equal(text.toString(), source);

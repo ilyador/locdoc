@@ -1,21 +1,31 @@
 import { inkSupport } from "./ink-preview";
-import { EditorState, StateField, countColumn } from "@codemirror/state";
+import {
+  EditorState,
+  Prec,
+  RangeSet,
+  StateField,
+  countColumn,
+  type EditorStateConfig,
+} from "@codemirror/state";
 import {
   EditorView,
   Decoration,
   BlockWrapper,
+  ViewPlugin,
   placeholder,
   type DecorationSet,
+  type ViewUpdate,
 } from "@codemirror/view";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import {
+  ensureSyntaxTree,
   syntaxTree,
-  syntaxHighlighting,
   HighlightStyle,
 } from "@codemirror/language";
-import { tags } from "@lezer/highlight";
+import { highlightTree, tags } from "@lezer/highlight";
 import { commentMarkdown } from "./comment-syntax";
 import {
+  commentSplitLine,
   hiddenAfter,
   sameSourceComments,
   shownLines,
@@ -66,6 +76,80 @@ const writingHighlight = HighlightStyle.define([
   { tag: tags.meta, color: "var(--syntax-mark)" },
 ]);
 
+const syntaxMarks = new Map<string, Decoration>();
+
+function syntaxColors(state: EditorState, ranges: readonly PreviewRange[]) {
+  const marks: ReturnType<Decoration["range"]>[] = [];
+  const tree = syntaxTree(state);
+  for (const { from, to } of ranges)
+    highlightTree(
+      tree,
+      writingHighlight,
+      (start, end, className) => {
+        let mark = syntaxMarks.get(className);
+        if (!mark) {
+          mark = Decoration.mark({ class: className });
+          syntaxMarks.set(className, mark);
+        }
+        marks.push(mark.range(start, end));
+      },
+      from,
+      to,
+    );
+  return Decoration.set(marks, true);
+}
+
+// Hidden delimiters split each list row into several visible ranges. Color
+// the whole neighborhood in one tree walk, then reuse it as the pane moves.
+// Exceptionally long lines retain CodeMirror's bounded visible ranges.
+const syntaxMargin = 8192;
+const markdownColors = Prec.high(
+  ViewPlugin.fromClass(
+    class {
+      tree: ReturnType<typeof syntaxTree>;
+      coverage: PreviewRange | null = null;
+      decorations: DecorationSet = Decoration.none;
+      constructor(view: EditorView) {
+        this.tree = syntaxTree(view.state);
+        this.rebuild(view);
+      }
+      update({ view, docChanged, viewportChanged }: ViewUpdate) {
+        const tree = syntaxTree(view.state);
+        const coverage = this.coverage;
+        if (
+          tree === this.tree &&
+          !docChanged &&
+          (!viewportChanged ||
+            (coverage &&
+              view.visibleRanges.every(
+                ({ from, to }) => from >= coverage.from && to <= coverage.to,
+              )))
+        )
+          return;
+        this.tree = tree;
+        this.rebuild(view);
+      }
+      rebuild(view: EditorView) {
+        const visible = view.visibleRanges;
+        const from = visible[0]?.from ?? 0;
+        const to = visible.at(-1)?.to ?? 0;
+        this.coverage =
+          to - from > 4 * syntaxMargin
+            ? null
+            : {
+                from: Math.max(0, from - syntaxMargin),
+                to: Math.min(view.state.doc.length, to + syntaxMargin),
+              };
+        this.decorations = syntaxColors(
+          view.state,
+          this.coverage ? [this.coverage] : visible,
+        );
+      }
+    },
+    { decorations: (plugin) => plugin.decorations },
+  ),
+);
+
 export function livePreview(
   id: string,
   token?: string,
@@ -74,7 +158,6 @@ export function livePreview(
 ) {
   function build(state: EditorState, ranges: PreviewRange[]) {
     const decorations: ReturnType<Decoration["range"]>[] = [];
-    const wrappers: ReturnType<BlockWrapper["range"]>[] = [];
     const images: ReturnType<Decoration["range"]>[] = [];
     // Read-only views, and editors the user has not engaged with yet, reveal
     // no source: every line renders as if no selection touched it.
@@ -363,13 +446,12 @@ export function livePreview(
     for (const from of blockEnds)
       lineStyle(from, Decoration.line({ class: "md-block-end" }));
     for (const [from, { content, indent }] of listPrefixes) {
-      // A conversation can split one source line into several display blocks.
-      // Share its indent across text fragments while leaving the host full-width.
-      wrappers.push(
-        BlockWrapper.create({
-          tagName: "div",
-          attributes: { class: "md-list", style: `--list-indent: ${indent}` },
-        }).range(displayedAt(from), state.doc.lineAt(from).to),
+      // CodeMirror measures ordinary list rows directly, like prose.
+      decorations.push(
+        Decoration.line({
+          class: "md-list",
+          attributes: { style: `--list-indent: ${indent}` },
+        }).range(displayedAt(from)),
       );
       decorations.push(
         Decoration.mark({ class: "md-list-prefix" }).range(from, content),
@@ -382,15 +464,14 @@ export function livePreview(
     }
     return {
       decorations,
-      wrappers,
       images,
     };
   }
   function create(state: EditorState) {
-    const value = build(state, [{ from: 0, to: state.doc.length }]);
+    const ranges = [{ from: 0, to: state.doc.length }];
+    const value = build(state, ranges);
     return {
       decorations: Decoration.set(value.decorations, true),
-      wrappers: BlockWrapper.set(value.wrappers, true),
       images: Decoration.set(value.images, true),
     };
   }
@@ -417,7 +498,6 @@ export function livePreview(
           tr.changes,
         );
       let decorations = value.decorations.map(tr.changes);
-      let wrappers = value.wrappers.map(tr.changes);
       let images = value.images.map(tr.changes);
       const ranges = reread
         ? [{ from: 0, to: tr.state.doc.lineAt(syntaxTree(tr.state).length).to }]
@@ -431,11 +511,6 @@ export function livePreview(
           filterTo: to,
           filter: keep,
         });
-        wrappers = wrappers.update({
-          filterFrom: from,
-          filterTo: to,
-          filter: keep,
-        });
         images = images.update({
           filterFrom: from,
           filterTo: to,
@@ -445,13 +520,31 @@ export function livePreview(
       const fresh = build(tr.state, ranges);
       return {
         decorations: decorations.update({ add: fresh.decorations, sort: true }),
-        wrappers: wrappers.update({ add: fresh.wrappers, sort: true }),
         images: images.update({ add: fresh.images, sort: true }),
       };
     },
     provide: (f) => [
       EditorView.decorations.from(f, (value) => value.decorations),
-      EditorView.blockWrappers.from(f, (value) => value.wrappers),
+      EditorView.blockWrappers.compute([f, commentSplitLine], (state) => {
+        // A conversation inside a list item splits its rendered line in two.
+        // Only that item needs a wrapper to share its inset across fragments.
+        const split = state.facet(commentSplitLine);
+        if (split === null) return RangeSet.empty;
+        const from = shownLines(state).at.get(split) ?? split;
+        let style: string | undefined;
+        state.field(f).decorations.between(from, from, (at, _to, mark) => {
+          if (at === from && mark.spec.class === "md-list")
+            style = mark.spec.attributes?.style;
+        });
+        return style
+          ? BlockWrapper.set([
+              BlockWrapper.create({
+                tagName: "div",
+                attributes: { class: "md-list", style },
+              }).range(from, state.doc.lineAt(split).to),
+            ])
+          : RangeSet.empty;
+      }),
     ],
   });
   return [userEngagement, field, mediaPreview.of(true)];
@@ -489,9 +582,26 @@ export const markdownWriting = markdown({
 const markdownSupport = [
   markdownWriting,
   orderedListNumbers,
-  syntaxHighlighting(writingHighlight),
+  markdownColors,
+  EditorView.styleModule.of(writingHighlight.module!),
   directionSyntax.of(markdownDirectionSyntax),
 ];
+
+// CodeMirror otherwise opens with about 3,000 characters parsed. On a quick
+// scroll the idle parser then catches up in visible batches, changing line
+// heights under the reader. Start with more of the preview ready while
+// keeping a time and size limit for very large or complex documents.
+export function createDocumentPreviewState({
+  path = "",
+  ...config
+}: EditorStateConfig & { path?: string }) {
+  const state = EditorState.create(config);
+  if (documentFormat(path) !== "markdown") return state;
+  const end = Math.min(state.doc.length, 64 * 1024);
+  if (syntaxTree(state).length >= end || !ensureSyntaxTree(state, end, 35))
+    return state;
+  return state.update().state;
+}
 
 export function documentPreview(
   id: string,

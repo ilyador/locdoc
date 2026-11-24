@@ -159,6 +159,7 @@ function open(
   let scrollTop = 0;
   let scrollWrites = 0;
   let scrollEffects = 0;
+  let positionReads = 0;
   Object.defineProperty(pane, "scrollTop", {
     get: () => scrollTop,
     set: (value: number) => {
@@ -227,6 +228,7 @@ function open(
       return span ?? { from: 0, to: text.length };
     },
     posAtCoords({ y }: { y: number }) {
+      positionReads++;
       const all = starts();
       let line = 0;
       while (line + 1 < all.length && drawn(line + 1) <= y) line++;
@@ -294,6 +296,9 @@ function open(
     },
     get scrollEffects() {
       return scrollEffects;
+    },
+    get positionReads() {
+      return positionReads;
     },
     // CodeMirror can drain requests added by a write in the SAME frame. An
     // alignment callback must yield to a real animation frame between passes.
@@ -794,7 +799,7 @@ test("invalid positions and unavailable storage cannot break reading", () => {
   assert.equal(page.pane.scrollTop, 500);
 });
 
-test("continuous scrolling coalesces local writes and another tab cannot move the open page", async () => {
+test("continuous scrolling coalesces position reads and writes and another tab cannot move the open page", async () => {
   const page = open("position");
   const prototype = Object.getPrototypeOf(localStorage);
   const original = prototype.setItem;
@@ -805,8 +810,10 @@ test("continuous scrolling coalesces local writes and another tab cannot move th
   };
   try {
     for (const top of [50, 100, 150, 200]) page.scroll(top);
+    assert.equal(page.positionReads, 0);
     assert.equal(writes, 0);
     await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(page.positionReads, 1);
     assert.equal(writes, 1);
     assert.deepEqual(reading(page.text), { line: 8, offset: 0 });
     localStorage.setItem("position", "900");

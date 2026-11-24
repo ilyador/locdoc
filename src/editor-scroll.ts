@@ -128,26 +128,11 @@ export function rememberEditorScroll(
   const saved = load(key);
   let active = true;
   let readerControlled = saved === null;
-  let latest: string | null = null;
   let stored: string | null = null;
-  let dirty = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let frame: number | undefined;
   let resize: ResizeObserver | undefined;
   let fontChanged: (() => void) | undefined;
-  const flush = () => {
-    clearTimeout(timer);
-    timer = undefined;
-    if (!dirty || latest === null) return;
-    dirty = false;
-    if (latest === stored) return;
-    try {
-      localStorage.setItem(key, latest);
-      stored = latest;
-    } catch {
-      // Reading and editing must continue when storage is full or blocked.
-    }
-  };
   // Read only drawn lines: the visible top is measured, nothing above it.
   const position = () => {
     const top = pane.getBoundingClientRect().top;
@@ -169,39 +154,28 @@ export function rememberEditorScroll(
       canvas,
     });
   };
-  const keep = (value: string) => {
-    if (!active || !readerControlled) return;
-    latest = value;
-    dirty = true;
-  };
   const record = () => {
+    clearTimeout(timer);
+    timer = undefined;
+    if (!active || !readerControlled) return;
     try {
-      keep(position());
+      const value = position();
+      if (value === stored) return;
+      localStorage.setItem(key, value);
+      stored = value;
     } catch {
-      // Layout can be unavailable while the editor is detached or closing.
+      // Layout or storage can be unavailable, especially as a page closes.
     }
   };
-  // A scroll event can arrive before CodeMirror draws the newly visible text.
-  // Its measure phase runs after that layout, so read the position there.
-  const recording = {};
+  // Saving an anchor needs glyph geometry and a CRDT position. Wait until
+  // native scrolling has settled instead of doing both on every scroll frame.
   const scroll = () => {
-    if (readerControlled)
-      view.requestMeasure({
-        key: recording,
-        read: () => (active ? position() : null),
-        write: (value) => {
-          if (value !== null) keep(value);
-        },
-      });
+    if (!readerControlled) return;
     clearTimeout(timer);
-    timer = setTimeout(flush, 500);
-  };
-  const leaving = () => {
-    if (readerControlled) record();
-    flush();
+    timer = setTimeout(record, 500);
   };
   const visibility = () => {
-    if (document.visibilityState === "hidden") leaving();
+    if (document.visibilityState === "hidden") record();
   };
   // Any reader input, including a sidebar click that jumps to a comment,
   // hands scrolling back to the reader.
@@ -332,17 +306,17 @@ export function rememberEditorScroll(
     }
   }
   pane.addEventListener("scroll", scroll, { passive: true });
-  pane.addEventListener("scrollend", leaving);
-  window.addEventListener("pagehide", leaving);
+  pane.addEventListener("scrollend", record);
+  window.addEventListener("pagehide", record);
   document.addEventListener("visibilitychange", visibility);
   return () => {
     if (!active) return;
-    leaving();
+    record();
     active = false;
     stopRestoring();
     pane.removeEventListener("scroll", scroll);
-    pane.removeEventListener("scrollend", leaving);
-    window.removeEventListener("pagehide", leaving);
+    pane.removeEventListener("scrollend", record);
+    window.removeEventListener("pagehide", record);
     document.removeEventListener("visibilitychange", visibility);
   };
 }

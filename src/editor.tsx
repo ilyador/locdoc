@@ -55,7 +55,10 @@ import {
   lineEndingAccess,
   lineEndingError,
 } from "./line-endings";
-import { documentPreview } from "./markdown-preview";
+import {
+  createDocumentPreviewState,
+  documentPreview,
+} from "./markdown-preview";
 import { explainMedia, retryUnavailableMedia } from "./markdown-widgets";
 import { documentFormat } from "./document-format";
 import { sameLinkTargets } from "./document-links";
@@ -266,7 +269,8 @@ export const MarkdownEditor = forwardRef<
     commentExtension.current = layer;
     const v = new EditorView({
       parent: host.current!,
-      state: EditorState.create({
+      state: createDocumentPreviewState({
+        path,
         doc: source,
         extensions: [
           EditorState.lineSeparator.of("\n"),
