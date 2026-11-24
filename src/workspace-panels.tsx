@@ -82,7 +82,6 @@ export function DocumentSharePanel({
   filename,
   name,
   onChange,
-  onShareFolder,
 }: {
   doc: Document;
   // Where the document is now, as the tree lists it after renames made
@@ -91,7 +90,6 @@ export function DocumentSharePanel({
   filename: string;
   name: string;
   onChange: (permission: string, rotate: boolean) => Promise<void>;
-  onShareFolder: (path: string) => void;
 }) {
   const description = (
     <p className="dialog-description">
@@ -114,29 +112,15 @@ export function DocumentSharePanel({
   return (
     <>
       {description}
+      {doc.owner && <DocumentPathCopy key={`path:${doc.id}`} path={path} />}
       <ShareControls
         value={doc}
         name={name}
         onChange={onChange}
         mcpTarget={doc.owner ? { kind: "document", id: doc.id } : undefined}
       />
-      {doc.owner && <DocumentPathCopy key={doc.id} path={path} />}
       {doc.owner && documentFormat(doc.path) === "markdown" && (
         <HiddenMediaSection key={doc.id} doc={doc} />
-      )}
-      {doc.owner && doc.path.includes("/") && (
-        <button
-          className="text-button"
-          onClick={() =>
-            onShareFolder(doc.path.split("/").slice(0, -1).join("/"))
-          }
-        >
-          <Folder size={16} />
-          Share containing folder
-        </button>
-      )}
-      {doc.path.includes("/") && (
-        <p className="field-help">Folder links grant access separately.</p>
       )}
     </>
   );

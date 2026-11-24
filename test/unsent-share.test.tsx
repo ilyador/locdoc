@@ -73,7 +73,6 @@ const panel = (doc: Document) => (
     filename={doc.path}
     name="Owner"
     onChange={async () => assert.fail("an unsent document cannot be shared")}
-    onShareFolder={() => {}}
   />
 );
 
@@ -107,6 +106,7 @@ test("a document the server has not accepted yet says so instead of failing as n
     null,
   );
   assert.equal(library.screen.queryByLabelText("Link access"), null);
+  assert.equal(library.screen.queryByLabelText("Relative file path"), null);
   assert.deepEqual(
     requests.filter((url) => url.includes(`/api/docs/${created.id}`)),
     [],
@@ -148,6 +148,10 @@ test("a document the server knows keeps its sharing controls", async () => {
     library.screen.getByLabelText("Link access"),
     "a known document's controls show at once, with no empty moment",
   );
+  const path = library.screen.getByLabelText<HTMLInputElement>(
+    "Relative file path",
+  );
+  assert.equal(path.value, "Known.md");
   await library.waitFor(() =>
     assert.ok(library.screen.getByRole("switch", { name: "Allow MCP" })),
   );

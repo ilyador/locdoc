@@ -5,6 +5,7 @@ import React from "react";
 
 let dom, render, screen, fireEvent, waitFor, act, cleanup;
 let McpAccessControl, ShareControls, FolderShare, DocumentPathCopy;
+let DocumentSharePanel;
 const originalFetch = globalThis.fetch;
 const access = (allowed = false, inherited = false) => ({
   mcpAllowed: allowed,
@@ -44,6 +45,7 @@ before(async () => {
     await import("@testing-library/react"));
   ({ McpAccessControl, ShareControls, FolderShare, DocumentPathCopy } =
     await import("../src/sharing.tsx"));
+  ({ DocumentSharePanel } = await import("../src/workspace-panels.tsx"));
 });
 afterEach(() => {
   cleanup();
@@ -230,7 +232,38 @@ test("share controls without an owner target do not expose MCP settings", () => 
   assert.equal(screen.queryByRole("switch"), null);
 });
 
-test("the document's workspace path can be copied to link it from another document", async () => {
+test("the Share dialog shows the current relative file path before link settings", async () => {
+  globalThis.fetch = async () => response(access());
+  render(
+    <DocumentSharePanel
+      doc={{
+        id: "note",
+        path: "Old folder/Release notes.txt",
+        owner: true,
+        permission: "private",
+        shareUrl: null,
+      }}
+      path="Drafts/Planning/Release notes.txt"
+      filename="Release notes.txt"
+      name="Owner"
+      onChange={async () => {}}
+    />,
+  );
+  const field = screen.getByLabelText("Relative file path");
+  assert.equal(field.value, "Drafts/Planning/Release notes.txt");
+  assert.ok(
+    field.compareDocumentPosition(screen.getByLabelText("Link access")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    "the path comes before the sharing controls",
+  );
+  assert.equal(
+    screen.queryByRole("button", { name: "Share containing folder" }),
+    null,
+  );
+  await waitFor(() => assert.equal(screen.getByRole("switch").disabled, false));
+});
+
+test("the relative file path can be copied exactly as shown", async () => {
   const copied = [];
   let refuse = false;
   Object.defineProperty(navigator, "clipboard", {
@@ -245,9 +278,13 @@ test("the document's workspace path can be copied to link it from another docume
   const execCommand = document.execCommand;
   try {
     render(<DocumentPathCopy path="Life Plan/Life goals.md" />);
-    const field = screen.getByLabelText("Link from another document");
+    const field = screen.getByLabelText("Relative file path");
     assert.equal(field.value, "Life Plan/Life goals.md");
-    assert.equal(field.getAttribute("dir"), "auto", "a path keeps its own direction");
+    assert.equal(
+      field.getAttribute("dir"),
+      "auto",
+      "a path keeps its own direction",
+    );
     assert.equal(field.readOnly, true);
     fireEvent.click(screen.getByRole("button", { name: "Copy document path" }));
     await waitFor(() =>

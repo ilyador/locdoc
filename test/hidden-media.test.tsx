@@ -108,7 +108,6 @@ function panel(doc: Document) {
       filename={doc.path}
       name="Owner"
       onChange={async () => {}}
-      onShareFolder={() => {}}
     />
   );
 }

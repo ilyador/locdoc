@@ -207,9 +207,6 @@ export function ShareControls({
   );
 }
 
-// The document's path in the workspace, to link it from another document.
-// Pasted into a Markdown document elsewhere, the editor writes it from that
-// document's folder (pastedDocumentPath).
 export function DocumentPathCopy({ path }: { path: string }) {
   const field = useRef<HTMLInputElement>(null);
   const [copied, setCopied] = useState(false);
@@ -236,7 +233,7 @@ export function DocumentPathCopy({ path }: { path: string }) {
   return (
     <>
       <label className="field-label" htmlFor="document-path">
-        Link from another document
+        Relative file path
       </label>
       <div className="copy-field">
         <input
@@ -252,11 +249,13 @@ export function DocumentPathCopy({ path }: { path: string }) {
           {copied ? <Check /> : <Copy />}
         </IconButton>
       </div>
-      <p id={helpId} className="field-help" role={error ? "alert" : undefined}>
-        {error ||
-          (copied
-            ? "Path copied. Paste it into a link in another document."
-            : "Paste it into a link in another document. Locdoc adjusts the path to that document’s folder.")}
+      <p
+        id={helpId}
+        className="field-help"
+        role={error ? "alert" : undefined}
+        aria-live={error ? undefined : "polite"}
+      >
+        {error || (copied ? "Path copied." : "From the documents folder.")}
       </p>
     </>
   );

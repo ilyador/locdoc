@@ -457,13 +457,13 @@ test("dialogs isolate Hebrew names and paths, and their fields follow typed text
       filename="שמן זית"
       name="alex"
       onChange={async () => {}}
-      onShareFolder={() => {}}
     />,
   );
   assert.equal(
     share.container.querySelector(".dialog-description bdi")?.textContent,
     "שמן זית",
   );
+  assert.equal(share.queryByLabelText("Relative file path"), null);
   share.unmount();
   const picker = render(
     <LinkPicker

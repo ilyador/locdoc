@@ -614,7 +614,6 @@ export function DocumentWorkspace({
                 filename={filename}
                 name={name}
                 onChange={updateShare}
-                onShareFolder={shareFolder}
               />
             )}
             {panel === "folder-share" && config?.owner && shareFolderPath && (
