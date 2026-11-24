@@ -127,7 +127,7 @@ function open(source: string, path: string, editable = true) {
   };
 }
 
-test("a workspace path pasted into a link is written from the document's folder", () => {
+test("a workspace path pasted into a link is written from the docs root", () => {
   const doc = open("See [the plan](", "Notes/Today.md");
   try {
     doc.paste("Projects/Plan.md");
@@ -136,7 +136,7 @@ test("a workspace path pasted into a link is written from the document's folder"
         changes: { from: doc.view.state.doc.length, insert: ")" },
       }),
     );
-    assert.equal(doc.text(), "See [the plan](../Projects/Plan.md)");
+    assert.equal(doc.text(), "See [the plan](/Projects/Plan.md)");
     assert.equal(doc.link(), "/d/plan", "the link opens the copied document");
   } finally {
     doc.close();
@@ -152,7 +152,7 @@ test("a path with spaces pasted into a link is bracketed so the link reads it", 
         changes: { from: doc.view.state.doc.length, insert: ")" },
       }),
     );
-    assert.equal(doc.text(), "Goals: [mine](<../Life Plan/Life goals.md>)");
+    assert.equal(doc.text(), "Goals: [mine](</Life Plan/Life goals.md>)");
     assert.equal(doc.link(), "/d/goals");
   } finally {
     doc.close();
@@ -179,8 +179,8 @@ test("other pasted text, and paths in read-only documents, paste as they are", (
     prose.paste("Projects/Plan.md");
     assert.equal(
       prose.text(),
-      "Moved to ../../Projects/Plan.md",
-      "outside a link the path is written from here too, without brackets",
+      "Moved to Projects/Plan.md",
+      "a path in prose pastes verbatim",
     );
   } finally {
     prose.close();

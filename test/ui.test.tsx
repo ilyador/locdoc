@@ -2165,9 +2165,12 @@ test("keyboard link selection stays visible in a long result list", async () => 
     assert.equal(input.getAttribute("aria-activedescendant"), "link-result-12");
     assert.equal(document.getElementById("link-results")!.scrollTop, 11 * 44);
     fireEvent.submit(input.closest("form"));
-    assert.deepEqual(chosen, ["https://locdoc.test/d/12"]);
+    assert.deepEqual(chosen, ["/Notes 12.md"]);
     fireEvent.keyDown(input, { key: "ArrowUp" });
     assert.equal(input.getAttribute("aria-activedescendant"), "link-result-11");
+    fireEvent.change(input, { target: { value: "/Notes 4.md" } });
+    fireEvent.submit(input.closest("form"));
+    assert.deepEqual(chosen, ["/Notes 12.md", "/Notes 4.md"]);
   } finally {
     page.unmount();
     HTMLElement.prototype.getBoundingClientRect = original;

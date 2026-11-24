@@ -247,7 +247,7 @@ export const MarkdownEditor = forwardRef<
   )
     setPreviewEntries(linked);
   const previewInputs = [id, token, path, previewEntries, owner];
-  // Where pasted document paths are written from, as this render shows.
+  // Use this render's source and listing when interpreting a pasted path.
   const links = useRef({ path, entries: linked });
   links.current = { path, entries: linked };
   useLayoutEffect(() => {

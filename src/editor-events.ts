@@ -73,9 +73,7 @@ export function fileDropEvents(upload: (file: File) => void) {
   });
 }
 
-// A document's workspace path pasted into a Markdown document becomes the
-// path from this document's folder, so a link with it opens that document
-// (pastedDocumentPath). Other text pastes as it is.
+// Write a pasted file path from the docs root when it is a link destination.
 export function documentPathPaste(
   links: () => { path?: string; entries?: Entry[] },
 ) {
@@ -89,12 +87,9 @@ export function documentPathPaste(
       if (!text || text.length > 4096 || /[\r\n]/.test(text.trim()))
         return false;
       const { from } = view.state.selection.main;
-      const written = pastedDocumentPath(
-        text,
-        path,
-        entries,
-        view.state.sliceDoc(Math.max(0, from - 2), from) === "](",
-      );
+      if (view.state.sliceDoc(Math.max(0, from - 2), from) !== "](")
+        return false;
+      const written = pastedDocumentPath(text, path, entries);
       if (written === null) return false;
       e.preventDefault();
       view.dispatch(view.state.replaceSelection(written), {

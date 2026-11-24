@@ -10,6 +10,7 @@ export type Entry = {
   offlineVersion?: string;
   title?: string;
   url?: string;
+  workspacePathHash?: string;
   format?: DocumentFormat;
   identity?: string;
 };

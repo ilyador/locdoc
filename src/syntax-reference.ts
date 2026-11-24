@@ -100,8 +100,8 @@ const markdown: SyntaxReference = {
             meaning: "Link",
           },
           {
-            source: ["[", "label", "](", "notes.md", ")"],
-            meaning: "Link to another document, by relative path",
+            source: ["[", "label", "](", "/Notes/notes.md", ")"],
+            meaning: "Link to a document by its path from the documents folder",
           },
           {
             source: ["https://", "example.com"],

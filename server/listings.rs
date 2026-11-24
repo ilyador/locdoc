@@ -825,6 +825,7 @@ mod tests {
             offline_version: None,
             title: path.into(),
             url: None,
+            workspace_path_hash: None,
             format: Some("markdown"),
             identity: None,
             file: None,

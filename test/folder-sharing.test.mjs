@@ -18,6 +18,7 @@ import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
 import WebSocket from "ws";
 import { freePort } from "./fixtures/free-port.mjs";
+import { resolveDocumentLink } from "../src/document-links.ts";
 
 const port = await freePort();
 const base = `http://127.0.0.1:${port}`,
@@ -186,13 +187,17 @@ after(async () => {
 });
 
 test("folder bootstrap exposes only descendants, with relative paths and selected-document refresh", async () => {
-  const first = await doc("Team/first.md");
-  const nested = await doc("Team/Design/second.md");
-  const outside = await doc("Team-private/secret.md");
+  const folder = "Clients/Internal/Team";
+  const first = await doc(`${folder}/first.md`);
+  const nested = await doc(`${folder}/Design/second.md`);
+  const outside = await doc("Clients/Internal/Team-private/secret.md");
   await doc("elsewhere.md");
-  await writeFile(join(dir, "docs/Team/.secret.md"), "hidden");
-  await symlink(join(dir, "docs/Team-private"), join(dir, "docs/Team/alias"));
-  const grant = await share("Team");
+  await writeFile(join(dir, "docs", folder, ".secret.md"), "hidden");
+  await symlink(
+    join(dir, "docs/Clients/Internal/Team-private"),
+    join(dir, "docs", folder, "alias"),
+  );
+  const grant = await share(folder);
   const opened = await request(`/api/open/${grant.token}?doc=${nested.id}`, {
     owner: false,
   });
@@ -206,6 +211,17 @@ test("folder bootstrap exposes only descendants, with relative paths and selecte
   );
   for (const entry of opened.entries.filter((e) => e.id))
     assert.equal(entry.url, `${base}/s/${grant.token}?doc=${entry.id}`);
+  assert.ok(!JSON.stringify(opened).includes("Clients/Internal"));
+  const pathLink = (href) =>
+    resolveDocumentLink(href, "Design/second.md", opened.entries);
+  assert.equal(
+    pathLink(`/${folder}/first.md`),
+    `${base}/s/${grant.token}?doc=${first.id}`,
+  );
+  assert.equal(pathLink("../first.md"), pathLink(`/${folder}/first.md`));
+  assert.equal(pathLink("/Team/first.md"), null);
+  assert.equal(pathLink("/first.md"), null);
+  assert.equal(pathLink("/Clients/Internal/Team-private/secret.md"), null);
   await request(`/api/open/${grant.token}?doc=${outside.id}`, {
     owner: false,
     status: 403,
@@ -221,11 +237,14 @@ test("folder bootstrap exposes only descendants, with relative paths and selecte
   const owner = await request(`/api/docs/${first.id}?token=${grant.token}`);
   assert.equal(owner.edit, true);
   assert.equal(owner.owner, true);
-  await request("/api/folders/share?path=Team", { owner: false, status: 403 });
+  await request(`/api/folders/share?path=${encodeURIComponent(folder)}`, {
+    owner: false,
+    status: 403,
+  });
   await request("/api/folders/share", {
     owner: false,
     method: "POST",
-    body: { path: "Team", permission: "edit" },
+    body: { path: folder, permission: "edit" },
     status: 403,
   });
 });

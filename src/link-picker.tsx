@@ -6,7 +6,7 @@ import {
   LockSimple,
 } from "@phosphor-icons/react";
 import type { Entry } from "./model";
-import { documentTitle, webLink } from "./document-links";
+import { documentDestination, documentTitle, webLink } from "./document-links";
 import { SearchField } from "./search-field";
 import { PathText } from "./ui";
 
@@ -21,14 +21,13 @@ export function LinkPicker({
 }) {
   const [query, setQuery] = useState("");
   const url = webLink(query);
+  const search = query.replace(/^\//, "").toLocaleLowerCase();
   const matches = entries
     .filter(
       (e) =>
         e.kind === "file" &&
         e.url &&
-        `${documentTitle(e)} ${e.path}`
-          .toLocaleLowerCase()
-          .includes(query.toLocaleLowerCase()),
+        `${documentTitle(e)} ${e.path}`.toLocaleLowerCase().includes(search),
     )
     .slice(0, 20);
   const [active, setActive] = useState(0);
@@ -47,7 +46,10 @@ export function LinkPicker({
   const insert = (index: number) => {
     if (url) onInsert(url, selection || new URL(url).hostname);
     else if (matches[index])
-      onInsert(matches[index].url!, selection || documentTitle(matches[index]));
+      onInsert(
+        documentDestination(matches[index]),
+        selection || documentTitle(matches[index]),
+      );
   };
   return (
     <form

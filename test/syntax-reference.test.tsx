@@ -273,7 +273,7 @@ const markdownChecks: Record<string, (source: string) => void> = {
       assert.equal(link?.getAttribute("href"), "https://example.com/");
       assert.equal(view.text(0), "label", "only the label shows");
     }),
-  "[label](notes.md)": (source) =>
+  "[label](/Notes/notes.md)": (source) =>
     rendered(source, "markdown", (view) => {
       assert.equal(
         view.one("a.md-link")?.getAttribute("href"),

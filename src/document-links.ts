@@ -1,5 +1,6 @@
-import type { Entry } from "./model";
+import { digest } from "lib0/hash/sha256";
 import { documentName, isDocumentPath } from "./document-format.ts";
+import type { Entry } from "./model";
 
 export function documentTitle(entry: Entry) {
   return entry.title || documentName(entry.path);
@@ -36,76 +37,90 @@ export function sameLinkTargets(a: Entry[], b: Entry[]) {
     while (j < b.length && b[j].kind !== "file") j++;
     if (i === a.length || j === b.length)
       return i === a.length && j === b.length;
-    if (a[i].path !== b[j].path || a[i].url !== b[j].url) return false;
+    if (
+      a[i].path !== b[j].path ||
+      a[i].url !== b[j].url ||
+      a[i].workspacePathHash !== b[j].workspacePathHash
+    )
+      return false;
     i++;
     j++;
   }
 }
 
-// A document's path in the workspace, as Copy path gives it, pasted into a
-// Markdown document: the path from the folder of that document, so a link
-// with it opens the same document. A path that already names a document from
-// there is kept. In a link's destination, the path is written as a link
-// reads it back. Null to paste the text as it is.
+function folderLinkEntry(entry: Entry) {
+  // Old cached folder listings still have the folder capability in their URL.
+  return !!entry.workspacePathHash || !!entry.url?.includes("?doc=");
+}
+
+function workspaceDestination(path: string) {
+  return "/" + path.replace(/[&%<>|?#\r\n\t]/g, encodeURIComponent);
+}
+
+// A folder link lists paths from the shared folder, so a guest choosing
+// a document can insert its shared URL without learning the owner's path.
+export function documentDestination(entry: Entry) {
+  return folderLinkEntry(entry) ? entry.url! : workspaceDestination(entry.path);
+}
+
+// The clipboard path shown in Share is relative to the documents folder.
+// Prefer that exact file over a same-named file near the source document.
 export function pastedDocumentPath(
   text: string,
   path: string,
   entries: Entry[],
-  destination: boolean,
 ) {
   const target = text.trim();
-  const isFile = (path: string | null) =>
-    entries.some((entry) => entry.kind === "file" && entry.path === path);
-  if (!isFile(target)) return null;
-  let relative = target;
-  if (!isFile(linkedPath(target, path))) {
-    const from = path.split("/").slice(0, -1);
-    const to = target.split("/");
-    let shared = 0;
-    while (
-      shared < from.length &&
-      shared < to.length - 1 &&
-      from[shared] === to[shared]
-    )
-      shared++;
-    relative = [
-      ...from.slice(shared).map(() => ".."),
-      ...to.slice(shared),
-    ].join("/");
-  }
-  const written = destination ? linkDestination(relative) : relative;
+  const copiedPath = target.replace(/^\//, "");
+  const entry =
+    entries.find(
+      (e) => e.kind === "file" && !folderLinkEntry(e) && e.path === copiedPath,
+    ) ?? linkedDocument(target, path, entries);
+  if (!entry || folderLinkEntry(entry)) return null;
+  const href = workspaceDestination(entry.path);
+  const written = /[\s()]/.test(href) ? `<${href}>` : href;
   return written === text ? null : written;
 }
-// A link reads its destination decoded, and between angle brackets when it
-// holds spaces or parentheses.
-function linkDestination(path: string) {
-  const encoded = path.replace(/%/g, "%25");
-  return /[\s()<>]/.test(encoded)
-    ? `<${encoded.replace(/</g, "%3C").replace(/>/g, "%3E")}>`
-    : encoded;
-}
 
-// The workspace path a relative link from the document at `path` names.
+// A leading slash starts at the docs root. Older relative links start at
+// the source document's folder and cannot climb above their own listing.
 function linkedPath(raw: string, path: string) {
   try {
     const decoded = decodeURIComponent(raw.replace(/^<|>$/g, ""));
     if (
       !isDocumentPath(decoded) ||
-      decoded.startsWith("/") ||
+      decoded.startsWith("//") ||
       decoded.includes("\\")
     )
       return null;
-    const parts = path.split("/").slice(0, -1);
+    const rooted = decoded.startsWith("/");
+    const parts = rooted ? [] : path.split("/").slice(0, -1);
     for (const part of decoded.split("/")) {
       if (part === "..") {
         if (!parts.length) return null;
         parts.pop();
       } else if (part !== "." && part) parts.push(part);
     }
-    return parts.join("/");
+    return { path: parts.join("/"), rooted };
   } catch {
     return null;
   }
+}
+
+function linkedDocument(raw: string, path: string, entries: Entry[]) {
+  const linked = linkedPath(raw, path);
+  if (!linked) return;
+  let hash: string | undefined;
+  return entries.find((entry) => {
+    if (entry.kind !== "file") return false;
+    if (!linked.rooted || !folderLinkEntry(entry))
+      return entry.path === linked.path;
+    if (!entry.workspacePathHash) return false;
+    hash ??= Array.from(digest(new TextEncoder().encode(linked.path)), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    return entry.workspacePathHash === hash;
+  });
 }
 
 export function resolveDocumentLink(
@@ -113,11 +128,5 @@ export function resolveDocumentLink(
   path: string,
   entries: Entry[],
 ) {
-  const url = webLink(raw);
-  if (url) return url;
-  const linked = linkedPath(raw, path);
-  if (linked === null) return null;
-  return (
-    entries.find((e) => e.kind === "file" && e.path === linked)?.url || null
-  );
+  return webLink(raw) || linkedDocument(raw, path, entries)?.url || null;
 }

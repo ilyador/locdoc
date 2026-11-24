@@ -796,6 +796,8 @@ struct Entry {
     offline_version: Option<String>,
     title: String,
     url: Option<String>,
+    #[serde(rename = "workspacePathHash", skip_serializing_if = "Option::is_none")]
+    workspace_path_hash: Option<String>,
     /// A document's format; folders have none.
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<&'static str>,
@@ -892,6 +894,7 @@ fn scan_folder(
                 offline_version: None,
                 title: name.to_string_lossy().into_owned(),
                 url: None,
+                workspace_path_hash: None,
                 format: None,
                 identity: folders::directory_identity(
                     s,
@@ -951,6 +954,7 @@ fn scan_folder(
                     format!("{}/d/{}", s.public_url, d.id)
                 }),
                 format: Some(format.name()),
+                workspace_path_hash: None,
                 identity: None,
                 file: Some((metadata.dev(), metadata.ino())),
             });

@@ -136,10 +136,14 @@ pub(super) fn entries(s: &Store, folder: &Grant) -> Result<Vec<Entry>> {
 /// entry shared, and documents opened through the link.
 pub(super) fn walk(s: &Store, folder: &Grant) -> Result<Walk> {
     let mut walk = super::walk(s, &s.safe(&folder.path, false)?)?;
+    let prefix = format!("{}/", folder.path);
     for entry in &mut walk.entries {
+        // A link in the text can name an exact workspace path without the
+        // folder listing disclosing the owner's ancestor names.
+        entry.workspace_path_hash = entry.id.as_ref().map(|_| hash(&entry.path));
         entry.path = entry
             .path
-            .strip_prefix(&format!("{}/", folder.path))
+            .strip_prefix(&prefix)
             .ok_or_else(denied)?
             .to_string();
         entry.shared = true;
