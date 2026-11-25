@@ -157,6 +157,40 @@ function openSidebar() {
   fireEvent.click(button);
 }
 
+test("only the iPad gets the wider sidebar when Safari uses a desktop user agent", async () => {
+  const device = window.navigator;
+  const fields = ["userAgent", "platform", "maxTouchPoints"] as const;
+  const original = fields.map((field) =>
+    Object.getOwnPropertyDescriptor(device, field),
+  );
+  try {
+    for (const touches of [0, 5]) {
+      Object.defineProperties(device, {
+        userAgent: {
+          value: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+          configurable: true,
+        },
+        platform: { value: "MacIntel", configurable: true },
+        maxTouchPoints: { value: touches, configurable: true },
+      });
+      await open("Doc 4.md", { narrow: false });
+      openSidebar();
+      assert.equal(
+        sidebar().closest(".app")?.hasAttribute("data-ipad"),
+        touches > 1,
+      );
+      assert.equal(main().hasAttribute("inert"), false);
+      cleanup();
+    }
+  } finally {
+    fields.forEach((field, index) => {
+      const descriptor = original[index];
+      if (descriptor) Object.defineProperty(device, field, descriptor);
+      else Reflect.deleteProperty(device, field);
+    });
+  }
+});
+
 test("on a narrow screen the drawer takes focus as it opens, keeps the document out of reach and closes with Escape", async () => {
   await open("Doc 2.md", { narrow: true });
   assert.equal(main().hasAttribute("inert"), false);

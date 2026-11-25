@@ -1,3 +1,12 @@
+export function isIPad(
+  device: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints">,
+) {
+  return (
+    /iPad/.test(device.userAgent) ||
+    (device.platform === "MacIntel" && device.maxTouchPoints > 1)
+  );
+}
+
 // Keep editing at the page's original scale, including WebKit gesture events.
 export function protectTouchViewport(target: Document) {
   const win = target.defaultView;
@@ -13,10 +22,6 @@ export function protectTouchViewport(target: Document) {
   const previousStandalone = root.hasAttribute("data-standalone");
   const previousKeyboard = root.hasAttribute("data-keyboard-open");
   root.toggleAttribute("data-standalone", standalone);
-  const iPad =
-    /iPad/.test(win?.navigator.userAgent || "") ||
-    (win?.navigator.platform === "MacIntel" &&
-      win.navigator.maxTouchPoints > 1);
   // Measure without a painted fixed app ancestor, which can influence iOS's
   // native status bar. Only installed iPad apps need the larger CSS viewport:
   // their fixed insets can stop short of the physical bottom. On iPhone that
@@ -27,7 +32,7 @@ export function protectTouchViewport(target: Document) {
   gauge.setAttribute("aria-hidden", "true");
   gauge.style.cssText =
     "position:fixed;inset:0;pointer-events:none;visibility:hidden;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);box-sizing:border-box;";
-  if (standalone && iPad)
+  if (standalone && win && isIPad(win.navigator))
     gauge.style.cssText += "bottom:auto;height:100vh;height:100lvh;";
   (target.body || root).appendChild(gauge);
   let idle: { width: number; usable: number } | null = null;

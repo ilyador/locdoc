@@ -11,6 +11,7 @@ import { flushSync } from "react-dom";
 import { IconContext } from "@phosphor-icons/react";
 import { NamePrompt } from "./name-prompt";
 import { useSidebarFocus } from "./sidebar-focus";
+import { isIPad } from "./touch-viewport";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import { addressedDocument, type Entry } from "./model";
 import type { Workspace } from "./workspace";
@@ -124,7 +125,11 @@ export function WorkspaceFrame({
   return (
     <IconContext.Provider value={icons}>
       {workspace.needsName && <NamePrompt onChoose={workspace.chooseName} />}
-      <div className={`app ${sidebar ? "with-sidebar" : ""}`} style={style}>
+      <div
+        className={`app ${sidebar ? "with-sidebar" : ""}`}
+        data-ipad={isIPad(window.navigator) ? "" : undefined}
+        style={style}
+      >
         <button
           className="sidebar-scrim"
           aria-label="Close sidebar"

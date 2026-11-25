@@ -168,9 +168,13 @@ button:hover {
 }
 .app {
   --sidebar-default-width: 280px;
+  --sidebar-default-scale: 1;
   --sidebar-width: clamp(
     220px,
-    var(--sidebar-custom-width, var(--sidebar-default-width)),
+    var(
+      --sidebar-custom-width,
+      calc(var(--sidebar-default-width) * var(--sidebar-default-scale))
+    ),
     min(600px, calc(100vw - 360px))
   );
   position: relative;
@@ -180,6 +184,9 @@ button:hover {
   background: var(--surface);
   min-height: 0;
   overflow: hidden;
+}
+.app[data-ipad] {
+  --sidebar-default-scale: 1.4;
 }
 .app.with-sidebar {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -3190,7 +3197,10 @@ button:hover {
     left: 0;
     top: 0;
     bottom: 0;
-    width: min(290px, calc(100vw - 40px));
+    width: min(
+      calc(290px * var(--sidebar-default-scale)),
+      calc(100vw - 40px)
+    );
   }
   /* Keep the backdrop translucent even under the global button hover style. */
   .app .sidebar-scrim {
